@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS audit_log;
+DROP TABLE IF EXISTS staged_diffs;
+DROP TABLE IF EXISTS grant_scopes;
+DROP TABLE IF EXISTS grants;
+DROP TABLE IF EXISTS fact_scopes;
+DROP TABLE IF EXISTS facts;
