@@ -7,8 +7,14 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"memoryvault/internal/bouncer"
 	"memoryvault/internal/config"
 	"memoryvault/internal/db"
+	"memoryvault/internal/embed"
+	"memoryvault/internal/mcptools"
+	"memoryvault/internal/store"
 )
 
 func main() {
@@ -35,6 +41,13 @@ func run() error {
 	}
 	defer pool.Close()
 
-	slog.Info("mcpserver: connected and migrated, tools not yet wired up")
-	return nil
+	st := store.New(pool)
+	emb := embed.Stub{} // TODO: swap for a real Embedder once the Research track lands one
+	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "memoryvault", Version: "v0"}, nil)
+	mcptools.Register(server, st, emb, b)
+
+	slog.Info("mcpserver: connected and migrated, serving on stdio")
+	return server.Run(ctx, &mcp.StdioTransport{})
 }
