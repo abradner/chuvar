@@ -96,6 +96,31 @@ func (s *Store) findDedupeCandidate(ctx context.Context, content string, embeddi
 	}
 }
 
+// GetStagedDiff fetches a single diff by ID. Used by the approval UI's REST API to
+// re-embed a diff's content at approval time — see CommitDiff's doc comment on why
+// the embedding isn't persisted on the diff row itself.
+func (s *Store) GetStagedDiff(ctx context.Context, id string) (StagedDiff, error) {
+	var d StagedDiff
+	var statusStr string
+	var verdictStr *string
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, subject, content, proposed_scopes, target_fact_id, status,
+		        dedupe_verdict, dedupe_candidate_fact_id, created_at, decided_at, decided_by
+		 FROM staged_diffs WHERE id = $1`,
+		id,
+	).Scan(&d.ID, &d.Subject, &d.Content, &d.ProposedScopes, &d.TargetFactID,
+		&statusStr, &verdictStr, &d.DedupeCandidateFactID, &d.CreatedAt, &d.DecidedAt, &d.DecidedBy)
+	if err != nil {
+		return StagedDiff{}, fmt.Errorf("store: get staged diff %s: %w", id, err)
+	}
+	d.Status = DiffStatus(statusStr)
+	if verdictStr != nil {
+		dv := DedupeVerdict(*verdictStr)
+		d.DedupeVerdict = &dv
+	}
+	return d, nil
+}
+
 // ListStagedDiffs returns diffs in the given status, oldest first (review queue
 // order) — used by the approval UI's REST API.
 func (s *Store) ListStagedDiffs(ctx context.Context, status DiffStatus) ([]StagedDiff, error) {
