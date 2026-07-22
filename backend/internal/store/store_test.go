@@ -167,6 +167,29 @@ func TestStagedDiffs_ProposeCommitAndSupersede(t *testing.T) {
 	}
 }
 
+func TestStagedDiffs_Get(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(6)
+	d, err := s.ProposeDiff(ctx, "agent-a", "user's timezone is Australia/Melbourne", []string{"identity.basic"}, vec, nil)
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+
+	got, err := s.GetStagedDiff(ctx, d.ID)
+	if err != nil {
+		t.Fatalf("GetStagedDiff() error = %v", err)
+	}
+	if got.Content != d.Content {
+		t.Errorf("GetStagedDiff().Content = %q, want %q", got.Content, d.Content)
+	}
+
+	if _, err := s.GetStagedDiff(ctx, "00000000-0000-0000-0000-000000000000"); err == nil {
+		t.Fatal("GetStagedDiff() for nonexistent ID: want error, got nil")
+	}
+}
+
 func TestStagedDiffs_DedupeExactDuplicate(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
