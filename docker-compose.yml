@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: memoryvault
+      POSTGRES_PASSWORD: memoryvault_dev_only
+      POSTGRES_DB: memoryvault
+    ports:
+      # Offset from the standard 5432: several projects (e.g. spritz) run concurrently
+      # on this machine and already claim the default port.
+      - "5433:5432"
+    volumes:
+      # PG 18+ images use pg_ctlcluster-style layout: mount the parent dir, not
+      # .../data, or the entrypoint refuses to start against a stale/foreign layout.
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoryvault -d memoryvault"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  postgres_data:
