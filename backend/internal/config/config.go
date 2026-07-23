@@ -15,11 +15,11 @@ type Config struct {
 	// default for "which database," so a missing value is a boot-time error.
 	DatabaseURL string
 
-	// HTTPAddr is where the approval-UI REST API listens. Defaults to all
-	// interfaces for now — nothing in this PR actually serves HTTP yet, so there's
-	// no live exposure. This gets tightened to a loopback-only default once the
-	// REST API (which does have real exposure implications — no auth yet on the
-	// endpoint that commits facts) lands.
+	// HTTPAddr is where the approval-UI REST API listens. Defaults to loopback-only
+	// (127.0.0.1) now that the REST API (this PR) actually serves HTTP — it's
+	// gated by a required auth token (internal/api's package comment) as the
+	// primary control, but binding all interfaces by default on top of that would
+	// still be needlessly wide open. Set it explicitly to widen on purpose.
 	HTTPAddr string
 
 	// RequestTimeout bounds individual request handling.
@@ -36,7 +36,7 @@ func Load() (Config, error) {
 
 	return Config{
 		DatabaseURL:    databaseURL,
-		HTTPAddr:       envOr("HTTP_ADDR", ":8080"),
+		HTTPAddr:       envOr("HTTP_ADDR", "127.0.0.1:8080"),
 		RequestTimeout: envDurationOr("REQUEST_TIMEOUT", 10*time.Second),
 	}, nil
 }

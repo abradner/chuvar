@@ -22,8 +22,8 @@ func TestLoad_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() returned unexpected error: %v", err)
 	}
-	if cfg.HTTPAddr != ":8080" {
-		t.Errorf("HTTPAddr = %q, want %q", cfg.HTTPAddr, ":8080")
+	if cfg.HTTPAddr != "127.0.0.1:8080" {
+		t.Errorf("HTTPAddr = %q, want %q", cfg.HTTPAddr, "127.0.0.1:8080")
 	}
 	if cfg.RequestTimeout != 10*time.Second {
 		t.Errorf("RequestTimeout = %v, want %v", cfg.RequestTimeout, 10*time.Second)

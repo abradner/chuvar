@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -49,7 +50,7 @@ func (a *API) listStagedDiffs(w http.ResponseWriter, r *http.Request) {
 
 	diffs, err := a.Store.ListStagedDiffs(r.Context(), status)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeStoreError(w, http.StatusInternalServerError, "listStagedDiffs", "could not list staged diffs", err)
 		return
 	}
 
@@ -64,39 +65,50 @@ type decisionRequest struct {
 	DecidedBy string `json:"decided_by"`
 }
 
-func decidedByOrDefault(r *http.Request) string {
+// decidedBy extracts who's approving/rejecting a diff. This gets written straight
+// into the permanent decided_by column on the audit trail, so a malformed or
+// missing value is a 400, not a silently fabricated "unknown-reviewer" identity —
+// AGENTS.md §6 is explicit that the consent/audit path must not swallow errors
+// silently, and laundering a bad request into a fake-but-plausible-looking audit
+// identity is exactly that.
+func decidedBy(r *http.Request) (string, error) {
 	var req decisionRequest
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&req) // best-effort; empty body is fine
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return "", fmt.Errorf("decoding request body: %w", err)
 	}
 	if req.DecidedBy == "" {
-		return "unknown-reviewer"
+		return "", errors.New("decided_by is required")
 	}
-	return req.DecidedBy
+	return req.DecidedBy, nil
 }
 
 // approveStagedDiff handles POST /api/staged-diffs/{id}/approve. This is the only
 // path in the whole system, outside the store package's own tests, that turns a
-// staged diff into a real fact — see AGENTS.md §3.1.
+// staged diff into a real fact — see AGENTS.md §3.1. Gated by requireAuth (see the
+// package comment) same as every other route here.
 func (a *API) approveStagedDiff(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	decidedBy := decidedByOrDefault(r)
+	reviewer, err := decidedBy(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 
 	diff, err := a.Store.GetStagedDiff(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err)
+		writeError(w, http.StatusNotFound, errors.New("staged diff not found"))
 		return
 	}
 
 	vec, err := a.Embedder.Embed(r.Context(), diff.Content)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("embedding diff content: %w", err))
+		writeStoreError(w, http.StatusInternalServerError, "approveStagedDiff.Embed", "could not embed diff content", err)
 		return
 	}
 
-	fact, err := a.Store.CommitDiff(r.Context(), id, decidedBy, vec)
+	fact, err := a.Store.CommitDiff(r.Context(), id, reviewer, vec)
 	if err != nil {
-		writeError(w, http.StatusConflict, err)
+		writeStoreError(w, http.StatusConflict, "approveStagedDiff.CommitDiff", "could not approve diff — it may no longer be pending", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, fact)
@@ -105,10 +117,14 @@ func (a *API) approveStagedDiff(w http.ResponseWriter, r *http.Request) {
 // rejectStagedDiff handles POST /api/staged-diffs/{id}/reject.
 func (a *API) rejectStagedDiff(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	decidedBy := decidedByOrDefault(r)
+	reviewer, err := decidedBy(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 
-	if err := a.Store.RejectDiff(r.Context(), id, decidedBy); err != nil {
-		writeError(w, http.StatusConflict, err)
+	if err := a.Store.RejectDiff(r.Context(), id, reviewer); err != nil {
+		writeStoreError(w, http.StatusConflict, "rejectStagedDiff", "could not reject diff — it may no longer be pending", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
