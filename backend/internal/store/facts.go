@@ -3,9 +3,20 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/pgvector/pgvector-go"
 )
+
+// likeEscaper escapes Postgres LIKE metacharacters (and the escape character
+// itself) in a literal string, using LIKE's default escape character (backslash).
+// scope.Validate allows `_` in scope segments — e.g. "identity.date_of_birth" — but
+// Postgres LIKE treats an unescaped `_` as "match any one character." Without this,
+// a granted scope containing `_` would silently widen the WHERE-clause scope filter
+// beyond what was actually granted (e.g. "projects_alpha.%" would also match
+// "projectsXalpha.secret" for any character X) — a real boundary-widening bug this
+// escapes, not a defensive nicety.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `_`, `\_`, `%`, `\%`)
 
 // rrfK is the standard Reciprocal Rank Fusion smoothing constant (Cormack et al.'s
 // original RRF paper uses 60; it's not sensitive to small changes, no need to make
@@ -33,7 +44,7 @@ func (s *Store) SearchFacts(ctx context.Context, queryText string, queryEmbeddin
 
 	prefixes := make([]string, len(grantedScopes))
 	for i, g := range grantedScopes {
-		prefixes[i] = g + ".%"
+		prefixes[i] = likeEscaper.Replace(g) + ".%"
 	}
 
 	rows, err := s.pool.Query(ctx, searchFactsSQL,

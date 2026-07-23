@@ -3,10 +3,12 @@ package store
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgvector/pgvector-go"
 
 	"memoryvault/internal/db"
 )
@@ -164,6 +166,179 @@ func TestStagedDiffs_ProposeCommitAndSupersede(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("SearchFacts() did not return the superseding fact %s among %+v", newFact.ID, results)
+	}
+}
+
+func TestCommitDiff_ConcurrentSupersessionIsSerialized(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(7)
+	original, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Alex", []string{"identity.basic"}, vec, nil)
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	targetFact, err := s.CommitDiff(ctx, original.ID, "human-reviewer", vec)
+	if err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	// Two diffs race to supersede the same fact.
+	diffA, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Alexander", []string{"identity.basic"}, unitVector(8), &targetFact.ID)
+	if err != nil {
+		t.Fatalf("ProposeDiff() (A) error = %v", err)
+	}
+	diffB, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Al", []string{"identity.basic"}, unitVector(9), &targetFact.ID)
+	if err != nil {
+		t.Fatalf("ProposeDiff() (B) error = %v", err)
+	}
+
+	var wg sync.WaitGroup
+	results := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, results[0] = s.CommitDiff(ctx, diffA.ID, "reviewer-a", unitVector(8))
+	}()
+	go func() {
+		defer wg.Done()
+		_, results[1] = s.CommitDiff(ctx, diffB.ID, "reviewer-b", unitVector(9))
+	}()
+	wg.Wait()
+
+	successes := 0
+	for _, err := range results {
+		if err == nil {
+			successes++
+		}
+	}
+	// This must hold regardless of goroutine scheduling: FOR UPDATE on the target
+	// fact row serializes the two transactions, so exactly one supersedes it and
+	// the other gets a clear "already superseded" error — never both silently
+	// succeeding (which would lose one supersession link with no error raised).
+	if successes != 1 {
+		t.Fatalf("concurrent CommitDiff racing to supersede the same fact: got %d successes, want exactly 1 (results: %v)", successes, results)
+	}
+
+	var supersededBy *string
+	if err := pool.QueryRow(ctx, `SELECT superseded_by FROM facts WHERE id = $1`, targetFact.ID).Scan(&supersededBy); err != nil {
+		t.Fatalf("querying superseded_by: %v", err)
+	}
+	if supersededBy == nil {
+		t.Fatal("target fact was not marked superseded by either concurrent commit")
+	}
+}
+
+func TestSearchFacts_ScopeWithUnderscoreDoesNotWildcardMatch(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(10)
+	// Postgres LIKE treats an unescaped `_` as "match any one character." Without
+	// escaping the granted scope before building the LIKE pattern, a grant on
+	// "projects_alpha" would produce the pattern "projects_alpha.%", which would
+	// ALSO match a fact scoped to "projectsXalpha.secret" for any character X in
+	// that position — an unrelated, never-granted scope leaking through.
+	d, err := s.ProposeDiff(ctx, "agent-a", "a fact scoped to an unrelated underscore-adjacent scope",
+		[]string{"projectsXalpha.secret"}, vec, nil)
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	results, err := s.SearchFacts(ctx, "fact", vec, []string{"projects_alpha"}, 10)
+	if err != nil {
+		t.Fatalf("SearchFacts() error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf(`SearchFacts() granted "projects_alpha" leaked a fact scoped to "projectsXalpha.secret": %+v`, results)
+	}
+}
+
+func TestSearchFacts_FactWithNoScopesExcluded(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+
+	// Inserted directly, bypassing the normal staged-diff path, specifically to
+	// exercise the candidate_facts CTE's EXISTS(fact_scopes) clause against a fact
+	// that has zero scope rows — every fact reaching this point through CommitDiff
+	// has at least one, but the query shouldn't rely on that being the only way a
+	// row can exist.
+	var factID string
+	err := pool.QueryRow(ctx,
+		`INSERT INTO facts (content, embedding) VALUES ($1, $2) RETURNING id`,
+		"a fact with no scope tags at all", pgvector.NewVector(unitVector(11)),
+	).Scan(&factID)
+	if err != nil {
+		t.Fatalf("inserting scopeless fact: %v", err)
+	}
+
+	results, err := s.SearchFacts(ctx, "fact", unitVector(11), []string{"identity", "projects", "finances"}, 10)
+	if err != nil {
+		t.Fatalf("SearchFacts() error = %v", err)
+	}
+	for _, r := range results {
+		if r.ID == factID {
+			t.Fatalf("SearchFacts() returned a fact with zero fact_scopes rows: %+v", r)
+		}
+	}
+}
+
+func TestGrantedScopesToSearchFacts_MultiGrantPipelineWithRevocation(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	// Exercises the real GrantedScopes -> SearchFacts pipeline end to end, rather
+	// than hand-building the granted-scope slice like the other intersection test
+	// does — this is closer to what mcptools.read_with_scope_check actually does.
+	vec := unitVector(12)
+	d, err := s.ProposeDiff(ctx, "agent-a", "a fact needing two different grants worth of scope",
+		[]string{"identity.basic", "projects.spritz.read"}, vec, nil)
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	g1, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil)
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"projects.spritz.read"}, "facts", nil); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	granted, err := s.GrantedScopes(ctx, "agent-a")
+	if err != nil {
+		t.Fatalf("GrantedScopes() error = %v", err)
+	}
+	results, err := s.SearchFacts(ctx, "fact", vec, granted, 10)
+	if err != nil {
+		t.Fatalf("SearchFacts() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchFacts() via real 2-grant pipeline = %+v, want 1 result", results)
+	}
+
+	// Revoke one of the two grants that together satisfy the fact's required
+	// scopes — even though the other grant is still active, the fact needs both,
+	// so it must disappear from results.
+	if err := s.RevokeGrant(ctx, g1.ID); err != nil {
+		t.Fatalf("RevokeGrant() error = %v", err)
+	}
+	granted, err = s.GrantedScopes(ctx, "agent-a")
+	if err != nil {
+		t.Fatalf("GrantedScopes() after revoke error = %v", err)
+	}
+	results, err = s.SearchFacts(ctx, "fact", vec, granted, 10)
+	if err != nil {
+		t.Fatalf("SearchFacts() error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("SearchFacts() after revoking one of two required-scope grants = %+v, want none", results)
 	}
 }
 
