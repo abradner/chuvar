@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 )
@@ -14,7 +15,11 @@ type Config struct {
 	// default for "which database," so a missing value is a boot-time error.
 	DatabaseURL string
 
-	// HTTPAddr is where the approval-UI REST API listens.
+	// HTTPAddr is where the approval-UI REST API listens. Defaults to all
+	// interfaces for now — nothing in this PR actually serves HTTP yet, so there's
+	// no live exposure. This gets tightened to a loopback-only default once the
+	// REST API (which does have real exposure implications — no auth yet on the
+	// endpoint that commits facts) lands.
 	HTTPAddr string
 
 	// RequestTimeout bounds individual request handling.
@@ -58,6 +63,10 @@ func envDurationOr(key string, fallback time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
+		// This is set-but-invalid, not merely unset — silently falling back here
+		// would hide a typo from whoever configured it. Still non-fatal: it's a
+		// tuning knob, not required config, so warn rather than fail boot.
+		slog.Warn("config: invalid duration, using default", "key", key, "value", v, "default", fallback, "error", err)
 		return fallback
 	}
 	return d
