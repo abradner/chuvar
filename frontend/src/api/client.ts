@@ -4,6 +4,22 @@
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
 
+// The backend now requires a bearer token on every route (see internal/api's
+// package comment — a deliberately minimal v0 auth answer, one shared secret, not
+// real per-user identity). Baking it into the frontend bundle via a Vite env var
+// means anyone who can load this page can read it out of the built JS — acceptable
+// here because the whole point of the token is "prove you're the one trusted local
+// operator," and the bundle is served from the same trust boundary (loopback,
+// single operator) as the API itself. This is not a pattern to reuse for anything
+// serving untrusted users.
+const AUTH_TOKEN = import.meta.env.VITE_API_AUTH_TOKEN ?? "";
+
+// Every request gets a default timeout so a hung connection can't pin a component's
+// busy state forever (e.g. an Approve button staying disabled with no way to
+// recover short of a full page reload). Callers can still pass their own signal
+// (e.g. to cancel a stale request when its inputs change) — see request() below.
+const DEFAULT_TIMEOUT_MS = 10_000;
+
 export interface StagedDiff {
   id: string;
   subject: string;
@@ -37,10 +53,17 @@ class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit & { signal?: AbortSignal }): Promise<T> {
+  const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const signal = init?.signal ? AbortSignal.any([timeoutSignal, init.signal]) : timeoutSignal;
+
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${AUTH_TOKEN}`,
+    },
     ...init,
+    signal,
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
@@ -53,8 +76,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  listStagedDiffs: (status = "pending") =>
-    request<StagedDiff[]>(`/api/staged-diffs?status=${encodeURIComponent(status)}`),
+  listStagedDiffs: (status = "pending", signal?: AbortSignal) =>
+    request<StagedDiff[]>(`/api/staged-diffs?status=${encodeURIComponent(status)}`, { signal }),
 
   approveStagedDiff: (id: string, decidedBy: string) =>
     request<unknown>(`/api/staged-diffs/${id}/approve`, {
@@ -68,7 +91,8 @@ export const api = {
       body: JSON.stringify({ decided_by: decidedBy }),
     }),
 
-  listGrants: (subject: string) => request<Grant[]>(`/api/grants?subject=${encodeURIComponent(subject)}`),
+  listGrants: (subject: string, signal?: AbortSignal) =>
+    request<Grant[]>(`/api/grants?subject=${encodeURIComponent(subject)}`, { signal }),
 
   createGrant: (subject: string, scopes: string[], depth: string, ttlSeconds?: number) =>
     request<Grant>("/api/grants", {

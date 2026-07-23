@@ -1,0 +1,128 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { GrantsPage } from "./Grants";
+import { api } from "../api/client";
+import type { Grant } from "../api/client";
+
+vi.mock("../api/client", async () => {
+  const actual = await vi.importActual<typeof import("../api/client")>("../api/client");
+  return {
+    ...actual,
+    api: {
+      listGrants: vi.fn(),
+      createGrant: vi.fn(),
+      revokeGrant: vi.fn(),
+    },
+  };
+});
+
+const sampleGrant: Grant = {
+  id: "grant-1",
+  subject: "agent-a",
+  scopes: ["identity.basic"],
+  depth: "facts",
+  active: true,
+  created_at: "2026-07-23T00:00:00Z",
+};
+
+describe("GrantsPage", () => {
+  it("renders grants for the default subject", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([sampleGrant]);
+
+    render(<GrantsPage />);
+
+    expect(await screen.findByText("identity.basic")).toBeInTheDocument();
+  });
+
+  it("rejects a non-numeric TTL instead of silently creating a permanent grant", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([]);
+    await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
+
+    render(<GrantsPage />);
+    await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
+
+    await userEvent.type(screen.getByPlaceholderText("identity.basic, projects.spritz.read"), "identity.basic");
+    await userEvent.type(screen.getByLabelText(/TTL/), "not-a-number");
+    await userEvent.click(screen.getByRole("button", { name: "Create grant" }));
+
+    expect(await screen.findByText(/TTL must be a positive number/)).toBeInTheDocument();
+    // The regression this guards against: NaN * 60 -> NaN -> JSON.stringify(NaN)
+    // is `null` -> the backend would treat that as "no expiry" -> a typo silently
+    // creates a permanent grant. createGrant must never be called with bad input.
+    expect(api.createGrant).not.toHaveBeenCalled();
+  });
+
+  it("rejects a zero or negative TTL", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([]);
+    render(<GrantsPage />);
+    await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
+
+    await userEvent.type(screen.getByPlaceholderText("identity.basic, projects.spritz.read"), "identity.basic");
+    await userEvent.type(screen.getByLabelText(/TTL/), "-5");
+    await userEvent.click(screen.getByRole("button", { name: "Create grant" }));
+
+    expect(await screen.findByText(/TTL must be a positive number/)).toBeInTheDocument();
+    expect(api.createGrant).not.toHaveBeenCalled();
+  });
+
+  it("submits a valid grant with scopes trimmed and TTL converted to seconds", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([]);
+    vi.mocked(api.createGrant).mockResolvedValue(sampleGrant);
+
+    render(<GrantsPage />);
+    await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
+
+    await userEvent.type(
+      screen.getByPlaceholderText("identity.basic, projects.spritz.read"),
+      " identity.basic , projects.spritz.read ",
+    );
+    await userEvent.type(screen.getByLabelText(/TTL/), "5");
+    await userEvent.click(screen.getByRole("button", { name: "Create grant" }));
+
+    await waitFor(() => expect(api.createGrant).toHaveBeenCalled());
+    expect(api.createGrant).toHaveBeenCalledWith(
+      "agent-a",
+      ["identity.basic", "projects.spritz.read"],
+      "facts",
+      300,
+    );
+  });
+
+  it("disables the submit button while a create request is in flight", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([]);
+    let resolveCreate: (g: Grant) => void = () => {};
+    vi.mocked(api.createGrant).mockReturnValue(
+      new Promise((resolve) => {
+        resolveCreate = resolve;
+      }),
+    );
+
+    render(<GrantsPage />);
+    await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
+
+    await userEvent.type(screen.getByPlaceholderText("identity.basic, projects.spritz.read"), "identity.basic");
+    const submitButton = screen.getByRole("button", { name: "Create grant" });
+    await userEvent.click(submitButton);
+
+    expect(submitButton).toBeDisabled();
+
+    resolveCreate(sampleGrant);
+    await waitFor(() => expect(submitButton).not.toBeDisabled());
+  });
+
+  it("removes a grant from the list after revoking it", async () => {
+    vi.mocked(api.listGrants).mockResolvedValueOnce([sampleGrant]).mockResolvedValueOnce([]);
+    vi.mocked(api.revokeGrant).mockResolvedValue(undefined);
+
+    render(<GrantsPage />);
+    await screen.findByText("identity.basic");
+
+    await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("No grants for this subject.")).toBeInTheDocument();
+    });
+    expect(api.revokeGrant).toHaveBeenCalledWith("grant-1");
+  });
+});
