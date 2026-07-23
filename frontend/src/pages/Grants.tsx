@@ -6,26 +6,44 @@ export function GrantsPage() {
   const [grants, setGrants] = useState<Grant[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const [newScopes, setNewScopes] = useState("");
   const [newDepth, setNewDepth] = useState("facts");
   const [newTTLMinutes, setNewTTLMinutes] = useState("");
 
-  const reload = (forSubject: string) => {
+  // Typing in the subject field fires a fetch per keystroke with nothing to
+  // guarantee responses resolve in request order — without cancelling the
+  // previous in-flight request, a slow response for an earlier value (e.g. "a")
+  // could resolve after a faster one for the current value ("agent-a") and
+  // silently overwrite the list with the wrong subject's grants. An
+  // AbortController per effect run, cancelled on the next run/unmount, fixes
+  // that: a superseded request never gets to call setGrants.
+  useEffect(() => {
+    const controller = new AbortController();
     api
-      .listGrants(forSubject)
+      .listGrants(subject.trim(), controller.signal)
+      .then(setGrants)
+      .catch((e: unknown) => {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        setError(e instanceof ApiError ? e.message : String(e));
+      });
+    return () => controller.abort();
+  }, [subject]);
+
+  const reload = () => {
+    api
+      .listGrants(subject.trim())
       .then(setGrants)
       .catch((e: unknown) => setError(e instanceof ApiError ? e.message : String(e)));
   };
-
-  useEffect(() => reload(subject), [subject]);
 
   const revoke = async (id: string) => {
     setBusyId(id);
     setError(null);
     try {
       await api.revokeGrant(id);
-      reload(subject);
+      reload();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -36,6 +54,7 @@ export function GrantsPage() {
   const createGrant = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
+
     const scopes = newScopes
       .split(",")
       .map((s) => s.trim())
@@ -44,17 +63,31 @@ export function GrantsPage() {
       setError("At least one scope is required");
       return;
     }
+
+    // A non-numeric or blank TTL must not silently become "no expiry" — this
+    // product's whole premise is time-boxed access, so a typo here creating a
+    // permanent grant with no error shown would be exactly the wrong failure
+    // mode. Number("") is 0 and Number("abc") is NaN; both need to be rejected
+    // explicitly rather than falling through to `undefined` (no expiry).
+    let ttlSeconds: number | undefined;
+    if (newTTLMinutes.trim() !== "") {
+      const minutes = Number(newTTLMinutes);
+      if (!Number.isFinite(minutes) || minutes <= 0) {
+        setError("TTL must be a positive number of minutes, or left blank for no expiry");
+        return;
+      }
+      ttlSeconds = minutes * 60;
+    }
+
+    setCreating(true);
     try {
-      await api.createGrant(
-        subject,
-        scopes,
-        newDepth,
-        newTTLMinutes ? Number(newTTLMinutes) * 60 : undefined,
-      );
+      await api.createGrant(subject.trim(), scopes, newDepth, ttlSeconds);
       setNewScopes("");
-      reload(subject);
+      reload();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -106,14 +139,23 @@ export function GrantsPage() {
         </label>
         <label>
           TTL (minutes, blank = no expiry)
+          {/* type="text" rather than type="number" is deliberate: a native number
+              input silently blocks form submission on an out-of-range/invalid
+              value (varies by browser) before our own onSubmit handler ever runs,
+              so the clearer, consistently-styled validation message below never
+              gets a chance to show. inputMode still gives mobile keyboards the
+              numeric layout; our own JS validation is the single source of truth
+              for what counts as valid. */}
           <input
-            type="number"
-            min="1"
+            type="text"
+            inputMode="numeric"
             value={newTTLMinutes}
             onChange={(e) => setNewTTLMinutes(e.target.value)}
           />
         </label>
-        <button type="submit">Create grant</button>
+        <button type="submit" disabled={creating}>
+          Create grant
+        </button>
       </form>
     </section>
   );
