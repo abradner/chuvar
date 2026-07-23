@@ -2,7 +2,6 @@ package mcptools
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -10,9 +9,9 @@ import (
 	"memoryvault/internal/store"
 )
 
-type listGrantsArgs struct {
-	Subject string `json:"subject" jsonschema:"the agent/client identity whose grants to list"`
-}
+// listGrantsArgs is intentionally empty — subject is bound at server construction
+// (see Register's doc comment), not supplied by the caller.
+type listGrantsArgs struct{}
 
 type grantView struct {
 	ID        string   `json:"id"`
@@ -27,22 +26,21 @@ type listGrantsOutput struct {
 	Grants []grantView `json:"grants"`
 }
 
-func registerListGrants(s *mcp.Server, st *store.Store) {
+func registerListGrants(s *mcp.Server, subject string, st *store.Store) {
 	falsePtr := false
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "list_grants",
-		Description: "List the scope grants held by a subject (agent/client identity), including " +
-			"expired or revoked ones. Use this to check what a subject can currently read before " +
-			"calling read_with_scope_check, or to show a human what access an agent has.",
+		Description: "List the calling agent's own scope grants, including expired or revoked " +
+			"ones. Use this to check what you can currently read before calling read_with_scope_check.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    true,
 			DestructiveHint: &falsePtr,
 			IdempotentHint:  true,
 		},
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args listGrantsArgs) (*mcp.CallToolResult, listGrantsOutput, error) {
-		grants, err := st.ListGrants(ctx, args.Subject)
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ listGrantsArgs) (*mcp.CallToolResult, listGrantsOutput, error) {
+		grants, err := st.ListGrants(ctx, subject)
 		if err != nil {
-			return nil, listGrantsOutput{}, fmt.Errorf("list_grants: %w", err)
+			return nil, listGrantsOutput{}, toolError("list_grants", err)
 		}
 
 		now := time.Now()
