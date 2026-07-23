@@ -27,10 +27,18 @@ type Classifier interface {
 }
 
 // PassthroughClassifier is the v0 stub: it never overrides the caller-proposed
-// scopes. This means a careless or compromised agent can currently mistag a fact's
-// scope — the real classifier (once built) is what's meant to catch that; until
-// then, human review at approval time is the only backstop, which is one more
-// reason the "no direct writes" rule (AGENTS.md §3.1) isn't optional.
+// scopes. Scope tags are what read_with_scope_check filters on at retrieval time —
+// they ARE the access-control boundary (AGENTS.md §3.2) — so trusting the proposer's
+// own tags with no cross-check is a real confidentiality risk, not a labeling
+// nicety: a compromised or careless agent could propose a sensitive fact tagged
+// with an unrelated, broadly-granted scope (e.g. a real name or health detail
+// tagged "preferences.coffee" instead of something under "identity"), and if a
+// human reviewer approves it — plausible, since there's no fixed taxonomy yet
+// (§3.4) to sanity-check the tag against — it becomes readable by anyone holding
+// that broad, commonly-granted scope. The real classifier (once built) is what's
+// meant to catch that; until then, careful human review at approval time is the
+// only backstop, which is one more reason the "no direct writes" rule (§3.1) isn't
+// optional.
 type PassthroughClassifier struct{}
 
 func (PassthroughClassifier) Classify(_ context.Context, _ string) ([]scope.Scope, error) {
@@ -51,21 +59,31 @@ func New(s *store.Store, e embed.Embedder, c Classifier) *Bouncer {
 // diff, including the dedupe verdict the store computed. targetFactID, if set,
 // means this proposal claims to update/supersede an existing fact.
 func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, proposedScopes []scope.Scope, targetFactID *string) (store.StagedDiff, error) {
+	// Validate the caller's input before doing any work on its behalf — in
+	// particular before calling Classify, which is a stub today but is meant to
+	// become a real (likely external/costly) call; no reason to pay that for a
+	// request that was always going to be rejected as malformed.
+	for _, sc := range proposedScopes {
+		if err := scope.Validate(sc); err != nil {
+			return store.StagedDiff{}, fmt.Errorf("bouncer: %w", err)
+		}
+	}
+
 	scopes := proposedScopes
 	classified, err := b.Classifier.Classify(ctx, content)
 	if err != nil {
 		return store.StagedDiff{}, fmt.Errorf("bouncer: classify: %w", err)
 	}
 	if len(classified) > 0 {
+		for _, sc := range classified {
+			if err := scope.Validate(sc); err != nil {
+				return store.StagedDiff{}, fmt.Errorf("bouncer: classifier produced invalid scope: %w", err)
+			}
+		}
 		scopes = classified
 	}
 	if len(scopes) == 0 {
 		return store.StagedDiff{}, fmt.Errorf("bouncer: no scopes proposed or classified for content")
-	}
-	for _, sc := range scopes {
-		if err := scope.Validate(sc); err != nil {
-			return store.StagedDiff{}, fmt.Errorf("bouncer: %w", err)
-		}
 	}
 
 	vec, err := b.Embedder.Embed(ctx, content)
