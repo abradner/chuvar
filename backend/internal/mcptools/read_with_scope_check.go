@@ -12,9 +12,8 @@ import (
 )
 
 type readArgs struct {
-	Subject         string   `json:"subject" jsonschema:"the requesting agent/client identity"`
 	Query           string   `json:"query" jsonschema:"free-text search query"`
-	RequestedScopes []string `json:"requested_scopes" jsonschema:"scopes this query is expected to touch, checked against the subject's grants before any search runs"`
+	RequestedScopes []string `json:"requested_scopes" jsonschema:"scopes this query is expected to touch, checked against your grants before any search runs"`
 	Limit           int      `json:"limit,omitempty" jsonschema:"max facts to return, default 20"`
 }
 
@@ -33,16 +32,16 @@ type readOutput struct {
 	MissingScopes []string   `json:"missing_scopes,omitempty"`
 }
 
-func registerReadWithScopeCheck(s *mcp.Server, st *store.Store, emb embed.Embedder) {
+func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, emb embed.Embedder) {
 	falsePtr := false
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "read_with_scope_check",
-		Description: "Search memory for facts matching a query. Checks requested_scopes against the " +
-			"subject's active grants before running any search; if scopes are missing, returns " +
+		Description: "Search memory for facts matching a query. Checks requested_scopes against your " +
+			"active grants before running any search; if scopes are missing, returns " +
 			"status=insufficient_scope naming exactly which scopes a human would need to grant, and " +
-			"runs no search. The actual result set is always filtered by the subject's full granted " +
-			"scopes (not just requested_scopes) — a fact is only returned if every one of its scope " +
-			"tags is covered by a grant.",
+			"runs no search. The actual result set is always filtered by your full granted scopes " +
+			"(not just requested_scopes) — a fact is only returned if every one of its scope tags is " +
+			"covered by a grant.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    true,
 			DestructiveHint: &falsePtr,
@@ -50,18 +49,26 @@ func registerReadWithScopeCheck(s *mcp.Server, st *store.Store, emb embed.Embedd
 			OpenWorldHint:   &falsePtr,
 		},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args readArgs) (*mcp.CallToolResult, readOutput, error) {
+		if len(args.RequestedScopes) > maxScopesPerRequest {
+			return nil, readOutput{}, fmt.Errorf("read_with_scope_check: requested_scopes exceeds max of %d", maxScopesPerRequest)
+		}
 		requested := toScopes(args.RequestedScopes)
+		for _, r := range requested {
+			if err := scope.Validate(r); err != nil {
+				return nil, readOutput{}, fmt.Errorf("read_with_scope_check: %w", err)
+			}
+		}
 
-		grantedStrs, err := st.GrantedScopes(ctx, args.Subject)
+		grantedStrs, err := st.GrantedScopes(ctx, subject)
 		if err != nil {
-			return nil, readOutput{}, fmt.Errorf("read_with_scope_check: %w", err)
+			return nil, readOutput{}, toolError("read_with_scope_check", err)
 		}
 		granted := toScopes(grantedStrs)
 
 		if missing := scope.Missing(requested, granted); len(missing) > 0 {
 			missingStrs := fromScopes(missing)
-			if err := st.LogAudit(ctx, "insufficient_scope", args.Subject, nil, nil, nil, missingStrs); err != nil {
-				return nil, readOutput{}, fmt.Errorf("read_with_scope_check: %w", err)
+			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, missingStrs); err != nil {
+				return nil, readOutput{}, toolError("read_with_scope_check", err)
 			}
 			return nil, readOutput{Status: "insufficient_scope", MissingScopes: missingStrs}, nil
 		}
@@ -75,21 +82,21 @@ func registerReadWithScopeCheck(s *mcp.Server, st *store.Store, emb embed.Embedd
 		if emb != nil {
 			queryVec, err = emb.Embed(ctx, args.Query)
 			if err != nil {
-				return nil, readOutput{}, fmt.Errorf("read_with_scope_check: embed query: %w", err)
+				return nil, readOutput{}, toolError("read_with_scope_check", err)
 			}
 		}
 
 		facts, err := st.SearchFacts(ctx, args.Query, queryVec, grantedStrs, limit)
 		if err != nil {
-			return nil, readOutput{}, fmt.Errorf("read_with_scope_check: %w", err)
+			return nil, readOutput{}, toolError("read_with_scope_check", err)
 		}
 
 		out := readOutput{Status: "ok"}
 		for _, f := range facts {
 			out.Facts = append(out.Facts, factView{ID: f.ID, Content: f.Content, Scopes: f.Scopes})
 		}
-		if err := st.LogAudit(ctx, "read", args.Subject, nil, nil, nil, grantedStrs); err != nil {
-			return nil, readOutput{}, fmt.Errorf("read_with_scope_check: %w", err)
+		if err := st.LogAudit(ctx, "read", subject, nil, nil, nil, grantedStrs); err != nil {
+			return nil, readOutput{}, toolError("read_with_scope_check", err)
 		}
 		return nil, out, nil
 	})

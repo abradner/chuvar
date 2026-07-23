@@ -10,7 +10,6 @@ import (
 )
 
 type proposeWriteArgs struct {
-	Subject        string   `json:"subject" jsonschema:"the proposing agent/client identity"`
 	Content        string   `json:"content" jsonschema:"the fact being proposed, in plain text"`
 	ProposedScopes []string `json:"proposed_scopes" jsonschema:"scopes this fact touches; may be overridden by the bouncer's classifier once one exists beyond the v0 passthrough stub"`
 	TargetFactID   string   `json:"target_fact_id,omitempty" jsonschema:"set when this proposal updates/supersedes an existing fact by ID"`
@@ -23,7 +22,7 @@ type proposeWriteOutput struct {
 	CandidateFactID *string `json:"candidate_fact_id,omitempty"`
 }
 
-func registerProposeWrite(s *mcp.Server, b *bouncer.Bouncer) {
+func registerProposeWrite(s *mcp.Server, subject string, b *bouncer.Bouncer) {
 	falsePtr := false
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "propose_write",
@@ -39,6 +38,13 @@ func registerProposeWrite(s *mcp.Server, b *bouncer.Bouncer) {
 			IdempotentHint:  false,
 		},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args proposeWriteArgs) (*mcp.CallToolResult, proposeWriteOutput, error) {
+		if len(args.ProposedScopes) > maxScopesPerRequest {
+			return nil, proposeWriteOutput{}, fmt.Errorf("propose_write: proposed_scopes exceeds max of %d", maxScopesPerRequest)
+		}
+		if len(args.Content) > maxContentLength {
+			return nil, proposeWriteOutput{}, fmt.Errorf("propose_write: content exceeds max length of %d", maxContentLength)
+		}
+
 		scopes := toScopes(args.ProposedScopes)
 
 		var target *string
@@ -46,9 +52,17 @@ func registerProposeWrite(s *mcp.Server, b *bouncer.Bouncer) {
 			target = &args.TargetFactID
 		}
 
-		diff, err := b.ProposeWrite(ctx, args.Subject, args.Content, scopes, target)
+		diff, err := b.ProposeWrite(ctx, subject, args.Content, scopes, target)
 		if err != nil {
-			return nil, proposeWriteOutput{}, fmt.Errorf("propose_write: %w", err)
+			// bouncer.ProposeWrite's errors mix genuine input-validation failures
+			// (safe and useful to show the agent verbatim, e.g. a malformed scope)
+			// with wrapped store/DB errors (not safe — could contain raw driver
+			// text). Rather than trying to split those apart under time pressure,
+			// this masks all of them uniformly via toolError, same as the other
+			// two tools — trading some agent self-correction ergonomics for not
+			// leaking internals. Worth revisiting with a proper error taxonomy
+			// (e.g. a bouncer.ValidationError type) as a fast follow-up.
+			return nil, proposeWriteOutput{}, toolError("propose_write", err)
 		}
 
 		out := proposeWriteOutput{

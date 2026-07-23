@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -30,6 +31,17 @@ func run() error {
 		return err
 	}
 
+	// MCP_SUBJECT identifies who this server process is authorized to act as.
+	// Required, fail-fast — see mcptools.Register's doc comment for why this can't
+	// be a client-supplied tool argument: with the stdio transport, whoever
+	// launches this process (an agent host spawning one server per session) IS the
+	// trust boundary, and the host is expected to set this to the identity of the
+	// agent session it's spawning the server for.
+	subject, ok := os.LookupEnv("MCP_SUBJECT")
+	if !ok || subject == "" {
+		return fmt.Errorf("mcpserver: required environment variable MCP_SUBJECT is not set")
+	}
+
 	if err := db.Migrate(cfg.DatabaseURL); err != nil {
 		return err
 	}
@@ -46,8 +58,8 @@ func run() error {
 	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "memoryvault", Version: "v0"}, nil)
-	mcptools.Register(server, st, emb, b)
+	mcptools.Register(server, subject, st, emb, b)
 
-	slog.Info("mcpserver: connected and migrated, serving on stdio")
+	slog.Info("mcpserver: connected and migrated, serving on stdio", "subject", subject)
 	return server.Run(ctx, &mcp.StdioTransport{})
 }

@@ -14,10 +14,11 @@ import (
 	"memoryvault/internal/store"
 )
 
-// testSession spins up a real MCP server (with all v0 tools registered) and a real
-// client connected over an in-memory transport, so these tests exercise the actual
-// protocol marshaling/unmarshaling, not just the Go function calls underneath it.
-func testSession(t *testing.T) (*mcp.ClientSession, *store.Store) {
+// testSession spins up a real MCP server bound to subject (with all v0 tools
+// registered) and a real client connected over an in-memory transport, so these
+// tests exercise the actual protocol marshaling/unmarshaling, not just the Go
+// function calls underneath it.
+func testSession(t *testing.T, subject string) (*mcp.ClientSession, *store.Store) {
 	t.Helper()
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
@@ -42,7 +43,7 @@ func testSession(t *testing.T) (*mcp.ClientSession, *store.Store) {
 	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "memoryvault-test", Version: "test"}, nil)
-	Register(server, st, emb, b)
+	Register(server, subject, st, emb, b)
 
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
@@ -81,14 +82,14 @@ func callTool[T any](t *testing.T, session *mcp.ClientSession, name string, args
 }
 
 func TestListGrants_ViaMCP(t *testing.T) {
-	session, st := testSession(t)
+	session, st := testSession(t, "agent-a")
 	ctx := context.Background()
 
 	if _, err := st.CreateGrant(ctx, "agent-a", []string{"identity.basic", "preferences.coffee"}, "facts", nil); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
-	out := callTool[listGrantsOutput](t, session, "list_grants", listGrantsArgs{Subject: "agent-a"})
+	out := callTool[listGrantsOutput](t, session, "list_grants", listGrantsArgs{})
 	if len(out.Grants) != 1 {
 		t.Fatalf("list_grants returned %d grants, want 1", len(out.Grants))
 	}
@@ -100,11 +101,78 @@ func TestListGrants_ViaMCP(t *testing.T) {
 	}
 }
 
+// TestSubjectIsBoundNotClientSupplied is the regression test for the review
+// finding that `subject` used to be a client-supplied, unauthenticated tool
+// argument: any caller could pass any subject string and act on their behalf
+// (enumerate their grants, read everything they're granted, forge writes
+// attributed to them). Now subject is bound once at server construction — this
+// proves two independently-bound sessions each only ever see their own subject's
+// grants, with no tool argument able to cross that boundary (the args structs
+// literally have no Subject field anymore, so this is also enforced at compile
+// time, but this test proves the runtime behavior end to end).
+func TestSubjectIsBoundNotClientSupplied(t *testing.T) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set; skipping mcptools integration tests")
+	}
+	if err := db.Migrate(url); err != nil {
+		t.Fatalf("db.Migrate() error = %v", err)
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log`); err != nil {
+		t.Fatalf("truncating tables: %v", err)
+	}
+	st := store.New(pool)
+
+	if _, err := st.CreateGrant(ctx, "alice", []string{"identity.sensitive"}, "facts", nil); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+	if _, err := st.CreateGrant(ctx, "bob", []string{"preferences.coffee"}, "facts", nil); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	emb := embed.Stub{}
+	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
+
+	newSession := func(subject string) *mcp.ClientSession {
+		server := mcp.NewServer(&mcp.Implementation{Name: "memoryvault-test", Version: "test"}, nil)
+		Register(server, subject, st, emb, b)
+		clientTransport, serverTransport := mcp.NewInMemoryTransports()
+		if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
+			t.Fatalf("server.Connect() error = %v", err)
+		}
+		client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "test"}, nil)
+		session, err := client.Connect(ctx, clientTransport, nil)
+		if err != nil {
+			t.Fatalf("client.Connect() error = %v", err)
+		}
+		t.Cleanup(func() { _ = session.Close() })
+		return session
+	}
+
+	aliceSession := newSession("alice")
+	bobSession := newSession("bob")
+
+	aliceGrants := callTool[listGrantsOutput](t, aliceSession, "list_grants", listGrantsArgs{})
+	if len(aliceGrants.Grants) != 1 || aliceGrants.Grants[0].Scopes[0] != "identity.sensitive" {
+		t.Fatalf("alice's session list_grants = %+v, want only her own identity.sensitive grant", aliceGrants.Grants)
+	}
+
+	bobGrants := callTool[listGrantsOutput](t, bobSession, "list_grants", listGrantsArgs{})
+	if len(bobGrants.Grants) != 1 || bobGrants.Grants[0].Scopes[0] != "preferences.coffee" {
+		t.Fatalf("bob's session list_grants = %+v, want only his own preferences.coffee grant", bobGrants.Grants)
+	}
+}
+
 func TestReadWithScopeCheck_InsufficientScope_ViaMCP(t *testing.T) {
-	session, _ := testSession(t)
+	session, _ := testSession(t, "agent-a")
 
 	out := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
-		Subject:         "agent-a",
 		Query:           "coffee preference",
 		RequestedScopes: []string{"preferences.coffee"},
 	})
@@ -116,12 +184,31 @@ func TestReadWithScopeCheck_InsufficientScope_ViaMCP(t *testing.T) {
 	}
 }
 
+func TestReadWithScopeCheck_TooManyRequestedScopesIsError(t *testing.T) {
+	session, _ := testSession(t, "agent-a")
+
+	scopes := make([]string, maxScopesPerRequest+1)
+	for i := range scopes {
+		scopes[i] = "identity.basic"
+	}
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "read_with_scope_check",
+		Arguments: readArgs{Query: "x", RequestedScopes: scopes},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() transport error = %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("read_with_scope_check with more than maxScopesPerRequest scopes: want a tool error, got success")
+	}
+}
+
 func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
-	session, st := testSession(t)
+	session, st := testSession(t, "agent-a")
 	ctx := context.Background()
 
 	proposed := callTool[proposeWriteOutput](t, session, "propose_write", proposeWriteArgs{
-		Subject:        "agent-a",
 		Content:        "user's favorite coffee order is a flat white",
 		ProposedScopes: []string{"preferences.coffee"},
 	})
@@ -140,7 +227,6 @@ func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 	beforeCommit := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
-		Subject:         "agent-a",
 		Query:           "coffee",
 		RequestedScopes: []string{"preferences.coffee"},
 	})
@@ -161,7 +247,6 @@ func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 	}
 
 	afterCommit := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
-		Subject:         "agent-a",
 		Query:           "coffee",
 		RequestedScopes: []string{"preferences.coffee"},
 	})
