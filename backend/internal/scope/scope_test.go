@@ -2,6 +2,7 @@ package scope
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -28,6 +29,44 @@ func TestValidate(t *testing.T) {
 				t.Errorf("Validate(%q) error = %v, wantErr %v", tt.scope, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidate_MaxLength(t *testing.T) {
+	tooLong := Scope("a" + strings.Repeat(".b", (MaxLength/2)+1))
+	if err := Validate(tooLong); err == nil {
+		t.Errorf("Validate() on a %d-char scope: want error, got nil", len(tooLong))
+	}
+
+	justUnderLimit := Scope(strings.Repeat("a", MaxLength))
+	if err := Validate(justUnderLimit); err != nil {
+		t.Errorf("Validate() on a %d-char scope (at MaxLength): want nil, got %v", len(justUnderLimit), err)
+	}
+}
+
+func TestAnyCovers(t *testing.T) {
+	granted := []Scope{"identity.basic", "projects.spritz"}
+
+	tests := []struct {
+		name string
+		r    Scope
+		want bool
+	}{
+		{"exact match on first granted scope", "identity.basic", true},
+		{"descendant of second granted scope", "projects.spritz.read", true},
+		{"not covered by any granted scope", "finances.budget", false},
+		{"segment-boundary near-miss", "projects.spritzy", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AnyCovers(granted, tt.r); got != tt.want {
+				t.Errorf("AnyCovers(%v, %q) = %v, want %v", granted, tt.r, got, tt.want)
+			}
+		})
+	}
+
+	if AnyCovers(nil, "identity.basic") {
+		t.Error("AnyCovers(nil, ...) = true, want false")
 	}
 }
 

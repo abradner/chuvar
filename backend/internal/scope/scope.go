@@ -16,12 +16,22 @@ type Scope string
 
 var segmentPattern = regexp.MustCompile(`^[a-z0-9_]+$`)
 
-// Validate checks that s is well-formed: non-empty, dot-delimited, lowercase
-// alphanumeric/underscore segments. It does not check the segments against any
-// known taxonomy — there isn't a fixed one (yet).
+// MaxLength bounds how long a single scope string can be. No real taxonomy needs
+// anywhere near this many characters — it exists to stop a pathological input from
+// becoming a cheap CPU-amplification lever downstream, where every granted scope
+// gets turned into a LIKE pattern evaluated against every fact_scopes row on every
+// read (internal/store/facts.go).
+const MaxLength = 256
+
+// Validate checks that s is well-formed: non-empty, bounded length, dot-delimited,
+// lowercase alphanumeric/underscore segments. It does not check the segments
+// against any known taxonomy — there isn't a fixed one (yet).
 func Validate(s Scope) error {
 	if s == "" {
 		return fmt.Errorf("scope: empty scope is not valid")
+	}
+	if len(s) > MaxLength {
+		return fmt.Errorf("scope: %q exceeds max length %d", s, MaxLength)
 	}
 	segments := strings.Split(string(s), ".")
 	for _, seg := range segments {
