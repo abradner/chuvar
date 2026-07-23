@@ -8,6 +8,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"net/url"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5" // registers the "pgx5" driver scheme
@@ -41,7 +42,12 @@ func Migrate(databaseURL string) error {
 		return fmt.Errorf("db: loading embedded migrations: %w", err)
 	}
 
-	m, err := migrate.NewWithSourceInstance("iofs", source, toPgx5URL(databaseURL))
+	pgx5URL, err := toPgx5URL(databaseURL)
+	if err != nil {
+		return err
+	}
+
+	m, err := migrate.NewWithSourceInstance("iofs", source, pgx5URL)
 	if err != nil {
 		return fmt.Errorf("db: initializing migrator: %w", err)
 	}
@@ -53,18 +59,22 @@ func Migrate(databaseURL string) error {
 	return nil
 }
 
-// toPgx5URL rewrites a standard postgres:// URL to the pgx5:// scheme that the
-// golang-migrate pgx/v5 driver (imported for its side-effecting init/registration
-// below) expects.
-func toPgx5URL(databaseURL string) string {
-	return "pgx5://" + trimScheme(databaseURL)
-}
-
-func trimScheme(url string) string {
-	for _, prefix := range []string{"postgres://", "postgresql://"} {
-		if len(url) > len(prefix) && url[:len(prefix)] == prefix {
-			return url[len(prefix):]
-		}
+// toPgx5URL rewrites a postgres:// or postgresql:// URL to the pgx5:// scheme that
+// the golang-migrate pgx/v5 driver (imported for its side-effecting init/
+// registration above) expects. Parses with net/url rather than a raw string-prefix
+// check, so it doesn't silently mishandle query params, IPv6 hosts, or an
+// unrecognized scheme — a garbled connection string that fails downstream with a
+// confusing driver error is worse than failing here with a clear one.
+func toPgx5URL(databaseURL string) (string, error) {
+	u, err := url.Parse(databaseURL)
+	if err != nil {
+		return "", fmt.Errorf("db: parsing DATABASE_URL: %w", err)
 	}
-	return url
+	switch u.Scheme {
+	case "postgres", "postgresql":
+		u.Scheme = "pgx5"
+	default:
+		return "", fmt.Errorf("db: unsupported DATABASE_URL scheme %q (expected postgres:// or postgresql://)", u.Scheme)
+	}
+	return u.String(), nil
 }

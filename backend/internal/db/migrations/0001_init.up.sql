@@ -30,7 +30,19 @@ CREATE TABLE facts (
     created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     valid_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
     invalid_at             TIMESTAMPTZ,
-    expired_at             TIMESTAMPTZ
+    expired_at             TIMESTAMPTZ,
+
+    -- The three columns that together mean "this fact has been superseded" must
+    -- change as a unit — nothing should ever set one without the other two. This is
+    -- app-layer convention in store.CommitDiff today (and the only writer of these
+    -- columns), but a CHECK constraint here means a future write path can't silently
+    -- desync them; that's exactly the kind of invariant a comment doesn't actually
+    -- enforce.
+    CONSTRAINT facts_supersession_consistency CHECK (
+        (invalid_at IS NULL) = (expired_at IS NULL)
+        AND (invalid_at IS NULL) = (superseded_by IS NULL)
+        AND (invalid_at IS NULL OR invalid_at >= valid_at)
+    )
 );
 
 -- Partial HNSW index: only non-null embeddings need it, and there's no point paying
@@ -42,6 +54,8 @@ CREATE INDEX facts_embedding_hnsw_idx ON facts
 CREATE INDEX facts_content_tsv_idx ON facts USING gin (content_tsv);
 
 -- Fast lookup of "still-current" facts (used by both retrieval and the dashboard).
+-- Filtering on invalid_at alone is sufficient — facts_supersession_consistency above
+-- guarantees expired_at and superseded_by are NULL exactly when invalid_at is.
 CREATE INDEX facts_active_idx ON facts (id) WHERE invalid_at IS NULL;
 
 -- Scope tags: a normalized junction table, not just an array column on facts.
@@ -86,6 +100,16 @@ CREATE INDEX grant_scopes_scope_idx ON grant_scopes (scope text_pattern_ops);
 -- Staged diffs: the only path a proposed fact can take toward becoming a real fact.
 -- No code anywhere should insert directly into `facts` outside of committing a
 -- staged diff — see AGENTS.md §3.1.
+-- proposed_scopes is a plain array here, unlike fact_scopes/grant_scopes' junction-
+-- table treatment above — deliberately: staged diffs are never scope-filtered in a
+-- hot retrieval path (only committed facts are), so there's nothing for a junction
+-- table to make faster, and it would just be another place to keep in sync.
+--
+-- There's no DB-level guard against two diffs racing to commit against the same
+-- target_fact_id — that's enforced by the application locking the target fact row
+-- (SELECT ... FOR UPDATE) inside CommitDiff's transaction before superseding it. Any
+-- future write path touching staged_diffs.status or a fact's supersession must
+-- follow the same locking discipline; the schema itself doesn't stop a bypass.
 CREATE TABLE staged_diffs (
     id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     subject                   TEXT NOT NULL,
@@ -132,3 +156,13 @@ CREATE TABLE audit_log (
 
 CREATE INDEX audit_log_subject_idx ON audit_log (subject);
 CREATE INDEX audit_log_created_at_idx ON audit_log (created_at);
+
+-- facts.source_staged_diff_id couldn't be a FK at CREATE TABLE time above — staged_diffs
+-- didn't exist yet — but it's a real, always-populated column (every committed fact
+-- has one) written on every CommitDiff, so it gets the same referential integrity as
+-- every other cross-table pointer in this schema, not left as a bare UUID.
+ALTER TABLE facts
+    ADD CONSTRAINT facts_source_staged_diff_id_fkey
+    FOREIGN KEY (source_staged_diff_id) REFERENCES staged_diffs(id);
+
+CREATE INDEX facts_source_staged_diff_id_idx ON facts (source_staged_diff_id);
