@@ -48,6 +48,24 @@ func TestStub_DistinctInputsDiffer(t *testing.T) {
 	}
 }
 
+func TestStub_EmptyString(t *testing.T) {
+	s := Stub{}
+	vec, err := s.Embed(context.Background(), "")
+	if err != nil {
+		t.Fatalf("Embed(\"\") error = %v", err)
+	}
+	if len(vec) != Dim {
+		t.Fatalf("len(vec) = %d, want %d", len(vec), Dim)
+	}
+	var sumSquares float64
+	for _, v := range vec {
+		sumSquares += float64(v) * float64(v)
+	}
+	if math.Abs(math.Sqrt(sumSquares)-1.0) > 1e-4 {
+		t.Errorf("Embed(\"\") not unit-normalized: ||vec|| = %v", math.Sqrt(sumSquares))
+	}
+}
+
 func TestStub_UnitNormalized(t *testing.T) {
 	s := Stub{}
 	vec, err := s.Embed(context.Background(), "some arbitrary fact content")
