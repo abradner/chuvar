@@ -1,10 +1,10 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
-
-	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/pgvector/pgvector-go"
@@ -222,9 +222,29 @@ func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedd
 	f.Scopes = scopes
 
 	if targetFactID != nil {
+		// Lock the target fact row before checking/setting its supersession state.
+		// Without this, two diffs racing to commit against the same target fact
+		// could both pass an unlocked "WHERE invalid_at IS NULL" check, both
+		// UPDATE, and both get marked committed — silently losing one
+		// supersession link with no error raised (exactly the kind of silent
+		// partial failure AGENTS.md §6 forbids in the write/audit path). FOR
+		// UPDATE serializes the two transactions: the second one blocks here
+		// until the first commits, then re-reads the now-current invalid_at and
+		// correctly detects the conflict instead of racing past it.
+		var targetInvalidAt *time.Time
+		err := tx.QueryRow(ctx,
+			`SELECT invalid_at FROM facts WHERE id = $1 FOR UPDATE`,
+			*targetFactID,
+		).Scan(&targetInvalidAt)
+		if err != nil {
+			return Fact{}, fmt.Errorf("store: lock target fact %s: %w", *targetFactID, err)
+		}
+		if targetInvalidAt != nil {
+			return Fact{}, fmt.Errorf("store: target fact %s was already superseded by another diff", *targetFactID)
+		}
+
 		if _, err := tx.Exec(ctx,
-			`UPDATE facts SET invalid_at = $2, expired_at = now(), superseded_by = $3
-			 WHERE id = $1 AND invalid_at IS NULL`,
+			`UPDATE facts SET invalid_at = $2, expired_at = now(), superseded_by = $3 WHERE id = $1`,
 			*targetFactID, f.ValidAt, f.ID,
 		); err != nil {
 			return Fact{}, fmt.Errorf("store: supersede target fact %s: %w", *targetFactID, err)
