@@ -6,7 +6,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"memoryvault/internal/store"
+	"chuvar/internal/store"
 )
 
 // listGrantsArgs is intentionally empty — subject is bound at server construction

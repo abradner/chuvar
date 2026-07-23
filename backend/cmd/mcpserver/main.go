@@ -10,12 +10,12 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"memoryvault/internal/bouncer"
-	"memoryvault/internal/config"
-	"memoryvault/internal/db"
-	"memoryvault/internal/embed"
-	"memoryvault/internal/mcptools"
-	"memoryvault/internal/store"
+	"chuvar/internal/bouncer"
+	"chuvar/internal/config"
+	"chuvar/internal/db"
+	"chuvar/internal/embed"
+	"chuvar/internal/mcptools"
+	"chuvar/internal/store"
 )
 
 func main() {
@@ -57,7 +57,7 @@ func run() error {
 	emb := embed.Stub{} // TODO: swap for a real Embedder once the Research track lands one
 	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "memoryvault", Version: "v0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "chuvar", Version: "v0"}, nil)
 	mcptools.Register(server, subject, st, emb, b)
 
 	slog.Info("mcpserver: connected and migrated, serving on stdio", "subject", subject)

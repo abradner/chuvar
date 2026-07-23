@@ -1,4 +1,4 @@
-module memoryvault
+module chuvar
 
 go 1.26
 

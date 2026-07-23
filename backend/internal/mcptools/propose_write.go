@@ -6,7 +6,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"memoryvault/internal/bouncer"
+	"chuvar/internal/bouncer"
 )
 
 type proposeWriteArgs struct {

@@ -9,9 +9,9 @@ import (
 	"os"
 	"testing"
 
-	"memoryvault/internal/db"
-	"memoryvault/internal/embed"
-	"memoryvault/internal/store"
+	"chuvar/internal/db"
+	"chuvar/internal/embed"
+	"chuvar/internal/store"
 )
 
 const testAuthToken = "test-token-do-not-use-in-prod"

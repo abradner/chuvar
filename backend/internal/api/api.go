@@ -23,8 +23,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	"memoryvault/internal/embed"
-	"memoryvault/internal/store"
+	"chuvar/internal/embed"
+	"chuvar/internal/store"
 )
 
 type API struct {

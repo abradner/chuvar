@@ -23,7 +23,7 @@ CREATE TABLE facts (
     superseded_by          UUID REFERENCES facts(id),
 
     -- Bi-temporal columns: valid_at/invalid_at track when the fact was true in the
-    -- world (event time); created_at/expired_at track when Memory Vault recorded
+    -- world (event time); created_at/expired_at track when Chuvar recorded
     -- that (system time). A fact being superseded sets invalid_at to the new fact's
     -- valid_at and expired_at to the commit time — distinct timestamps, matching why
     -- Graphiti keeps the two pairs separate rather than collapsing them.

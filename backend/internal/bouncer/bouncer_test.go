@@ -7,10 +7,10 @@ import (
 	"reflect"
 	"testing"
 
-	"memoryvault/internal/db"
-	"memoryvault/internal/embed"
-	"memoryvault/internal/scope"
-	"memoryvault/internal/store"
+	"chuvar/internal/db"
+	"chuvar/internal/embed"
+	"chuvar/internal/scope"
+	"chuvar/internal/store"
 )
 
 // fakeClassifier lets tests control what Classify returns without depending on

@@ -6,9 +6,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"memoryvault/internal/embed"
-	"memoryvault/internal/scope"
-	"memoryvault/internal/store"
+	"chuvar/internal/embed"
+	"chuvar/internal/scope"
+	"chuvar/internal/store"
 )
 
 type readArgs struct {

@@ -10,9 +10,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"memoryvault/internal/bouncer"
-	"memoryvault/internal/embed"
-	"memoryvault/internal/store"
+	"chuvar/internal/bouncer"
+	"chuvar/internal/embed"
+	"chuvar/internal/store"
 )
 
 // maxScopesPerRequest and maxContentLength bound tool inputs. Nothing about a real

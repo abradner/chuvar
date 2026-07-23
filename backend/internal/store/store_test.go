@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 
-	"memoryvault/internal/db"
+	"chuvar/internal/db"
 )
 
 // These are integration tests against a real Postgres+pgvector instance (the raw

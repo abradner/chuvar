@@ -8,10 +8,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"memoryvault/internal/bouncer"
-	"memoryvault/internal/db"
-	"memoryvault/internal/embed"
-	"memoryvault/internal/store"
+	"chuvar/internal/bouncer"
+	"chuvar/internal/db"
+	"chuvar/internal/embed"
+	"chuvar/internal/store"
 )
 
 // testSession spins up a real MCP server bound to subject (with all v0 tools
@@ -42,7 +42,7 @@ func testSession(t *testing.T, subject string) (*mcp.ClientSession, *store.Store
 	emb := embed.Stub{}
 	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "memoryvault-test", Version: "test"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
 	Register(server, subject, st, emb, b)
 
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
@@ -140,7 +140,7 @@ func TestSubjectIsBoundNotClientSupplied(t *testing.T) {
 	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
 
 	newSession := func(subject string) *mcp.ClientSession {
-		server := mcp.NewServer(&mcp.Implementation{Name: "memoryvault-test", Version: "test"}, nil)
+		server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
 		Register(server, subject, st, emb, b)
 		clientTransport, serverTransport := mcp.NewInMemoryTransports()
 		if _, err := server.Connect(ctx, serverTransport, nil); err != nil {

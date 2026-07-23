@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"memoryvault/internal/store"
+	"chuvar/internal/store"
 )
 
 type stagedDiffView struct {

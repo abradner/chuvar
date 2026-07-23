@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"memoryvault/internal/scope"
-	"memoryvault/internal/store"
+	"chuvar/internal/scope"
+	"chuvar/internal/store"
 )
 
 // maxScopesPerGrant bounds how many scopes a single request can create a grant

@@ -10,8 +10,8 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <h1>Memory Vault</h1>
-        <p className="subtitle">approval dashboard — working title, don't get attached to the name</p>
+        <h1>Chuvar</h1>
+        <p className="subtitle">approval dashboard</p>
         <nav>
           <button className={tab === "staged-diffs" ? "active" : ""} onClick={() => setTab("staged-diffs")}>
             Staged diffs

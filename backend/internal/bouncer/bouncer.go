@@ -11,9 +11,9 @@ import (
 	"context"
 	"fmt"
 
-	"memoryvault/internal/embed"
-	"memoryvault/internal/scope"
-	"memoryvault/internal/store"
+	"chuvar/internal/embed"
+	"chuvar/internal/scope"
+	"chuvar/internal/store"
 )
 
 // Classifier proposes scope tags for a piece of content. Interface + stub for the

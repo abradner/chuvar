@@ -10,11 +10,11 @@ import (
 	"net/http"
 	"os"
 
-	"memoryvault/internal/api"
-	"memoryvault/internal/config"
-	"memoryvault/internal/db"
-	"memoryvault/internal/embed"
-	"memoryvault/internal/store"
+	"chuvar/internal/api"
+	"chuvar/internal/config"
+	"chuvar/internal/db"
+	"chuvar/internal/embed"
+	"chuvar/internal/store"
 )
 
 func main() {
