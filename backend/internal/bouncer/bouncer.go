@@ -11,9 +11,9 @@ import (
 	"context"
 	"fmt"
 
-	"memoryvault/internal/embed"
-	"memoryvault/internal/scope"
-	"memoryvault/internal/store"
+	"github.com/abradner/chuvar/backend/internal/embed"
+	"github.com/abradner/chuvar/backend/internal/scope"
+	"github.com/abradner/chuvar/backend/internal/store"
 )
 
 // Classifier proposes scope tags for a piece of content. Interface + stub for the
@@ -22,7 +22,11 @@ import (
 // in, but already known to need a second (real) implementation later.
 type Classifier interface {
 	// Classify returns the scopes it believes content belongs to, or nil to defer
-	// to the caller-proposed scopes verbatim.
+	// to the caller-proposed scopes verbatim. nil and an empty-but-non-nil slice
+	// are NOT the same thing: nil means "no opinion, use the caller's scopes,"
+	// while a non-nil empty slice is a real (if unusual) classification of "no
+	// scopes apply" and overrides the caller's proposal rather than deferring to
+	// it. Implementations must return actual nil, not a zero-length slice, to defer.
 	Classify(ctx context.Context, content string) ([]scope.Scope, error)
 }
 
@@ -59,6 +63,13 @@ func New(s *store.Store, e embed.Embedder, c Classifier) *Bouncer {
 // diff, including the dedupe verdict the store computed. targetFactID, if set,
 // means this proposal claims to update/supersede an existing fact.
 func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, proposedScopes []scope.Scope, targetFactID *string) (store.StagedDiff, error) {
+	// store.ProposeDiff rejects empty content anyway, but only after this function
+	// has already paid for classification and embedding — both meant to become
+	// real (external, costly) calls. Reject up front instead.
+	if content == "" {
+		return store.StagedDiff{}, fmt.Errorf("bouncer: content must not be empty")
+	}
+
 	// Validate the caller's input before doing any work on its behalf — in
 	// particular before calling Classify, which is a stub today but is meant to
 	// become a real (likely external/costly) call; no reason to pay that for a
@@ -69,12 +80,20 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 		}
 	}
 
+	if b.Classifier == nil {
+		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Classifier")
+	}
+
 	scopes := proposedScopes
 	classified, err := b.Classifier.Classify(ctx, content)
 	if err != nil {
 		return store.StagedDiff{}, fmt.Errorf("bouncer: classify: %w", err)
 	}
-	if len(classified) > 0 {
+	// nil vs. non-nil-empty matters here (see Classifier's doc comment): only nil
+	// means "defer to the caller." A classifier that deliberately returns "no
+	// scopes apply" as a non-nil empty slice must be able to override the caller,
+	// not have that override silently discarded.
+	if classified != nil {
 		for _, sc := range classified {
 			if err := scope.Validate(sc); err != nil {
 				return store.StagedDiff{}, fmt.Errorf("bouncer: classifier produced invalid scope: %w", err)
@@ -82,10 +101,14 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 		}
 		scopes = classified
 	}
+	scopes = scope.Dedupe(scopes)
 	if len(scopes) == 0 {
 		return store.StagedDiff{}, fmt.Errorf("bouncer: no scopes proposed or classified for content")
 	}
 
+	if b.Embedder == nil {
+		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Embedder")
+	}
 	vec, err := b.Embedder.Embed(ctx, content)
 	if err != nil {
 		return store.StagedDiff{}, fmt.Errorf("bouncer: embed: %w", err)
@@ -96,6 +119,9 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 		scopeStrs[i] = string(sc)
 	}
 
+	if b.Store == nil {
+		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Store")
+	}
 	diff, err := b.Store.ProposeDiff(ctx, subject, content, scopeStrs, vec, targetFactID)
 	if err != nil {
 		return store.StagedDiff{}, fmt.Errorf("bouncer: stage diff: %w", err)

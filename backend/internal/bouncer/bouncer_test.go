@@ -7,10 +7,10 @@ import (
 	"reflect"
 	"testing"
 
-	"memoryvault/internal/db"
-	"memoryvault/internal/embed"
-	"memoryvault/internal/scope"
-	"memoryvault/internal/store"
+	"github.com/abradner/chuvar/backend/internal/db"
+	"github.com/abradner/chuvar/backend/internal/embed"
+	"github.com/abradner/chuvar/backend/internal/scope"
+	"github.com/abradner/chuvar/backend/internal/store"
 )
 
 // fakeClassifier lets tests control what Classify returns without depending on
@@ -46,6 +46,55 @@ func TestProposeWrite_InvalidScopeIsError(t *testing.T) {
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"Not Valid"}, nil)
 	if err == nil {
 		t.Fatal("ProposeWrite() with malformed scope: want error, got nil")
+	}
+}
+
+func TestProposeWrite_EmptyContentIsError(t *testing.T) {
+	b := New(nil, embed.Stub{}, PassthroughClassifier{})
+	_, err := b.ProposeWrite(context.Background(), "agent-a", "", []scope.Scope{"identity.basic"}, nil)
+	if err == nil {
+		t.Fatal("ProposeWrite() with empty content: want error, got nil")
+	}
+}
+
+func TestProposeWrite_NilClassifierReturnsErrorNotPanic(t *testing.T) {
+	b := &Bouncer{Store: nil, Embedder: embed.Stub{}, Classifier: nil}
+	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
+	if err == nil {
+		t.Fatal("ProposeWrite() with nil Classifier: want error, got nil")
+	}
+}
+
+func TestProposeWrite_NilEmbedderReturnsErrorNotPanic(t *testing.T) {
+	b := &Bouncer{Store: nil, Embedder: nil, Classifier: PassthroughClassifier{}}
+	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
+	if err == nil {
+		t.Fatal("ProposeWrite() with nil Embedder: want error, got nil")
+	}
+}
+
+func TestProposeWrite_NilStoreReturnsErrorNotPanic(t *testing.T) {
+	b := &Bouncer{Store: nil, Embedder: embed.Stub{}, Classifier: PassthroughClassifier{}}
+	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
+	if err == nil {
+		t.Fatal("ProposeWrite() with nil Store: want error, got nil")
+	}
+}
+
+type emptySliceClassifier struct{}
+
+func (emptySliceClassifier) Classify(context.Context, string) ([]scope.Scope, error) {
+	return []scope.Scope{}, nil
+}
+
+func TestProposeWrite_ClassifierNonNilEmptySliceOverridesCaller(t *testing.T) {
+	// A non-nil empty slice is a real classification ("no scopes apply"), distinct
+	// from nil ("defer to caller") — see Classifier's doc comment. It must override
+	// the caller's proposed scopes down to nothing, not be treated as "no opinion."
+	b := New(nil, embed.Stub{}, emptySliceClassifier{})
+	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
+	if err == nil {
+		t.Fatal("ProposeWrite() with classifier returning non-nil empty scopes: want error (overridden to no scopes), got nil")
 	}
 }
 
@@ -104,6 +153,44 @@ func TestProposeWrite_ClassifierOverridesProposedScopes(t *testing.T) {
 	if !reflect.DeepEqual(diff.ProposedScopes, want) {
 		t.Fatalf("ProposeWrite() staged scopes = %v, want the classifier's %v (not the caller-proposed %v)",
 			diff.ProposedScopes, want, []scope.Scope{"preferences.coffee"})
+	}
+}
+
+func TestProposeWrite_DuplicateScopesDedupedSoCommitSucceeds(t *testing.T) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set; skipping bouncer integration test")
+	}
+	if err := db.Migrate(url); err != nil {
+		t.Fatalf("db.Migrate() error = %v", err)
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log`); err != nil {
+		t.Fatalf("truncating tables: %v", err)
+	}
+
+	st := store.New(pool)
+	b := New(st, embed.Stub{}, PassthroughClassifier{})
+
+	diff, err := b.ProposeWrite(ctx, "agent-a", "user's favorite tea is earl grey",
+		[]scope.Scope{"preferences.tea", "preferences.tea"}, nil)
+	if err != nil {
+		t.Fatalf("ProposeWrite() error = %v", err)
+	}
+	if len(diff.ProposedScopes) != 1 {
+		t.Fatalf("ProposeWrite() staged scopes = %v, want deduped to 1", diff.ProposedScopes)
+	}
+
+	// Without deduping in ProposeWrite, this would fail here instead: CommitDiff
+	// inserts one fact_scopes row per proposed scope, and (fact_id, scope) is that
+	// table's primary key.
+	if _, err := st.CommitDiff(ctx, diff.ID, "human-reviewer", nil); err != nil {
+		t.Fatalf("CommitDiff() error = %v (duplicate scopes not deduped before staging?)", err)
 	}
 }
 
