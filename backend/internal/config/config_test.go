@@ -31,7 +31,7 @@ func TestLoad_Defaults(t *testing.T) {
 }
 
 func TestLoad_OverridesApplied(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://localhost:5433/chuvar")
+	t.Setenv("DATABASE_URL", "postgres://localhost:54322/chuvar")
 	t.Setenv("HTTP_ADDR", ":9090")
 	t.Setenv("REQUEST_TIMEOUT", "30s")
 
