@@ -34,9 +34,9 @@ type Stub struct{}
 func (Stub) Embed(_ context.Context, text string) ([]float32, error) {
 	vec := make([]float32, Dim)
 
-	// Seeded from SHA-256 rather than a fast non-cryptographic hash: findDedupe-
-	// Candidate (internal/store, a later PR) picks the single nearest fact by
-	// embedding distance, so an adversary who could cheaply engineer a hash
+	// Seeded from SHA-256 rather than a fast non-cryptographic hash:
+	// findDedupeCandidate (internal/store, a later PR) picks the single nearest fact
+	// by embedding distance, so an adversary who could cheaply engineer a hash
 	// collision against a specific existing fact could make unrelated content look
 	// like a near-duplicate/contradiction of it. Human approval still gates every
 	// commit (AGENTS.md §3.1) so this was never a full bypass, but there's no reason

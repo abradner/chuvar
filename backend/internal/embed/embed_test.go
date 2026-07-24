@@ -33,19 +33,37 @@ func TestStub_DistinctInputsDiffer(t *testing.T) {
 	s := Stub{}
 	ctx := context.Background()
 
-	a, _ := s.Embed(ctx, "the sky is blue")
-	b, _ := s.Embed(ctx, "the grass is green")
+	a, err := s.Embed(ctx, "the sky is blue")
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	b, err := s.Embed(ctx, "the grass is green")
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
 
-	same := true
+	// A byte-for-byte inequality check alone would pass even if a and b were
+	// highly correlated (e.g. differing in one component) — which is exactly the
+	// risk a weak seed hash introduces (see the SHA-256 comment on Stub.Embed).
+	// Assert the cosine similarity is actually low, not just "not identical."
+	cos := cosineSimilarity(a, b)
+	const maxSimilarity = 0.3
+	if cos > maxSimilarity {
+		t.Fatalf("cosine similarity between distinct inputs = %v, want <= %v (vectors too correlated)", cos, maxSimilarity)
+	}
+}
+
+func cosineSimilarity(a, b []float32) float64 {
+	var dot, normA, normB float64
 	for i := range a {
-		if a[i] != b[i] {
-			same = false
-			break
-		}
+		dot += float64(a[i]) * float64(b[i])
+		normA += float64(a[i]) * float64(a[i])
+		normB += float64(b[i]) * float64(b[i])
 	}
-	if same {
-		t.Fatal("Embed() produced identical vectors for distinct inputs")
+	if normA == 0 || normB == 0 {
+		return 0
 	}
+	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
 func TestStub_EmptyString(t *testing.T) {
