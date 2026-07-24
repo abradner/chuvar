@@ -194,6 +194,56 @@ func TestProposeWrite_DuplicateScopesDedupedSoCommitSucceeds(t *testing.T) {
 	}
 }
 
+func TestProposeWrite_TargetOutsideSubjectGrantsRejected(t *testing.T) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set; skipping bouncer integration test")
+	}
+	if err := db.Migrate(url); err != nil {
+		t.Fatalf("db.Migrate() error = %v", err)
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log`); err != nil {
+		t.Fatalf("truncating tables: %v", err)
+	}
+
+	st := store.New(pool)
+	b := New(st, embed.Stub{}, PassthroughClassifier{})
+
+	// agent-a proposes and commits a fact under a scope agent-b has no grant for.
+	first, err := b.ProposeWrite(ctx, "agent-a", "user's medical condition is confidential",
+		[]scope.Scope{"identity.medical"}, nil)
+	if err != nil {
+		t.Fatalf("ProposeWrite() (first) error = %v", err)
+	}
+	fact, err := st.CommitDiff(ctx, first.ID, "human-reviewer", nil)
+	if err != nil {
+		t.Fatalf("CommitDiff() (first) error = %v", err)
+	}
+
+	// agent-b has an active grant, just not one covering identity.medical — this
+	// proves the rejection is scope-specific, not "agent-b has zero grants."
+	if _, err := st.CreateGrant(ctx, "agent-b", []string{"preferences.coffee"}, "facts", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	// This is the actual wiring under test: ProposeWrite must fetch agent-b's real
+	// granted scopes (via Store.GrantedScopes) and pass them through to
+	// Store.ProposeDiff, which is what rejects the out-of-grant target. A unit
+	// test with a fake/hardcoded scopes list wouldn't catch a wiring mistake here
+	// (wrong subject, wrong variable, argument left out) the way this does.
+	_, err = b.ProposeWrite(ctx, "agent-b", "innocuous-looking replacement content",
+		[]scope.Scope{"preferences.coffee"}, &fact.ID)
+	if err == nil {
+		t.Fatal("ProposeWrite() targeting a fact outside the subject's actual grants: want error, got nil")
+	}
+}
+
 func TestProposeWrite_EndToEnd(t *testing.T) {
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {

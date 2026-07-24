@@ -122,7 +122,16 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 	if b.Store == nil {
 		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Store")
 	}
-	diff, err := b.Store.ProposeDiff(ctx, subject, content, scopeStrs, vec, targetFactID)
+	// The subject's current granted scopes gate both the dedupe candidate search
+	// and target_fact_id visibility inside ProposeDiff — see that function's doc
+	// comment. Fetched here rather than inside the store layer because Bouncer
+	// already owns "what does this subject need to act" plumbing (Embedder,
+	// Classifier); Store just persists what it's handed.
+	grantedScopes, err := b.Store.GrantedScopes(ctx, subject)
+	if err != nil {
+		return store.StagedDiff{}, fmt.Errorf("bouncer: granted scopes: %w", err)
+	}
+	diff, err := b.Store.ProposeDiff(ctx, subject, content, scopeStrs, vec, targetFactID, grantedScopes)
 	if err != nil {
 		return store.StagedDiff{}, fmt.Errorf("bouncer: stage diff: %w", err)
 	}
