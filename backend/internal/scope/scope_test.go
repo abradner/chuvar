@@ -38,9 +38,9 @@ func TestValidate_MaxLength(t *testing.T) {
 		t.Errorf("Validate() on a %d-char scope: want error, got nil", len(tooLong))
 	}
 
-	justUnderLimit := Scope(strings.Repeat("a", MaxLength))
-	if err := Validate(justUnderLimit); err != nil {
-		t.Errorf("Validate() on a %d-char scope (at MaxLength): want nil, got %v", len(justUnderLimit), err)
+	atLimit := Scope(strings.Repeat("a", MaxLength))
+	if err := Validate(atLimit); err != nil {
+		t.Errorf("Validate() on a %d-char scope (at MaxLength): want nil, got %v", len(atLimit), err)
 	}
 }
 
@@ -153,5 +153,27 @@ func TestSatisfied(t *testing.T) {
 	}
 	if !Satisfied(requested, []Scope{"identity", "relationships", "finances", "schedule"}) {
 		t.Error("Satisfied() = false with all requested scopes covered by ancestor grants, want true")
+	}
+}
+
+func TestDedupe(t *testing.T) {
+	tests := []struct {
+		name   string
+		scopes []Scope
+		want   []Scope
+	}{
+		{"no duplicates", []Scope{"a", "b", "c"}, []Scope{"a", "b", "c"}},
+		{"adjacent duplicate", []Scope{"a", "a", "b"}, []Scope{"a", "b"}},
+		{"non-adjacent duplicate preserves first position", []Scope{"a", "b", "a"}, []Scope{"a", "b"}},
+		{"empty", nil, []Scope{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Dedupe(tt.scopes)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Dedupe(%v) = %v, want %v", tt.scopes, got, tt.want)
+			}
+		})
 	}
 }

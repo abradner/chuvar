@@ -20,7 +20,7 @@ var segmentPattern = regexp.MustCompile(`^[a-z0-9_]+$`)
 // anywhere near this many characters — it exists to stop a pathological input from
 // becoming a cheap CPU-amplification lever downstream, where every granted scope
 // gets turned into a LIKE pattern evaluated against every fact_scopes row on every
-// read (internal/store/facts.go).
+// read (the store package, added later in this series).
 const MaxLength = 256
 
 // Validate checks that s is well-formed: non-empty, bounded length, dot-delimited,
@@ -31,7 +31,10 @@ func Validate(s Scope) error {
 		return fmt.Errorf("scope: empty scope is not valid")
 	}
 	if len(s) > MaxLength {
-		return fmt.Errorf("scope: %q exceeds max length %d", s, MaxLength)
+		// Report the length, not the value: s is caller-controlled and can be
+		// pathologically large, and %q would spend O(n) quoting/escaping it right
+		// where the bound exists to avoid unbounded work on bad input.
+		return fmt.Errorf("scope: exceeds max length %d (got %d characters)", MaxLength, len(s))
 	}
 	segments := strings.Split(string(s), ".")
 	for _, seg := range segments {
@@ -89,4 +92,23 @@ func Missing(requested, granted []Scope) []Scope {
 // against any single tag.
 func Satisfied(requested, granted []Scope) bool {
 	return len(Missing(requested, granted)) == 0
+}
+
+// Dedupe returns scopes with exact duplicates removed, preserving first-appearance
+// order. Every caller that persists a scope list into a (fact_id, scope) or
+// (grant_id, scope) primary key needs this: an un-deduped list reaches the DB as a
+// constraint violation instead of a clean validation error. Callers that want to
+// reject duplicates outright (rather than silently collapsing them) can compare
+// len(Dedupe(s)) against len(s).
+func Dedupe(scopes []Scope) []Scope {
+	seen := make(map[Scope]bool, len(scopes))
+	deduped := make([]Scope, 0, len(scopes))
+	for _, s := range scopes {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		deduped = append(deduped, s)
+	}
+	return deduped
 }
