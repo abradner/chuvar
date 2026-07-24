@@ -1,4 +1,4 @@
-// Command mcpserver runs the Memory Vault MCP server: the read-with-scope-check,
+// Command mcpserver runs the Chuvar MCP server: the read-with-scope-check,
 // propose-write, and list-grants tools, backed by Postgres+pgvector.
 package main
 
@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"os"
 
-	"memoryvault/internal/config"
-	"memoryvault/internal/db"
+	"github.com/abradner/chuvar/backend/internal/config"
+	"github.com/abradner/chuvar/backend/internal/db"
 )
 
 func main() {

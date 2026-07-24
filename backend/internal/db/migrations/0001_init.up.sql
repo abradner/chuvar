@@ -4,6 +4,11 @@
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- gen_random_uuid() below is a Postgres core builtin as of PG13 (moved out of
+-- pgcrypto) — no extension needed on the pg18 image this project targets
+-- (docker-compose.yml). Don't add `CREATE EXTENSION pgcrypto` here on an
+-- automated reviewer's suggestion without checking the target version first.
+
 -- Embedding dimension is a placeholder (MiniLM-sized) pending the Research track's
 -- classifier/embedding-model choice (Notion: "Research — Scope Classifier & Dedup
 -- Model"). Changing it later means a new migration that rebuilds the column and its
@@ -19,7 +24,7 @@ CREATE TABLE facts (
     -- fact replaced it. Never hard-delete a superseded fact — soft-invalidate via
     -- invalid_at/expired_at instead, mirroring Graphiti's bi-temporal pattern (Notion
     -- §7): both the old and new fact persist, so the audit trail stays intact.
-    source_staged_diff_id  UUID,
+    source_staged_diff_id  UUID NOT NULL,
     superseded_by          UUID REFERENCES facts(id),
 
     -- Bi-temporal columns: valid_at/invalid_at track when the fact was true in the
