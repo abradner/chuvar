@@ -200,12 +200,17 @@ func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedd
 		return Fact{}, fmt.Errorf("store: diff %s is not pending (status=%s)", diffID, status)
 	}
 
+	embParam, err := toVectorParam(embedding)
+	if err != nil {
+		return Fact{}, err
+	}
+
 	var f Fact
 	err = tx.QueryRow(ctx,
 		`INSERT INTO facts (content, embedding, source_staged_diff_id)
 		 VALUES ($1, $2, $3)
 		 RETURNING id, content, created_at, valid_at`,
-		content, pgvector.NewVector(embedding), diffID,
+		content, embParam, diffID,
 	).Scan(&f.ID, &f.Content, &f.CreatedAt, &f.ValidAt)
 	if err != nil {
 		return Fact{}, fmt.Errorf("store: insert committed fact: %w", err)

@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 
-	"memoryvault/internal/db"
+	"github.com/abradner/chuvar/backend/internal/db"
 )
 
 // These are integration tests against a real Postgres+pgvector instance (the raw
@@ -106,6 +106,15 @@ func TestGrants_ExpiredExcludedFromGrantedScopes(t *testing.T) {
 	}
 	if len(granted) != 0 {
 		t.Fatalf("GrantedScopes() with expired grant = %v, want none", granted)
+	}
+}
+
+func TestCreateGrant_InvalidDepthRejected(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "bogus", nil); err == nil {
+		t.Fatal("CreateGrant() with invalid depth: want error, got nil")
 	}
 }
 
@@ -261,15 +270,27 @@ func TestSearchFacts_FactWithNoScopesExcluded(t *testing.T) {
 	s, pool := testStore(t)
 	ctx := context.Background()
 
-	// Inserted directly, bypassing the normal staged-diff path, specifically to
-	// exercise the candidate_facts CTE's EXISTS(fact_scopes) clause against a fact
-	// that has zero scope rows — every fact reaching this point through CommitDiff
-	// has at least one, but the query shouldn't rely on that being the only way a
-	// row can exist.
-	var factID string
+	// Inserted directly, bypassing CommitDiff's normal fact_scopes insert, specifically
+	// to exercise the candidate_facts CTE's EXISTS(fact_scopes) clause against a fact
+	// that has zero scope rows — every fact reaching this point through CommitDiff has
+	// at least one, but the query shouldn't rely on that being the only way a row can
+	// exist. Still goes through a real staged_diffs row for source_staged_diff_id: that
+	// FK is NOT NULL (facts always trace back to the diff that produced them — AGENTS.md
+	// §3.1), and this fixture shouldn't need to violate that invariant just to test an
+	// unrelated code path.
+	var diffID string
 	err := pool.QueryRow(ctx,
-		`INSERT INTO facts (content, embedding) VALUES ($1, $2) RETURNING id`,
-		"a fact with no scope tags at all", pgvector.NewVector(unitVector(11)),
+		`INSERT INTO staged_diffs (subject, content, proposed_scopes, status) VALUES ($1, $2, $3, 'committed') RETURNING id`,
+		"agent-a", "a fact with no scope tags at all", []string{"identity.basic"},
+	).Scan(&diffID)
+	if err != nil {
+		t.Fatalf("inserting staged diff fixture: %v", err)
+	}
+
+	var factID string
+	err = pool.QueryRow(ctx,
+		`INSERT INTO facts (content, embedding, source_staged_diff_id) VALUES ($1, $2, $3) RETURNING id`,
+		"a fact with no scope tags at all", pgvector.NewVector(unitVector(11)), diffID,
 	).Scan(&factID)
 	if err != nil {
 		t.Fatalf("inserting scopeless fact: %v", err)
@@ -457,6 +478,38 @@ func TestSearchFacts_ScopeIntersectionRequiresAllTags(t *testing.T) {
 	}
 }
 
+func TestSearchFacts_EmptyQueryEmbeddingFallsBackToKeywordOnly(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(6)
+	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite hiking trail is Overland Track", []string{"preferences.hiking"}, vec, nil)
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	// No query embedding — this is the degraded no-Embedder-configured mode. Must not
+	// error (a bare $4 IS NOT NULL check without the ::vector cast previously failed
+	// at prepare time with "could not determine data type of parameter"), and must
+	// still find the fact via the keyword ranking alone.
+	results, err := s.SearchFacts(ctx, "hiking", nil, []string{"preferences.hiking"}, 10)
+	if err != nil {
+		t.Fatalf("SearchFacts() with no query embedding: unexpected error = %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.Content == "user's favorite hiking trail is Overland Track" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("SearchFacts() with no query embedding = %+v, want the keyword-matched fact", results)
+	}
+}
+
 func TestSearchFacts_NoGrantsReturnsNothing(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
@@ -497,13 +550,26 @@ func unitVector(seed int) []float32 {
 }
 
 // nudge perturbs a unit vector slightly and re-normalizes, producing a vector with
-// small (but nonzero) cosine distance from base.
+// small (but nonzero) cosine distance from base. The perturbed index is computed
+// relative to base's own nonzero entry (unitVector's seed%384), not a fixed index —
+// a fixed index only nudges the intended component by coincidence when the base
+// vector happens to peak elsewhere, and silently stops perturbing anything
+// meaningful if a caller ever passes a base with its peak at that fixed index.
 func nudge(base []float32, amount float32) []float32 {
+	peak := 0
+	for i, v := range base {
+		if v != 0 {
+			peak = i
+			break
+		}
+	}
+	perturbIdx := (peak + 1) % len(base)
+
 	out := make([]float32, len(base))
 	var sumSquares float32
 	for i, v := range base {
 		nv := v
-		if i == (len(base)+1)%len(base) {
+		if i == perturbIdx {
 			nv += amount
 		}
 		out[i] = nv

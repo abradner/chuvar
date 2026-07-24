@@ -6,10 +6,20 @@ import (
 	"time"
 )
 
+// validDepths mirrors the CHECK constraint on grants.depth in the schema — kept in
+// sync by hand, not queried from the DB, since it changes about as often as the
+// migration itself. Validating here means a bad value comes back as a clear "store:
+// invalid depth" error instead of a raw Postgres check-constraint violation leaking
+// out of this package.
+var validDepths = map[string]bool{"summary": true, "facts": true, "full": true}
+
 // CreateGrant records a new time-boxed grant. ttl of nil means no expiry.
 func (s *Store) CreateGrant(ctx context.Context, subject string, scopes []string, depth string, ttl *time.Duration) (Grant, error) {
 	if len(scopes) == 0 {
 		return Grant{}, fmt.Errorf("store: grant must include at least one scope")
+	}
+	if !validDepths[depth] {
+		return Grant{}, fmt.Errorf("store: invalid depth %q (want summary, facts, or full)", depth)
 	}
 
 	var expiresAt *time.Time

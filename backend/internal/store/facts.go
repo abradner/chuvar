@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-
-	"github.com/pgvector/pgvector-go"
 )
 
 // likeEscaper escapes Postgres LIKE metacharacters (and the escape character
@@ -47,11 +45,16 @@ func (s *Store) SearchFacts(ctx context.Context, queryText string, queryEmbeddin
 		prefixes[i] = likeEscaper.Replace(g) + ".%"
 	}
 
+	embParam, err := toVectorParam(queryEmbedding)
+	if err != nil {
+		return nil, err
+	}
+
 	rows, err := s.pool.Query(ctx, searchFactsSQL,
 		grantedScopes,
 		prefixes,
 		queryText,
-		pgvector.NewVector(queryEmbedding),
+		embParam,
 		rrfK,
 		limit,
 	)
@@ -95,10 +98,17 @@ keyword_ranked AS (
     WHERE f.content_tsv @@ plainto_tsquery('english', $3)
 ),
 vector_ranked AS (
-    SELECT f.id, row_number() OVER (ORDER BY f.embedding <=> $4) AS rank
+    -- $4 IS NOT NULL guards keyword-only mode (no query embedding available):
+    -- without it, every row would still get a rank from a NULL-vs-vector comparison
+    -- instead of contributing zero rows to this CTE, which would corrupt the RRF
+    -- fusion below. The explicit ::vector cast (on both uses of $4) isn't optional —
+    -- without it Postgres can't determine $4's type at prepare time once it appears
+    -- in a plain IS NOT NULL context alongside the <=> operator context, and errors
+    -- with "could not determine data type of parameter" before any value is bound.
+    SELECT f.id, row_number() OVER (ORDER BY f.embedding <=> $4::vector) AS rank
     FROM facts f
     JOIN candidate_facts c ON c.id = f.id
-    WHERE f.embedding IS NOT NULL
+    WHERE f.embedding IS NOT NULL AND $4::vector IS NOT NULL
 )
 SELECT
     f.id,
