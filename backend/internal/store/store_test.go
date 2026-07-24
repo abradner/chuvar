@@ -523,6 +523,36 @@ func TestSearchFacts_NoGrantsReturnsNothing(t *testing.T) {
 	}
 }
 
+func TestGetFact(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(26)
+	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite season is autumn", []string{"preferences.season"}, vec, nil, []string{"preferences.season"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	fact, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec)
+	if err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	got, err := s.GetFact(ctx, fact.ID)
+	if err != nil {
+		t.Fatalf("GetFact() error = %v", err)
+	}
+	if got.Content != fact.Content {
+		t.Errorf("GetFact().Content = %q, want %q", got.Content, fact.Content)
+	}
+	if len(got.Scopes) != 1 || got.Scopes[0] != "preferences.season" {
+		t.Errorf("GetFact().Scopes = %v, want [preferences.season]", got.Scopes)
+	}
+
+	if _, err := s.GetFact(ctx, "00000000-0000-0000-0000-000000000000"); err == nil {
+		t.Fatal("GetFact() for nonexistent ID: want error, got nil")
+	}
+}
+
 func TestAuditLog_Insert(t *testing.T) {
 	s, pool := testStore(t)
 	ctx := context.Background()

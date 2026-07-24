@@ -334,6 +334,36 @@ func TestStagedDiffs_ListApproveReject(t *testing.T) {
 	}
 }
 
+func TestGetFact_ViaAPI(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	vec := make([]float32, 384)
+	vec[0] = 1
+	d, err := st.ProposeDiff(ctx, "agent-a", "user's favorite color is teal", []string{"preferences.color"}, vec, nil, nil)
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	fact, err := st.CommitDiff(ctx, d.ID, "human-reviewer", vec)
+	if err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	resp := doJSON(t, http.MethodGet, srv.URL+"/api/facts/"+fact.ID, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/facts/{id} status = %d, want 200", resp.StatusCode)
+	}
+	got := decodeInto[factView](t, resp)
+	if got.Content != "user's favorite color is teal" {
+		t.Errorf("GET /api/facts/{id} content = %q, want the fact's content", got.Content)
+	}
+
+	resp = doJSON(t, http.MethodGet, srv.URL+"/api/facts/00000000-0000-0000-0000-000000000000", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /api/facts/{id} for nonexistent fact: status = %d, want 404", resp.StatusCode)
+	}
+}
+
 func TestApproveStagedDiff_MissingDecidedByRejected(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()

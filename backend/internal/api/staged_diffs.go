@@ -42,6 +42,40 @@ func toStagedDiffView(d store.StagedDiff) stagedDiffView {
 
 const timeFormat = "2006-01-02T15:04:05Z07:00"
 
+type factView struct {
+	ID        string   `json:"id"`
+	Content   string   `json:"content"`
+	Scopes    []string `json:"scopes"`
+	CreatedAt string   `json:"created_at"`
+	ValidAt   string   `json:"valid_at"`
+}
+
+func toFactView(f store.Fact) factView {
+	return factView{
+		ID:        f.ID,
+		Content:   f.Content,
+		Scopes:    f.Scopes,
+		CreatedAt: f.CreatedAt.Format(timeFormat),
+		ValidAt:   f.ValidAt.Format(timeFormat),
+	}
+}
+
+// getFact handles GET /api/facts/{id}. Added specifically so the approval UI can
+// show a staged diff's target_fact_id as actual content, not an opaque UUID, before
+// a human approves what might be a supersession — see store.GetFact's doc comment
+// for why this doesn't apply an additional scope filter on top of the shared-token
+// auth already gating every route in this package.
+func (a *API) getFact(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	f, err := a.Store.GetFact(r.Context(), id)
+	if err != nil {
+		slog.Error("api: getFact", "id", id, "error", err)
+		writeError(w, http.StatusNotFound, errors.New("fact not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, toFactView(f))
+}
+
 // listStagedDiffs handles GET /api/staged-diffs?status=pending (default: pending).
 func (a *API) listStagedDiffs(w http.ResponseWriter, r *http.Request) {
 	status := store.DiffStatus(r.URL.Query().Get("status"))

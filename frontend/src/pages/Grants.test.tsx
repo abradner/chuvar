@@ -26,6 +26,13 @@ const sampleGrant: Grant = {
   created_at: "2026-07-23T00:00:00Z",
 };
 
+// Approve/revoke/create are all gated on a non-empty reviewer name now (see
+// Grants.tsx) — every test that exercises one of those buttons fills this in
+// first, same as it fills in the scopes field.
+async function fillReviewer(name = "reviewer-a") {
+  await userEvent.type(screen.getByLabelText("Reviewer name"), name);
+}
+
 describe("GrantsPage", () => {
   // Without this, assertions like toHaveBeenCalled() can pass because of a call
   // left over from a previous test, not because this test's own render triggered
@@ -48,6 +55,7 @@ describe("GrantsPage", () => {
     render(<GrantsPage />);
     await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
 
+    await fillReviewer();
     await userEvent.type(screen.getByPlaceholderText("identity.basic, projects.spritz.read"), "identity.basic");
     await userEvent.type(screen.getByLabelText(/TTL/), "not-a-number");
     await userEvent.click(screen.getByRole("button", { name: "Create grant" }));
@@ -64,6 +72,7 @@ describe("GrantsPage", () => {
     render(<GrantsPage />);
     await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
 
+    await fillReviewer();
     await userEvent.type(screen.getByPlaceholderText("identity.basic, projects.spritz.read"), "identity.basic");
     await userEvent.type(screen.getByLabelText(/TTL/), "0.1");
     await userEvent.click(screen.getByRole("button", { name: "Create grant" }));
@@ -77,6 +86,7 @@ describe("GrantsPage", () => {
     render(<GrantsPage />);
     await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
 
+    await fillReviewer();
     await userEvent.type(screen.getByPlaceholderText("identity.basic, projects.spritz.read"), "identity.basic");
     await userEvent.type(screen.getByLabelText(/TTL/), "-5");
     await userEvent.click(screen.getByRole("button", { name: "Create grant" }));
@@ -92,6 +102,7 @@ describe("GrantsPage", () => {
     render(<GrantsPage />);
     await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
 
+    await fillReviewer();
     await userEvent.type(
       screen.getByPlaceholderText("identity.basic, projects.spritz.read"),
       " identity.basic , projects.spritz.read ",
@@ -104,6 +115,7 @@ describe("GrantsPage", () => {
       "agent-a",
       ["identity.basic", "projects.spritz.read"],
       "facts",
+      "reviewer-a",
       300,
     );
   });
@@ -120,6 +132,7 @@ describe("GrantsPage", () => {
     render(<GrantsPage />);
     await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
 
+    await fillReviewer();
     await userEvent.type(screen.getByPlaceholderText("identity.basic, projects.spritz.read"), "identity.basic");
     const submitButton = screen.getByRole("button", { name: "Create grant" });
     await userEvent.click(submitButton);
@@ -130,6 +143,21 @@ describe("GrantsPage", () => {
     await waitFor(() => expect(submitButton).not.toBeDisabled());
   });
 
+  it("disables Create grant and Revoke until a reviewer name is entered", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([sampleGrant]);
+
+    render(<GrantsPage />);
+    await screen.findByText("identity.basic");
+
+    expect(screen.getByRole("button", { name: "Create grant" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Revoke" })).toBeDisabled();
+
+    await fillReviewer();
+
+    expect(screen.getByRole("button", { name: "Create grant" })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "Revoke" })).not.toBeDisabled();
+  });
+
   it("removes a grant from the list after revoking it", async () => {
     vi.mocked(api.listGrants).mockResolvedValueOnce([sampleGrant]).mockResolvedValueOnce([]);
     vi.mocked(api.revokeGrant).mockResolvedValue(undefined);
@@ -137,11 +165,12 @@ describe("GrantsPage", () => {
     render(<GrantsPage />);
     await screen.findByText("identity.basic");
 
+    await fillReviewer();
     await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
 
     await waitFor(() => {
       expect(screen.getByText("No grants for this subject.")).toBeInTheDocument();
     });
-    expect(api.revokeGrant).toHaveBeenCalledWith("grant-1");
+    expect(api.revokeGrant).toHaveBeenCalledWith("grant-1", "reviewer-a");
   });
 });

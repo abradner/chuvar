@@ -43,6 +43,14 @@ export interface Grant {
   revoked_at?: string;
 }
 
+export interface Fact {
+  id: string;
+  content: string;
+  scopes: string[];
+  created_at: string;
+  valid_at: string;
+}
+
 class ApiError extends Error {
   status: number;
 
@@ -94,14 +102,19 @@ export const api = {
   listGrants: (subject: string, signal?: AbortSignal) =>
     request<Grant[]>(`/api/grants?subject=${encodeURIComponent(subject)}`, { signal }),
 
-  createGrant: (subject: string, scopes: string[], depth: string, ttlSeconds?: number) =>
+  createGrant: (subject: string, scopes: string[], depth: string, approvedBy: string, ttlSeconds?: number) =>
     request<Grant>("/api/grants", {
       method: "POST",
-      body: JSON.stringify({ subject, scopes, depth, ttl_seconds: ttlSeconds }),
+      body: JSON.stringify({ subject, scopes, depth, approved_by: approvedBy, ttl_seconds: ttlSeconds }),
     }),
 
-  revokeGrant: (id: string) =>
-    request<void>(`/api/grants/${id}/revoke`, { method: "POST" }),
+  revokeGrant: (id: string, revokedBy: string) =>
+    request<void>(`/api/grants/${id}/revoke`, {
+      method: "POST",
+      body: JSON.stringify({ revoked_by: revokedBy }),
+    }),
+
+  getFact: (id: string, signal?: AbortSignal) => request<Fact>(`/api/facts/${id}`, { signal }),
 };
 
 export { ApiError };

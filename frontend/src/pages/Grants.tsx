@@ -3,6 +3,7 @@ import { api, ApiError, type Grant } from "../api/client";
 
 export function GrantsPage() {
   const [subject, setSubject] = useState("agent-a");
+  const [reviewer, setReviewer] = useState("");
   const [grants, setGrants] = useState<Grant[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -12,13 +13,15 @@ export function GrantsPage() {
   const [newDepth, setNewDepth] = useState("facts");
   const [newTTLMinutes, setNewTTLMinutes] = useState("");
 
-  // Typing in the subject field fires a fetch per keystroke with nothing to
-  // guarantee responses resolve in request order — without cancelling the
-  // previous in-flight request, a slow response for an earlier value (e.g. "a")
-  // could resolve after a faster one for the current value ("agent-a") and
-  // silently overwrite the list with the wrong subject's grants. An
-  // AbortController per effect run, cancelled on the next run/unmount, fixes
-  // that: a superseded request never gets to call setGrants.
+  // refreshKey exists so create/revoke can trigger a reload through the exact
+  // same cancellable effect the subject field uses, instead of firing a separate,
+  // uncancelled fetch. The old separate reload() captured `subject` from the
+  // render that started the mutation — if the operator changed subjects while a
+  // revoke/create was in flight, that stale closure could resolve after the
+  // subject-change effect and overwrite the new subject's list with the old
+  // one's. Bumping refreshKey re-runs this effect with the *current* subject,
+  // and its own AbortController still supersedes any request that's now stale.
+  const [refreshKey, setRefreshKey] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
     api
@@ -29,21 +32,14 @@ export function GrantsPage() {
         setError(e instanceof ApiError ? e.message : String(e));
       });
     return () => controller.abort();
-  }, [subject]);
-
-  const reload = () => {
-    api
-      .listGrants(subject.trim())
-      .then(setGrants)
-      .catch((e: unknown) => setError(e instanceof ApiError ? e.message : String(e)));
-  };
+  }, [subject, refreshKey]);
 
   const revoke = async (id: string) => {
     setBusyId(id);
     setError(null);
     try {
-      await api.revokeGrant(id);
-      reload();
+      await api.revokeGrant(id, reviewer);
+      setRefreshKey((k) => k + 1);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -85,9 +81,9 @@ export function GrantsPage() {
 
     setCreating(true);
     try {
-      await api.createGrant(subject.trim(), scopes, newDepth, ttlSeconds);
+      await api.createGrant(subject.trim(), scopes, newDepth, reviewer, ttlSeconds);
       setNewScopes("");
-      reload();
+      setRefreshKey((k) => k + 1);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -98,6 +94,15 @@ export function GrantsPage() {
   return (
     <section>
       <h2>Grants</h2>
+      <label className="reviewer-field">
+        Reviewing as
+        <input
+          value={reviewer}
+          onChange={(e) => setReviewer(e.target.value)}
+          placeholder="your name"
+          aria-label="Reviewer name"
+        />
+      </label>
       <label className="subject-field">
         Subject
         <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="agent-a" />
@@ -114,7 +119,7 @@ export function GrantsPage() {
               {g.expires_at && ` · expires ${new Date(g.expires_at).toLocaleString()}`}
             </p>
             {g.active && (
-              <button disabled={busyId === g.id} onClick={() => revoke(g.id)} className="secondary">
+              <button disabled={busyId === g.id || !reviewer.trim()} onClick={() => revoke(g.id)} className="secondary">
                 Revoke
               </button>
             )}
@@ -157,7 +162,7 @@ export function GrantsPage() {
             onChange={(e) => setNewTTLMinutes(e.target.value)}
           />
         </label>
-        <button type="submit" disabled={creating}>
+        <button type="submit" disabled={creating || !reviewer.trim()}>
           Create grant
         </button>
       </form>

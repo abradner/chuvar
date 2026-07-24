@@ -51,7 +51,7 @@ describe("api client", () => {
         throw new Error("json() should not be called for a 204 response");
       },
     });
-    const result = await api.revokeGrant("grant-1");
+    const result = await api.revokeGrant("grant-1", "reviewer-a");
     expect(result).toBeUndefined();
   });
 
@@ -67,6 +67,30 @@ describe("api client", () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain("/api/staged-diffs/diff-1/approve");
     expect(JSON.parse(init.body as string)).toEqual({ decided_by: "reviewer-a" });
+  });
+
+  it("sends the revoked_by body on revokeGrant", async () => {
+    const fetchMock = mockFetchOnce({ ok: true, status: 204 });
+    await api.revokeGrant("grant-1", "reviewer-a");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/grants/grant-1/revoke");
+    expect(JSON.parse(init.body as string)).toEqual({ revoked_by: "reviewer-a" });
+  });
+
+  it("sends the approved_by body on createGrant", async () => {
+    const fetchMock = mockFetchOnce({ ok: true, status: 201, json: async () => ({}) });
+    await api.createGrant("agent-a", ["identity.basic"], "facts", "reviewer-a", 300);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/grants");
+    expect(JSON.parse(init.body as string)).toEqual({
+      subject: "agent-a",
+      scopes: ["identity.basic"],
+      depth: "facts",
+      approved_by: "reviewer-a",
+      ttl_seconds: 300,
+    });
   });
 
   it("sends an Authorization bearer header on every request", async () => {

@@ -119,6 +119,7 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("GET /api/staged-diffs", a.listStagedDiffs)
 	mux.HandleFunc("POST /api/staged-diffs/{id}/approve", a.approveStagedDiff)
 	mux.HandleFunc("POST /api/staged-diffs/{id}/reject", a.rejectStagedDiff)
+	mux.HandleFunc("GET /api/facts/{id}", a.getFact)
 	mux.HandleFunc("GET /api/grants", a.listGrants)
 	mux.HandleFunc("POST /api/grants", a.createGrant)
 	mux.HandleFunc("POST /api/grants/{id}/revoke", a.revokeGrant)

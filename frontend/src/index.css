@@ -186,15 +186,35 @@ button.secondary {
   gap: 8px;
 }
 
-.subject-field {
+.subject-field,
+.reviewer-field {
   display: block;
   margin-bottom: 20px;
   font-size: 14px;
 }
 
-.subject-field input {
+.subject-field input,
+.reviewer-field input {
   display: block;
   margin-top: 4px;
+}
+
+.target-fact {
+  border-left: 3px solid var(--danger);
+  padding-left: 10px;
+  margin-bottom: 10px;
+}
+
+.target-fact-label {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--danger);
+}
+
+.old-content {
+  opacity: 0.7;
+  text-decoration: line-through;
 }
 
 .new-grant-form {
