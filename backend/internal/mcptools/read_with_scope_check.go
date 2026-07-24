@@ -6,15 +6,15 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"memoryvault/internal/embed"
-	"memoryvault/internal/scope"
-	"memoryvault/internal/store"
+	"github.com/abradner/chuvar/backend/internal/embed"
+	"github.com/abradner/chuvar/backend/internal/scope"
+	"github.com/abradner/chuvar/backend/internal/store"
 )
 
 type readArgs struct {
-	Query           string   `json:"query" jsonschema:"free-text search query"`
+	Query           string   `json:"query" jsonschema:"free-text search query, max 1024 characters"`
 	RequestedScopes []string `json:"requested_scopes" jsonschema:"scopes this query is expected to touch, checked against your grants before any search runs"`
-	Limit           int      `json:"limit,omitempty" jsonschema:"max facts to return, default 20"`
+	Limit           int      `json:"limit,omitempty" jsonschema:"max facts to return, default 20, max 200"`
 }
 
 type factView struct {
@@ -51,6 +51,12 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args readArgs) (*mcp.CallToolResult, readOutput, error) {
 		if len(args.RequestedScopes) > maxScopesPerRequest {
 			return nil, readOutput{}, fmt.Errorf("read_with_scope_check: requested_scopes exceeds max of %d", maxScopesPerRequest)
+		}
+		if len(args.Query) > maxQueryLength {
+			return nil, readOutput{}, fmt.Errorf("read_with_scope_check: query exceeds max length of %d", maxQueryLength)
+		}
+		if args.Limit > maxSearchLimit {
+			return nil, readOutput{}, fmt.Errorf("read_with_scope_check: limit exceeds max of %d", maxSearchLimit)
 		}
 		requested := toScopes(args.RequestedScopes)
 		for _, r := range requested {

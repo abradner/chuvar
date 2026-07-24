@@ -8,10 +8,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"memoryvault/internal/bouncer"
-	"memoryvault/internal/db"
-	"memoryvault/internal/embed"
-	"memoryvault/internal/store"
+	"github.com/abradner/chuvar/backend/internal/bouncer"
+	"github.com/abradner/chuvar/backend/internal/db"
+	"github.com/abradner/chuvar/backend/internal/embed"
+	"github.com/abradner/chuvar/backend/internal/store"
 )
 
 // testSession spins up a real MCP server bound to subject (with all v0 tools
@@ -42,7 +42,7 @@ func testSession(t *testing.T, subject string) (*mcp.ClientSession, *store.Store
 	emb := embed.Stub{}
 	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "memoryvault-test", Version: "test"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
 	Register(server, subject, st, emb, b)
 
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
@@ -140,7 +140,7 @@ func TestSubjectIsBoundNotClientSupplied(t *testing.T) {
 	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
 
 	newSession := func(subject string) *mcp.ClientSession {
-		server := mcp.NewServer(&mcp.Implementation{Name: "memoryvault-test", Version: "test"}, nil)
+		server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
 		Register(server, subject, st, emb, b)
 		clientTransport, serverTransport := mcp.NewInMemoryTransports()
 		if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
@@ -201,6 +201,43 @@ func TestReadWithScopeCheck_TooManyRequestedScopesIsError(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Fatal("read_with_scope_check with more than maxScopesPerRequest scopes: want a tool error, got success")
+	}
+}
+
+func TestReadWithScopeCheck_QueryTooLongIsError(t *testing.T) {
+	session, _ := testSession(t, "agent-a")
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "read_with_scope_check",
+		Arguments: readArgs{
+			Query:           string(make([]byte, maxQueryLength+1)),
+			RequestedScopes: []string{"identity.basic"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() transport error = %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("read_with_scope_check with a query over maxQueryLength: want a tool error, got success")
+	}
+}
+
+func TestReadWithScopeCheck_LimitTooLargeIsError(t *testing.T) {
+	session, _ := testSession(t, "agent-a")
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "read_with_scope_check",
+		Arguments: readArgs{
+			Query:           "x",
+			RequestedScopes: []string{"identity.basic"},
+			Limit:           maxSearchLimit + 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() transport error = %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("read_with_scope_check with limit over maxSearchLimit: want a tool error, got success")
 	}
 }
 

@@ -10,9 +10,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"memoryvault/internal/bouncer"
-	"memoryvault/internal/embed"
-	"memoryvault/internal/store"
+	"github.com/abradner/chuvar/backend/internal/bouncer"
+	"github.com/abradner/chuvar/backend/internal/embed"
+	"github.com/abradner/chuvar/backend/internal/store"
 )
 
 // maxScopesPerRequest and maxContentLength bound tool inputs. Nothing about a real
@@ -23,6 +23,20 @@ import (
 const (
 	maxScopesPerRequest = 50
 	maxContentLength    = 16384
+
+	// maxQueryLength bounds read_with_scope_check's free-text query, separately
+	// from maxContentLength: a search query has no legitimate reason to approach
+	// the size of a proposed fact, and it flows into both embedding generation and
+	// Postgres's plainto_tsquery — an unbounded query string is a cheap way to
+	// force expensive work on both without ever proposing a write.
+	maxQueryLength = 1024
+
+	// maxSearchLimit bounds read_with_scope_check's requested result count.
+	// store.SearchFacts only normalizes non-positive values to a default of 20; an
+	// arbitrarily large positive value passes straight through as a SQL LIMIT,
+	// which is cheap authorization-wise (still scope-filtered) but not cheap
+	// compute/response-size-wise.
+	maxSearchLimit = 200
 )
 
 // Register adds all v0 tools to s, all acting as subject.
