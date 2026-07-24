@@ -4,17 +4,19 @@
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- gen_random_uuid() below is a Postgres core builtin as of PG13 (moved out of
--- pgcrypto) — no extension needed on the pg18 image this project targets
--- (docker-compose.yml). Don't add `CREATE EXTENSION pgcrypto` here on an
--- automated reviewer's suggestion without checking the target version first.
+-- uuidv7() below is a Postgres core builtin as of PG18 (docker-compose.yml pins
+-- pg18) — no extension needed. Chosen over gen_random_uuid() (v4) deliberately:
+-- v7 UUIDs are time-ordered, which keeps b-tree index inserts append-mostly
+-- instead of scattering randomly across the whole index (v4's problem), and
+-- leaves the door open for range-based partitioning by id later without a
+-- separate partitioning key. Every PRIMARY KEY DEFAULT in this migration uses it.
 
 -- Embedding dimension is a placeholder (MiniLM-sized) pending the Research track's
 -- classifier/embedding-model choice (Notion: "Research — Scope Classifier & Dedup
 -- Model"). Changing it later means a new migration that rebuilds the column and its
 -- index — expected, not a design flaw; don't treat 384 as load-bearing.
 CREATE TABLE facts (
-    id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id                     UUID PRIMARY KEY DEFAULT uuidv7(),
     content                TEXT NOT NULL,
     embedding              vector(384),
     content_tsv            tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
@@ -84,7 +86,7 @@ CREATE INDEX fact_scopes_scope_idx ON fact_scopes (scope text_pattern_ops);
 
 -- Grants: time-boxed, revocable, depth-leveled (progressive disclosure per Notion §3).
 CREATE TABLE grants (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id          UUID PRIMARY KEY DEFAULT uuidv7(),
     subject     TEXT NOT NULL,
     depth       TEXT NOT NULL DEFAULT 'facts' CHECK (depth IN ('summary', 'facts', 'full')),
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -116,7 +118,7 @@ CREATE INDEX grant_scopes_scope_idx ON grant_scopes (scope text_pattern_ops);
 -- future write path touching staged_diffs.status or a fact's supersession must
 -- follow the same locking discipline; the schema itself doesn't stop a bypass.
 CREATE TABLE staged_diffs (
-    id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id                        UUID PRIMARY KEY DEFAULT uuidv7(),
     subject                   TEXT NOT NULL,
     content                   TEXT NOT NULL,
     proposed_scopes           TEXT[] NOT NULL,
@@ -148,7 +150,7 @@ CREATE INDEX staged_diffs_status_idx ON staged_diffs (status);
 -- audit history from the mutable record; we do the same by never updating a row
 -- here after insert.
 CREATE TABLE audit_log (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id              UUID PRIMARY KEY DEFAULT uuidv7(),
     event_type      TEXT NOT NULL,
     subject         TEXT NOT NULL,
     fact_id         UUID REFERENCES facts(id),
