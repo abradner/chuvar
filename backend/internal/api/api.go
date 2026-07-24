@@ -18,14 +18,26 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"time"
 
 	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/store"
 )
+
+// maxRequestBodyBytes bounds every request body this API accepts. Every body here
+// is a handful of JSON fields (a grant or decision request) — nothing legitimate
+// approaches this. Without it, semantic limits (maxScopesPerGrant etc.) only run
+// after json.Decoder has already read and allocated the entire body, so a fast
+// authenticated request with an arbitrarily large body can still consume memory
+// before any of those checks get a chance to reject it.
+const maxRequestBodyBytes = 1 << 16 // 64KiB
 
 type API struct {
 	Store    *store.Store
@@ -42,13 +54,59 @@ type API struct {
 	// empty/unset auth token is worse than one that refuses to start: it would
 	// silently accept every request as authenticated.
 	AuthToken string
+
+	// RequestTimeout bounds how long a single request's context stays alive —
+	// see withRequestTimeout. Required (New panics if <= 0): the zero value would
+	// mean "no timeout," silently undoing the whole point of this field.
+	RequestTimeout time.Duration
 }
 
-func New(st *store.Store, emb embed.Embedder, allowedOrigin, authToken string) *API {
+func New(st *store.Store, emb embed.Embedder, allowedOrigin, authToken string, requestTimeout time.Duration) *API {
 	if authToken == "" {
 		panic("api: AuthToken must not be empty — see the package comment")
 	}
-	return &API{Store: st, Embedder: emb, AllowedOrigin: allowedOrigin, AuthToken: authToken}
+	if requestTimeout <= 0 {
+		panic("api: RequestTimeout must be positive — a zero or negative value disables request cancellation entirely")
+	}
+	if err := validateAllowedOrigin(allowedOrigin); err != nil {
+		panic("api: " + err.Error())
+	}
+	return &API{Store: st, Embedder: emb, AllowedOrigin: allowedOrigin, AuthToken: authToken, RequestTimeout: requestTimeout}
+}
+
+// validateAllowedOrigin rejects anything that isn't either empty (CORS disabled)
+// or a single, concrete http(s) origin with no path. Found in review: this
+// package's whole design intent is "never a wildcard" (see the package comment),
+// but nothing actually enforced that — CORS_ALLOWED_ORIGIN=* would have been
+// accepted verbatim and reflected back on every request. "null" is rejected too:
+// browsers send the literal Origin: null header for sandboxed contexts (a
+// sandboxed iframe, a file:// page), so accepting the string "null" as a
+// configured origin is a known way to let exactly those untrusted contexts pass
+// the check.
+func validateAllowedOrigin(origin string) error {
+	if origin == "" {
+		return nil
+	}
+	if origin == "*" {
+		return fmt.Errorf("CORS_ALLOWED_ORIGIN must not be a wildcard")
+	}
+	if origin == "null" {
+		return fmt.Errorf("CORS_ALLOWED_ORIGIN must not be \"null\" (the sandboxed-origin value browsers send for untrusted contexts)")
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return fmt.Errorf("invalid CORS_ALLOWED_ORIGIN %q: %w", origin, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("CORS_ALLOWED_ORIGIN %q must use http or https", origin)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("CORS_ALLOWED_ORIGIN %q must include a host", origin)
+	}
+	if u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("CORS_ALLOWED_ORIGIN %q must not include a path", origin)
+	}
+	return nil
 }
 
 // Routes builds the mux. Uses Go's stdlib method+path routing (net/http as of
@@ -64,7 +122,34 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("GET /api/grants", a.listGrants)
 	mux.HandleFunc("POST /api/grants", a.createGrant)
 	mux.HandleFunc("POST /api/grants/{id}/revoke", a.revokeGrant)
-	return a.cors(a.requireAuth(mux))
+	return a.cors(a.requireAuth(a.limitBody(a.withRequestTimeout(mux))))
+}
+
+// withRequestTimeout bounds the context every handler receives at a.RequestTimeout.
+// This is distinct from (and doesn't replace) the http.Server socket-level
+// Read/Write/IdleTimeout fields set in cmd/apiserver/main.go: those bound reading
+// the request and writing the response, not how long a handler already in
+// progress keeps running. Without this, a slow store/embedder call could keep
+// mutating state well after those socket timeouts had already given up on the
+// connection — e.g. committing an approval after the response write had timed
+// out. Every handler in this package threads r.Context() through to its
+// store/embedder calls already, so wrapping it here is enough to make them
+// observe cancellation; found in review.
+func (a *API) withRequestTimeout(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), a.RequestTimeout)
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// limitBody caps every request body at maxRequestBodyBytes before any handler (or
+// json.Decoder) reads it.
+func (a *API) limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

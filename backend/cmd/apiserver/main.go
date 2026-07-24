@@ -59,7 +59,7 @@ func run() error {
 		allowedOrigin = "http://localhost:5173"
 	}
 
-	a := api.New(store.New(pool), embed.Stub{}, allowedOrigin, authToken)
+	a := api.New(store.New(pool), embed.Stub{}, allowedOrigin, authToken, cfg.RequestTimeout)
 
 	// Read/Write/IdleTimeout and ReadHeaderTimeout all come from cfg.RequestTimeout
 	// rather than being left at the zero-value http.Server default (no timeout at
