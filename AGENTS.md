@@ -36,6 +36,7 @@ need driving it.
 | Language (backend) | Go 1.26 | Managed via `mise` |
 | Language (frontend) | TypeScript + React | Vite, no meta-framework needed at this scale. Bun as runtime + package manager. |
 | Database | PostgreSQL + pgvector | Sole canonical store — facts, scopes, grants, audit log, embeddings, all transactionally atomic. Local dev via `docker-compose.yml`. **No dedicated vector DB as source of truth in CE** — see §3.2. |
+| Data access | [sqlc](https://sqlc.dev), `pgx/v5` | `internal/store` — hand-written SQL in `queries/*.sql`, typed Go generated into `sqlcgen/`. Chosen over an ORM specifically to keep the hand-tuned queries (RRF fusion, scope-visibility CTEs) under our control. |
 | MCP transport | `modelcontextprotocol/go-sdk` | stdio for v0 |
 | Write path | Postgres-backed staged-diff state machine | Temporal is the intended long-term engine for the bouncer pipeline (see Notion §4) but is deliberately deferred — don't stand up a Temporal cluster for v0 work, see §3.3 |
 | Testing | Go: stdlib `testing` + `testify/require` where assertions get noisy. TS: Vitest + React Testing Library. | |
@@ -88,9 +89,16 @@ Don't add a hardcoded scope registry or CHECK constraint that bakes in a specifi
   each other's data mid-test. This is a test-runner-vs-shared-database problem, not
   flakiness in the code; don't "fix" a failure here by chasing the wrong thing.
 - Frontend: `cd frontend && bun install && bun run dev`. Tests: `bun run test`.
-- Migrations live in `backend/internal/db/migrations/` (plain numbered `.sql` files, run via
-  `golang-migrate` as a library — no separate CLI tool required). Check the latest migration
+- Migrations live in `backend/internal/db/migrations/` (timestamp-versioned `.sql` files, run
+  via `golang-migrate` as a library — no separate CLI tool required). Check the latest migration
   before writing a new one; never hand-edit a migration that's already merged to `main`.
+- `internal/store` is generated from SQL via [sqlc](https://sqlc.dev) (`backend/sqlc.yaml`) — hand-written
+  query files live in `backend/internal/store/queries/*.sql`, generated Go in
+  `backend/internal/store/sqlcgen/` (never hand-edit that directory; it's regenerated wholesale).
+  After changing a query, regenerate with `DATABASE_URL` set and Postgres up:
+  `cd backend && DATABASE_URL=... mise exec -- sqlc generate`. sqlc analyzes queries against a
+  live database rather than static schema parsing — its static parser doesn't know pgvector's
+  `vector` type or `<=>` operator, since those come from the extension, not core Postgres.
 
 ### 4.5 Known Environment Gotchas
 
@@ -105,7 +113,7 @@ Things that cost real time to discover once — don't rediscover them:
   sandbox for those calls.
 - **Port 5432 is already claimed** by the sibling `spritz` project on this machine (also
   7233/8233/44491 for its Temporal, 3900-3903 for Garage) — check `docker ps` before
-  assuming a default port is free. This repo's Postgres uses 5433, bound to
+  assuming a default port is free. This repo's Postgres uses 54322, bound to
   `127.0.0.1` only (see `docker-compose.yml`).
 - **Postgres 18+ Docker images require the volume mounted at `/var/lib/postgresql`**,
   not `/var/lib/postgresql/data` — the old path silently produces an unhealthy

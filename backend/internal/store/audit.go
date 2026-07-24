@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/abradner/chuvar/backend/internal/store/sqlcgen"
 )
 
 type AuditEvent struct {
@@ -26,14 +28,14 @@ type AuditEvent struct {
 // atomic with (mcptools' read-path events: "read", "insufficient_scope" — there's
 // no mutation to fail-together-with here). Every mutation in this package
 // (CommitDiff, CreateGrant, RevokeGrant, RejectDiff) logs its own event through
-// logAudit inside its own transaction instead, so the audit row and the mutation
-// it describes commit or roll back as one unit — seeing the mutation without a
-// corresponding audit row (or vice versa) should never be possible.
+// logAudit inside its own transaction instead (via q.WithTx), so the audit row and
+// the mutation it describes commit or roll back as one unit — seeing the mutation
+// without a corresponding audit row (or vice versa) should never be possible.
 func (s *Store) LogAudit(ctx context.Context, eventType, subject string, factID, grantID, stagedDiffID *string, scopes []string) error {
-	return logAudit(ctx, s.pool, eventType, subject, factID, grantID, stagedDiffID, scopes)
+	return logAudit(ctx, s.q, eventType, subject, factID, grantID, stagedDiffID, scopes)
 }
 
-func logAudit(ctx context.Context, q queryer, eventType, subject string, factID, grantID, stagedDiffID *string, scopes []string) error {
+func logAudit(ctx context.Context, q *sqlcgen.Queries, eventType, subject string, factID, grantID, stagedDiffID *string, scopes []string) error {
 	// scopes is NOT NULL DEFAULT '{}' — that default only applies when the column
 	// is omitted from the INSERT, not when an explicit NULL is bound, and pgx
 	// sends a nil Go slice as SQL NULL rather than an empty array literal. Callers
@@ -43,11 +45,14 @@ func logAudit(ctx context.Context, q queryer, eventType, subject string, factID,
 	if scopes == nil {
 		scopes = []string{}
 	}
-	_, err := q.Exec(ctx,
-		`INSERT INTO audit_log (event_type, subject, fact_id, grant_id, staged_diff_id, scopes)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		eventType, subject, factID, grantID, stagedDiffID, scopes,
-	)
+	err := q.InsertAuditLog(ctx, sqlcgen.InsertAuditLogParams{
+		EventType:    eventType,
+		Subject:      subject,
+		FactID:       factID,
+		GrantID:      grantID,
+		StagedDiffID: stagedDiffID,
+		Scopes:       scopes,
+	})
 	if err != nil {
 		return fmt.Errorf("store: log audit event %q: %w", eventType, err)
 	}

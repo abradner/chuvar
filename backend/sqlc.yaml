@@ -1,0 +1,53 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    queries: "internal/store/queries"
+    schema: "internal/db/migrations/20260722234814_init.up.sql"
+    # Live-DB analysis rather than static schema parsing: sqlc's static parser
+    # doesn't know pgvector's `vector` type or `<=>` operator, since those come
+    # from the extension, not core Postgres. Reuses the same DATABASE_URL every
+    # other backend command already expects (docker-compose.yml) — `sqlc
+    # generate` needs the local Postgres up and migrated first.
+    database:
+      uri: "${DATABASE_URL}"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/store/sqlcgen"
+        sql_package: "pgx/v5"
+        emit_json_tags: false
+        emit_interface: true
+        emit_exact_table_names: false
+        overrides:
+          - db_type: "uuid"
+            go_type: "string"
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              type: "string"
+              pointer: true
+          - db_type: "text"
+            nullable: true
+            go_type:
+              type: "string"
+              pointer: true
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              import: "time"
+              type: "Time"
+              pointer: true
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+          - db_type: "vector"
+            go_type:
+              import: "github.com/pgvector/pgvector-go"
+              package: "pgvector"
+              type: "Vector"
+          - db_type: "vector"
+            nullable: true
+            go_type:
+              import: "github.com/pgvector/pgvector-go"
+              package: "pgvector"
+              type: "Vector"
+              pointer: true
