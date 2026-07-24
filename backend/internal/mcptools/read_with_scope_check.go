@@ -17,6 +17,15 @@ type readArgs struct {
 	Limit           int      `json:"limit,omitempty" jsonschema:"max facts to return, default 20, max 200"`
 }
 
+// factView's Content is always the fact's full, real content, regardless of the
+// grant's depth (summary/facts/full — internal/store's Grant.Depth, validated and
+// stored but not read anywhere in this file). Depth is not enforced today: a
+// "summary" grant currently exposes exactly the same content as "full." That's a
+// real gap, not a design choice, flagged in review — closing it needs a product
+// decision this project hasn't made (what does a summary actually contain — a
+// truncation? A separately generated field? Metadata-only?), so it's left
+// documented here rather than guessed at with placeholder semantics that might not
+// match whatever the real answer turns out to be.
 type factView struct {
 	ID      string   `json:"id"`
 	Content string   `json:"content"`
@@ -90,6 +99,31 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 			if err != nil {
 				return nil, readOutput{}, toolError("read_with_scope_check", err)
 			}
+		}
+
+		// Re-fetch granted scopes here rather than reusing the snapshot from
+		// before Embed ran: a grant expiring or being revoked while Embed is in
+		// flight would otherwise let SearchFacts run against a stale, wider scope
+		// list than the subject currently holds — content disclosed after
+		// revocation. Embed is synchronous/instant against the v0 Stub embedder,
+		// so this window is nil today, but the real embedder this is meant to be
+		// swapped for (Research track) is an external, non-trivial-latency call,
+		// which is exactly when this race becomes real. This closes the window
+		// between "embed" and "search"; it doesn't make the whole request atomic
+		// against a grant change — full atomicity would mean pushing grant
+		// membership into the retrieval SQL itself (keyed by subject, joined at
+		// query time), a larger restructure of SearchFacts' signature and every
+		// caller, not justified for a race this narrow today.
+		grantedStrs, err = st.GrantedScopes(ctx, subject)
+		if err != nil {
+			return nil, readOutput{}, toolError("read_with_scope_check", err)
+		}
+		if missing := scope.Missing(requested, toScopes(grantedStrs)); len(missing) > 0 {
+			missingStrs := fromScopes(missing)
+			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, missingStrs); err != nil {
+				return nil, readOutput{}, toolError("read_with_scope_check", err)
+			}
+			return nil, readOutput{Status: "insufficient_scope", MissingScopes: missingStrs}, nil
 		}
 
 		facts, err := st.SearchFacts(ctx, args.Query, queryVec, grantedStrs, limit)

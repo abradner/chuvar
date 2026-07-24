@@ -85,7 +85,7 @@ func TestListGrants_ViaMCP(t *testing.T) {
 	session, st := testSession(t, "agent-a")
 	ctx := context.Background()
 
-	if _, err := st.CreateGrant(ctx, "agent-a", []string{"identity.basic", "preferences.coffee"}, "facts", nil); err != nil {
+	if _, err := st.CreateGrant(ctx, "agent-a", []string{"identity.basic", "preferences.coffee"}, "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
@@ -129,10 +129,10 @@ func TestSubjectIsBoundNotClientSupplied(t *testing.T) {
 	}
 	st := store.New(pool)
 
-	if _, err := st.CreateGrant(ctx, "alice", []string{"identity.sensitive"}, "facts", nil); err != nil {
+	if _, err := st.CreateGrant(ctx, "alice", []string{"identity.sensitive"}, "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
-	if _, err := st.CreateGrant(ctx, "bob", []string{"preferences.coffee"}, "facts", nil); err != nil {
+	if _, err := st.CreateGrant(ctx, "bob", []string{"preferences.coffee"}, "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
@@ -241,6 +241,76 @@ func TestReadWithScopeCheck_LimitTooLargeIsError(t *testing.T) {
 	}
 }
 
+// revokingEmbedder wraps a real Embedder and revokes a grant as a side effect of
+// Embed — simulating a grant being revoked while an embedding call is in flight,
+// deterministically rather than relying on real timing. See
+// TestReadWithScopeCheck_RevokedMidEmbedIsRejected.
+type revokingEmbedder struct {
+	embed.Embedder
+	st      *store.Store
+	grantID string
+}
+
+func (e revokingEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if err := e.st.RevokeGrant(ctx, e.grantID, "test-revoker"); err != nil {
+		return nil, err
+	}
+	return e.Embedder.Embed(ctx, text)
+}
+
+func TestReadWithScopeCheck_RevokedMidEmbedIsRejected(t *testing.T) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set; skipping mcptools integration test")
+	}
+	if err := db.Migrate(url); err != nil {
+		t.Fatalf("db.Migrate() error = %v", err)
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log`); err != nil {
+		t.Fatalf("truncating tables: %v", err)
+	}
+
+	st := store.New(pool)
+	g, err := st.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "test-setup")
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	emb := revokingEmbedder{Embedder: embed.Stub{}, st: st, grantID: g.ID}
+	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
+	Register(server, "agent-a", st, emb, b)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server.Connect() error = %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "test"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	// The grant is active when the tool call starts (requested_scopes passes the
+	// pre-embed check) but gets revoked inside Embed, before SearchFacts runs.
+	// Without the re-fetch, this would return status=ok using the stale
+	// pre-revocation scope snapshot.
+	out := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
+		Query:           "anything",
+		RequestedScopes: []string{"identity.basic"},
+	})
+	if out.Status != "insufficient_scope" {
+		t.Fatalf("read_with_scope_check after mid-request revocation: status = %q, want insufficient_scope", out.Status)
+	}
+}
+
 func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 	session, st := testSession(t, "agent-a")
 	ctx := context.Background()
@@ -260,7 +330,7 @@ func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 	// separate, human-triggered action (AGENTS.md §3.1), not exposed as an MCP
 	// tool in v0. Commit it directly via the store, standing in for that human
 	// approval step.
-	if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.coffee"}, "facts", nil); err != nil {
+	if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.coffee"}, "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 	beforeCommit := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
