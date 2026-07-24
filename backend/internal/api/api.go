@@ -23,8 +23,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	"memoryvault/internal/embed"
-	"memoryvault/internal/store"
+	"github.com/abradner/chuvar/backend/internal/embed"
+	"github.com/abradner/chuvar/backend/internal/store"
 )
 
 type API struct {

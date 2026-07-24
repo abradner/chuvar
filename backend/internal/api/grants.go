@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"memoryvault/internal/scope"
-	"memoryvault/internal/store"
+	"github.com/abradner/chuvar/backend/internal/scope"
+	"github.com/abradner/chuvar/backend/internal/store"
 )
 
 // maxScopesPerGrant bounds how many scopes a single request can create a grant
@@ -15,6 +15,13 @@ import (
 // malformed or hostile request can't turn a single POST into thousands of
 // individual grant_scopes inserts inside one transaction.
 const maxScopesPerGrant = 50
+
+// maxGrantTTLSeconds bounds how far out a grant's expiry can be requested.
+// Arbitrary-but-generous (a year), not a product decision — it exists so a client
+// sending a pathological ttl_seconds (near math.MaxInt64) can't overflow the
+// *time.Second conversion below or hand store.CreateGrant a duration that produces
+// a nonsensical expires_at via time.Now().Add.
+const maxGrantTTLSeconds = 365 * 24 * 3600
 
 // validDepths mirrors the CHECK (depth IN (...)) constraint on the grants table
 // (0001_init.up.sql) — kept in sync manually since there's no shared source of
@@ -111,14 +118,27 @@ func (a *API) createGrant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("scopes exceeds max of %d", maxScopesPerGrant))
 		return
 	}
-	for _, s := range req.Scopes {
+	scopes := make([]scope.Scope, len(req.Scopes))
+	for i, s := range req.Scopes {
 		if err := scope.Validate(scope.Scope(s)); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
+		scopes[i] = scope.Scope(s)
+	}
+	// grant_scopes has PRIMARY KEY (grant_id, scope) — without this check, a
+	// duplicate scope in the request reaches the store as a constraint violation
+	// (a 500) instead of a clean 400 naming the actual problem.
+	if deduped := scope.Dedupe(scopes); len(deduped) != len(scopes) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("scopes must not contain duplicates"))
+		return
 	}
 	if req.TTLSeconds != nil && *req.TTLSeconds <= 0 {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("ttl_seconds must be positive if provided (got %d)", *req.TTLSeconds))
+		return
+	}
+	if req.TTLSeconds != nil && *req.TTLSeconds > maxGrantTTLSeconds {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("ttl_seconds exceeds max of %d (got %d)", maxGrantTTLSeconds, *req.TTLSeconds))
 		return
 	}
 

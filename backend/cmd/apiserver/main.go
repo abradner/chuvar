@@ -10,11 +10,11 @@ import (
 	"net/http"
 	"os"
 
-	"memoryvault/internal/api"
-	"memoryvault/internal/config"
-	"memoryvault/internal/db"
-	"memoryvault/internal/embed"
-	"memoryvault/internal/store"
+	"github.com/abradner/chuvar/backend/internal/api"
+	"github.com/abradner/chuvar/backend/internal/config"
+	"github.com/abradner/chuvar/backend/internal/db"
+	"github.com/abradner/chuvar/backend/internal/embed"
+	"github.com/abradner/chuvar/backend/internal/store"
 )
 
 func main() {

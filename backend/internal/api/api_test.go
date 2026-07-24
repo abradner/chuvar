@@ -9,9 +9,9 @@ import (
 	"os"
 	"testing"
 
-	"memoryvault/internal/db"
-	"memoryvault/internal/embed"
-	"memoryvault/internal/store"
+	"github.com/abradner/chuvar/backend/internal/db"
+	"github.com/abradner/chuvar/backend/internal/embed"
+	"github.com/abradner/chuvar/backend/internal/store"
 )
 
 const testAuthToken = "test-token-do-not-use-in-prod"
@@ -186,6 +186,39 @@ func TestCreateGrant_NegativeTTLRejected(t *testing.T) {
 	})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST /api/grants with negative ttl_seconds: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestCreateGrant_DuplicateScopesRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
+		Subject: "agent-a",
+		Scopes:  []string{"identity.basic", "identity.basic"},
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /api/grants with duplicate scopes: status = %d, want 400", resp.StatusCode)
+	}
+	// This is the regression case from review: a duplicate scope used to reach
+	// grant_scopes' (grant_id, scope) primary key and come back as a 500 instead
+	// of a clean 400.
+	body := decodeInto[errorResponse](t, resp)
+	if body.Error == "" {
+		t.Error("expected a clean validation message, got empty error")
+	}
+}
+
+func TestCreateGrant_TTLTooLargeRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	huge := maxGrantTTLSeconds + 1
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
+		Subject:    "agent-a",
+		Scopes:     []string{"identity.basic"},
+		TTLSeconds: &huge,
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /api/grants with ttl_seconds over max: status = %d, want 400", resp.StatusCode)
 	}
 }
 
