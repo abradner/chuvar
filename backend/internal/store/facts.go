@@ -16,6 +16,20 @@ import (
 // escapes, not a defensive nicety.
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `_`, `\_`, `%`, `\%`)
 
+// scopePrefixes converts grantedScopes into LIKE patterns that match a scope's
+// dotted descendants (e.g. "projects.spritz" -> "projects.spritz.%"), escaping
+// LIKE metacharacters. Shared by SearchFacts and findDedupeCandidate — both need
+// identical scope-visibility semantics, since the dedupe candidate search is a
+// second read path with the same confidentiality requirement as search: a fact
+// outside the caller's grants must not be observable through it either.
+func scopePrefixes(grantedScopes []string) []string {
+	prefixes := make([]string, len(grantedScopes))
+	for i, g := range grantedScopes {
+		prefixes[i] = likeEscaper.Replace(g) + ".%"
+	}
+	return prefixes
+}
+
 // rrfK is the standard Reciprocal Rank Fusion smoothing constant (Cormack et al.'s
 // original RRF paper uses 60; it's not sensitive to small changes, no need to make
 // it configurable yet).
@@ -40,10 +54,7 @@ func (s *Store) SearchFacts(ctx context.Context, queryText string, queryEmbeddin
 		limit = 20
 	}
 
-	prefixes := make([]string, len(grantedScopes))
-	for i, g := range grantedScopes {
-		prefixes[i] = likeEscaper.Replace(g) + ".%"
-	}
+	prefixes := scopePrefixes(grantedScopes)
 
 	embParam, err := toVectorParam(queryEmbedding)
 	if err != nil {

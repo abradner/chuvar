@@ -1,8 +1,11 @@
 package store
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 )
@@ -14,6 +17,20 @@ type Store struct {
 func New(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
+
+// queryer is satisfied by both *pgxpool.Pool and pgx.Tx. Functions that need to
+// run either standalone or as part of a caller's transaction (see logAudit) take
+// this instead of a concrete pool, so a mutation and its audit_log row can commit
+// or roll back together atomically rather than the audit write happening as a
+// separate, non-atomic follow-up call.
+type queryer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+var (
+	_ queryer = (*pgxpool.Pool)(nil)
+	_ queryer = (pgx.Tx)(nil)
+)
 
 // embeddingDim must match the `vector(384)` column in the facts table
 // (internal/db/migrations/0001_init.up.sql) and embed.Dim. Not imported from the

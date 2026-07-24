@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/pgvector/pgvector-go"
 )
 
 // dedupeCosineThreshold is the cosine-distance cutoff below which a candidate fact
@@ -22,7 +21,26 @@ const dedupeCosineThreshold = 0.15
 // ProposeDiff stages a new fact proposal and runs the dedupe check against existing
 // active facts before returning. It never writes to `facts` directly — see
 // AGENTS.md §3.1; only CommitDiff does that, and only for an approved diff.
-func (s *Store) ProposeDiff(ctx context.Context, subject, content string, scopes []string, embedding []float32, targetFactID *string) (StagedDiff, error) {
+//
+// proposerGrantedScopes is the proposing subject's current granted scopes — used
+// two ways:
+//   - The dedupe candidate search only considers facts covered by these scopes
+//     (see findDedupeCandidate). Without this, an ungranted agent could propose
+//     guessed sensitive content and distinguish "duplicate"/"contradiction" from
+//     "novel" via the returned verdict, then reuse the leaked candidate fact ID as
+//     targetFactID — a confidentiality leak through a side channel that isn't the
+//     read path at all. Found in review.
+//   - If targetFactID is set, it must be covered by these scopes too: a proposer
+//     can only target a fact they can already read. Without this, an agent could
+//     supply an arbitrary fact UUID (guessed, brute-forced, or leaked exactly as
+//     above) as a supersession target, and — since the approval UI doesn't
+//     currently surface what's being replaced (a separate, UI-layer gap) — get a
+//     human to unknowingly approve silently invalidating an unrelated fact. Also
+//     found in review. This check is necessarily best-effort against a grant that
+//     changes between proposal and approval; it's not a substitute for the
+//     approval UI showing the target explicitly, which is a real fix in its own
+//     right, not just defense in depth.
+func (s *Store) ProposeDiff(ctx context.Context, subject, content string, scopes []string, embedding []float32, targetFactID *string, proposerGrantedScopes []string) (StagedDiff, error) {
 	if content == "" {
 		return StagedDiff{}, fmt.Errorf("store: diff content must not be empty")
 	}
@@ -30,7 +48,17 @@ func (s *Store) ProposeDiff(ctx context.Context, subject, content string, scopes
 		return StagedDiff{}, fmt.Errorf("store: diff must include at least one scope")
 	}
 
-	verdict, candidateID, err := s.findDedupeCandidate(ctx, content, embedding)
+	if targetFactID != nil {
+		visible, err := s.factVisibleToScopes(ctx, *targetFactID, proposerGrantedScopes)
+		if err != nil {
+			return StagedDiff{}, err
+		}
+		if !visible {
+			return StagedDiff{}, fmt.Errorf("store: target_fact_id %s is not covered by the proposer's granted scopes", *targetFactID)
+		}
+	}
+
+	verdict, candidateID, err := s.findDedupeCandidate(ctx, content, embedding, proposerGrantedScopes)
 	if err != nil {
 		return StagedDiff{}, err
 	}
@@ -60,24 +88,68 @@ func (s *Store) ProposeDiff(ctx context.Context, subject, content string, scopes
 	return d, nil
 }
 
-// findDedupeCandidate looks for the nearest active fact by cosine distance. An
+// factVisibleToScopes reports whether the active fact id is covered by
+// grantedScopes, using the same intersection semantics as SearchFacts'
+// candidate_facts CTE (every one of the fact's scope tags must be covered). A fact
+// that no longer exists or is already superseded is not visible.
+func (s *Store) factVisibleToScopes(ctx context.Context, id string, grantedScopes []string) (bool, error) {
+	if len(grantedScopes) == 0 {
+		return false, nil
+	}
+	prefixes := scopePrefixes(grantedScopes)
+	var visible bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (
+		    SELECT 1 FROM facts f
+		    WHERE f.id = $1
+		      AND f.invalid_at IS NULL
+		      AND EXISTS (SELECT 1 FROM fact_scopes fs WHERE fs.fact_id = f.id)
+		      AND NOT EXISTS (
+		          SELECT 1 FROM fact_scopes fs
+		          WHERE fs.fact_id = f.id
+		            AND NOT (fs.scope = ANY($2) OR fs.scope LIKE ANY($3))
+		      )
+		 )`,
+		id, grantedScopes, prefixes,
+	).Scan(&visible)
+	if err != nil {
+		return false, fmt.Errorf("store: check fact visibility: %w", err)
+	}
+	return visible, nil
+}
+
+// findDedupeCandidate looks for the nearest active fact by cosine distance, among
+// facts covered by grantedScopes only — see ProposeDiff's doc comment for why an
+// unfiltered search here is a confidentiality leak, not just a dedupe nicety. An
 // empty embedding (caller has no Embedder configured) skips the check entirely and
 // reports novel — that's a degraded mode, not a silent failure, since the caller
 // chose not to provide one.
-func (s *Store) findDedupeCandidate(ctx context.Context, content string, embedding []float32) (DedupeVerdict, string, error) {
-	if len(embedding) == 0 {
+func (s *Store) findDedupeCandidate(ctx context.Context, content string, embedding []float32, grantedScopes []string) (DedupeVerdict, string, error) {
+	if len(embedding) == 0 || len(grantedScopes) == 0 {
 		return DedupeNovel, "", nil
 	}
 
+	embParam, err := toVectorParam(embedding)
+	if err != nil {
+		return "", "", err
+	}
+	prefixes := scopePrefixes(grantedScopes)
+
 	var candidateID, candidateContent string
 	var distance float64
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, content, embedding <=> $1 AS distance
-		 FROM facts
-		 WHERE invalid_at IS NULL AND embedding IS NOT NULL
-		 ORDER BY embedding <=> $1
+	err = s.pool.QueryRow(ctx,
+		`SELECT f.id, f.content, f.embedding <=> $1::vector AS distance
+		 FROM facts f
+		 WHERE f.invalid_at IS NULL AND f.embedding IS NOT NULL
+		   AND EXISTS (SELECT 1 FROM fact_scopes fs WHERE fs.fact_id = f.id)
+		   AND NOT EXISTS (
+		       SELECT 1 FROM fact_scopes fs
+		       WHERE fs.fact_id = f.id
+		         AND NOT (fs.scope = ANY($2) OR fs.scope LIKE ANY($3))
+		   )
+		 ORDER BY f.embedding <=> $1::vector
 		 LIMIT 1`,
-		pgvector.NewVector(embedding),
+		embParam, grantedScopes, prefixes,
 	).Scan(&candidateID, &candidateContent, &distance)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DedupeNovel, "", nil
@@ -154,9 +226,16 @@ func (s *Store) ListStagedDiffs(ctx context.Context, status DiffStatus) ([]Stage
 	return diffs, rows.Err()
 }
 
-// RejectDiff marks a pending diff rejected. Never touches `facts`.
+// RejectDiff marks a pending diff rejected. Never touches `facts`. decidedBy is
+// logged to audit_log atomically with the rejection.
 func (s *Store) RejectDiff(ctx context.Context, diffID, decidedBy string) error {
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op if already committed
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE staged_diffs SET status = 'rejected', decided_at = now(), decided_by = $2
 		 WHERE id = $1 AND status = 'pending'`,
 		diffID, decidedBy,
@@ -166,6 +245,14 @@ func (s *Store) RejectDiff(ctx context.Context, diffID, decidedBy string) error 
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("store: diff %s is not pending", diffID)
+	}
+
+	if err := logAudit(ctx, tx, "diff_rejected", decidedBy, nil, nil, &diffID, nil); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit diff rejection: %w", err)
 	}
 	return nil
 }
@@ -198,6 +285,36 @@ func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedd
 	}
 	if status != string(DiffPending) {
 		return Fact{}, fmt.Errorf("store: diff %s is not pending (status=%s)", diffID, status)
+	}
+
+	// The dedupe verdict was computed once, at ProposeDiff time. Two identical
+	// proposals can both be staged as "novel" (neither sees the other, since
+	// neither has committed yet) and later both reach CommitDiff — re-checking
+	// only at staging time would let both become real, duplicate facts. Re-run
+	// the exact-content check here, inside this transaction, right before
+	// inserting. This narrows the race to genuinely concurrent commits (the
+	// window between this SELECT and the INSERT below) rather than closing it
+	// completely — full closure would need a database-level uniqueness
+	// constraint, which doesn't compose cleanly with the supersession CHECK
+	// constraint below without real complexity (a partial unique index can't be
+	// deferrable, so the target-invalidation and new-fact-insert ordering would
+	// need to change too). Flagged as a follow-up, not done here: this is a
+	// large jump in complexity for a race that's already far narrower than the
+	// original bug (no re-check at all).
+	targetExclude := targetFactID
+	var dupExists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		    SELECT 1 FROM facts
+		    WHERE invalid_at IS NULL AND content = $1
+		      AND ($2::uuid IS NULL OR id != $2)
+		 )`,
+		content, targetExclude,
+	).Scan(&dupExists); err != nil {
+		return Fact{}, fmt.Errorf("store: duplicate content check: %w", err)
+	}
+	if dupExists {
+		return Fact{}, fmt.Errorf("store: an active fact with identical content already exists; re-review before committing diff %s", diffID)
 	}
 
 	embParam, err := toVectorParam(embedding)
@@ -261,6 +378,10 @@ func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedd
 		diffID, decidedBy,
 	); err != nil {
 		return Fact{}, fmt.Errorf("store: mark diff committed: %w", err)
+	}
+
+	if err := logAudit(ctx, tx, "diff_committed", decidedBy, &f.ID, nil, &diffID, scopes); err != nil {
+		return Fact{}, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {

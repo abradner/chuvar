@@ -50,7 +50,7 @@ func TestGrants_CreateListRevoke(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	g, err := s.CreateGrant(ctx, "agent-a", []string{"projects.spritz.read", "identity.basic"}, "facts", nil)
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"projects.spritz.read", "identity.basic"}, "facts", nil, "human-reviewer")
 	if err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
@@ -74,7 +74,7 @@ func TestGrants_CreateListRevoke(t *testing.T) {
 		t.Fatalf("GrantedScopes() = %v, want 2 scopes", granted)
 	}
 
-	if err := s.RevokeGrant(ctx, g.ID); err != nil {
+	if err := s.RevokeGrant(ctx, g.ID, "human-reviewer"); err != nil {
 		t.Fatalf("RevokeGrant() error = %v", err)
 	}
 	granted, err = s.GrantedScopes(ctx, "agent-a")
@@ -86,7 +86,7 @@ func TestGrants_CreateListRevoke(t *testing.T) {
 	}
 
 	// Revoking again should error, not silently succeed.
-	if err := s.RevokeGrant(ctx, g.ID); err == nil {
+	if err := s.RevokeGrant(ctx, g.ID, "human-reviewer"); err == nil {
 		t.Fatal("RevokeGrant() on already-revoked grant: want error, got nil")
 	}
 }
@@ -96,7 +96,7 @@ func TestGrants_ExpiredExcludedFromGrantedScopes(t *testing.T) {
 	ctx := context.Background()
 
 	past := -time.Hour
-	if _, err := s.CreateGrant(ctx, "agent-b", []string{"identity.basic"}, "facts", &past); err != nil {
+	if _, err := s.CreateGrant(ctx, "agent-b", []string{"identity.basic"}, "facts", &past, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
@@ -113,7 +113,7 @@ func TestCreateGrant_InvalidDepthRejected(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	if _, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "bogus", nil); err == nil {
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "bogus", nil, "human-reviewer"); err == nil {
 		t.Fatal("CreateGrant() with invalid depth: want error, got nil")
 	}
 }
@@ -123,7 +123,7 @@ func TestStagedDiffs_ProposeCommitAndSupersede(t *testing.T) {
 	ctx := context.Background()
 
 	vecA := unitVector(0)
-	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a flat white", []string{"preferences.coffee"}, vecA, nil)
+	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a flat white", []string{"preferences.coffee"}, vecA, nil, []string{"preferences.coffee"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -148,7 +148,7 @@ func TestStagedDiffs_ProposeCommitAndSupersede(t *testing.T) {
 	}
 
 	// Propose an update that supersedes the fact.
-	d2, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a long black", []string{"preferences.coffee"}, unitVector(1), &fact.ID)
+	d2, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a long black", []string{"preferences.coffee"}, unitVector(1), &fact.ID, []string{"preferences.coffee"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() (supersede) error = %v", err)
 	}
@@ -183,7 +183,7 @@ func TestCommitDiff_ConcurrentSupersessionIsSerialized(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(7)
-	original, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Alex", []string{"identity.basic"}, vec, nil)
+	original, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Alex", []string{"identity.basic"}, vec, nil, []string{"identity.basic"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -193,11 +193,11 @@ func TestCommitDiff_ConcurrentSupersessionIsSerialized(t *testing.T) {
 	}
 
 	// Two diffs race to supersede the same fact.
-	diffA, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Alexander", []string{"identity.basic"}, unitVector(8), &targetFact.ID)
+	diffA, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Alexander", []string{"identity.basic"}, unitVector(8), &targetFact.ID, []string{"identity.basic"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() (A) error = %v", err)
 	}
-	diffB, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Al", []string{"identity.basic"}, unitVector(9), &targetFact.ID)
+	diffB, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Al", []string{"identity.basic"}, unitVector(9), &targetFact.ID, []string{"identity.basic"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() (B) error = %v", err)
 	}
@@ -249,7 +249,7 @@ func TestSearchFacts_ScopeWithUnderscoreDoesNotWildcardMatch(t *testing.T) {
 	// ALSO match a fact scoped to "projectsXalpha.secret" for any character X in
 	// that position — an unrelated, never-granted scope leaking through.
 	d, err := s.ProposeDiff(ctx, "agent-a", "a fact scoped to an unrelated underscore-adjacent scope",
-		[]string{"projectsXalpha.secret"}, vec, nil)
+		[]string{"projectsXalpha.secret"}, vec, nil, []string{"projectsXalpha.secret"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -316,7 +316,7 @@ func TestGrantedScopesToSearchFacts_MultiGrantPipelineWithRevocation(t *testing.
 	// does — this is closer to what mcptools.read_with_scope_check actually does.
 	vec := unitVector(12)
 	d, err := s.ProposeDiff(ctx, "agent-a", "a fact needing two different grants worth of scope",
-		[]string{"identity.basic", "projects.spritz.read"}, vec, nil)
+		[]string{"identity.basic", "projects.spritz.read"}, vec, nil, []string{"identity.basic", "projects.spritz.read"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -324,11 +324,11 @@ func TestGrantedScopesToSearchFacts_MultiGrantPipelineWithRevocation(t *testing.
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
-	g1, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil)
+	g1, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "human-reviewer")
 	if err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
-	if _, err := s.CreateGrant(ctx, "agent-a", []string{"projects.spritz.read"}, "facts", nil); err != nil {
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"projects.spritz.read"}, "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
@@ -347,7 +347,7 @@ func TestGrantedScopesToSearchFacts_MultiGrantPipelineWithRevocation(t *testing.
 	// Revoke one of the two grants that together satisfy the fact's required
 	// scopes — even though the other grant is still active, the fact needs both,
 	// so it must disappear from results.
-	if err := s.RevokeGrant(ctx, g1.ID); err != nil {
+	if err := s.RevokeGrant(ctx, g1.ID, "human-reviewer"); err != nil {
 		t.Fatalf("RevokeGrant() error = %v", err)
 	}
 	granted, err = s.GrantedScopes(ctx, "agent-a")
@@ -368,7 +368,7 @@ func TestStagedDiffs_Get(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(6)
-	d, err := s.ProposeDiff(ctx, "agent-a", "user's timezone is Australia/Melbourne", []string{"identity.basic"}, vec, nil)
+	d, err := s.ProposeDiff(ctx, "agent-a", "user's timezone is Australia/Melbourne", []string{"identity.basic"}, vec, nil, []string{"identity.basic"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -393,7 +393,7 @@ func TestStagedDiffs_DedupeExactDuplicate(t *testing.T) {
 	content := "user was born in Melbourne"
 	vec := unitVector(2)
 
-	d1, err := s.ProposeDiff(ctx, "agent-a", content, []string{"identity.basic"}, vec, nil)
+	d1, err := s.ProposeDiff(ctx, "agent-a", content, []string{"identity.basic"}, vec, nil, []string{"identity.basic"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -401,7 +401,7 @@ func TestStagedDiffs_DedupeExactDuplicate(t *testing.T) {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
-	d2, err := s.ProposeDiff(ctx, "agent-a", content, []string{"identity.basic"}, vec, nil)
+	d2, err := s.ProposeDiff(ctx, "agent-a", content, []string{"identity.basic"}, vec, nil, []string{"identity.basic"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() (duplicate) error = %v", err)
 	}
@@ -420,7 +420,7 @@ func TestStagedDiffs_DedupeNearMatchFlaggedAsContradiction(t *testing.T) {
 	base := unitVector(3)
 	near := nudge(base, 0.01) // small perturbation: close in cosine distance, different text
 
-	d1, err := s.ProposeDiff(ctx, "agent-a", "user works as a software engineer", []string{"identity.professional"}, base, nil)
+	d1, err := s.ProposeDiff(ctx, "agent-a", "user works as a software engineer", []string{"identity.professional"}, base, nil, []string{"identity.professional"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -428,7 +428,7 @@ func TestStagedDiffs_DedupeNearMatchFlaggedAsContradiction(t *testing.T) {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
-	d2, err := s.ProposeDiff(ctx, "agent-a", "user works as a senior engineer", []string{"identity.professional"}, near, nil)
+	d2, err := s.ProposeDiff(ctx, "agent-a", "user works as a senior engineer", []string{"identity.professional"}, near, nil, []string{"identity.professional"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() (near match) error = %v", err)
 	}
@@ -442,7 +442,7 @@ func TestSearchFacts_ScopeIntersectionRequiresAllTags(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(4)
-	d, err := s.ProposeDiff(ctx, "agent-a", "planning a wedding in March with partner", []string{"relationships.partner", "finances.budget"}, vec, nil)
+	d, err := s.ProposeDiff(ctx, "agent-a", "planning a wedding in March with partner", []string{"relationships.partner", "finances.budget"}, vec, nil, []string{"relationships.partner", "finances.budget"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -483,7 +483,7 @@ func TestSearchFacts_EmptyQueryEmbeddingFallsBackToKeywordOnly(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(6)
-	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite hiking trail is Overland Track", []string{"preferences.hiking"}, vec, nil)
+	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite hiking trail is Overland Track", []string{"preferences.hiking"}, vec, nil, []string{"preferences.hiking"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -537,6 +537,170 @@ func TestAuditLog_Insert(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("audit_log rows = %d, want 1", count)
+	}
+}
+
+func TestProposeDiff_DedupeCandidateSearchScopedToProposerGrants(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	// A fact committed under a scope the second proposer has no grant for.
+	vec := unitVector(20)
+	content := "user's medical condition is confidential"
+	d, err := s.ProposeDiff(ctx, "agent-a", content, []string{"identity.medical"}, vec, nil, []string{"identity.medical"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	// A second proposer submits byte-identical content, but is only granted an
+	// unrelated scope. Without scope-filtering the dedupe search, this would come
+	// back as "duplicate" with the first fact's ID attached — telling an
+	// ungranted caller that a fact with this exact content exists, and handing it
+	// a fact ID it could then try to use as a supersession target. Found in review.
+	d2, err := s.ProposeDiff(ctx, "agent-b", content, []string{"preferences.coffee"}, vec, nil, []string{"preferences.coffee"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() (ungranted proposer) error = %v", err)
+	}
+	if d2.DedupeVerdict == nil || *d2.DedupeVerdict != DedupeNovel {
+		t.Fatalf("ProposeDiff() dedupe verdict for an ungranted proposer = %v, want novel (candidate outside their grants must not leak)", d2.DedupeVerdict)
+	}
+	if d2.DedupeCandidateFactID != nil {
+		t.Fatalf("ProposeDiff() leaked candidate fact ID %s to an ungranted proposer", *d2.DedupeCandidateFactID)
+	}
+}
+
+func TestProposeDiff_TargetFactOutsideProposerGrantsRejected(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(21)
+	d, err := s.ProposeDiff(ctx, "agent-a", "a fact agent-b has no grant for", []string{"identity.medical"}, vec, nil, []string{"identity.medical"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	fact, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec)
+	if err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	// agent-b tries to target that fact for supersession despite having no grant
+	// covering its scope — e.g. an ID it guessed, brute-forced, or obtained via
+	// the dedupe candidate leak this test's sibling guards against. Must be
+	// rejected before ever staging: an approval UI that doesn't show the
+	// replacement target (a separate, real gap of its own) would otherwise let a
+	// human unknowingly approve superseding a fact they never meant to touch.
+	_, err = s.ProposeDiff(ctx, "agent-b", "innocuous-looking replacement content",
+		[]string{"preferences.coffee"}, unitVector(22), &fact.ID, []string{"preferences.coffee"})
+	if err == nil {
+		t.Fatal("ProposeDiff() targeting a fact outside the proposer's grants: want error, got nil")
+	}
+}
+
+func TestCommitDiff_RejectsIfIdenticalContentCommittedSinceStaging(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	content := "user prefers window seats"
+	vec := unitVector(23)
+
+	// Both proposals are staged while neither has committed yet, so both
+	// legitimately see "novel" at stage time — the dedupe verdict computed once
+	// at staging can't catch this. Only a re-check at commit time can.
+	d1, err := s.ProposeDiff(ctx, "agent-a", content, []string{"preferences.seating"}, vec, nil, []string{"preferences.seating"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() (d1) error = %v", err)
+	}
+	d2, err := s.ProposeDiff(ctx, "agent-a", content, []string{"preferences.seating"}, vec, nil, []string{"preferences.seating"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() (d2) error = %v", err)
+	}
+	if d1.DedupeVerdict == nil || *d1.DedupeVerdict != DedupeNovel {
+		t.Fatalf("d1 verdict = %v, want novel", d1.DedupeVerdict)
+	}
+	if d2.DedupeVerdict == nil || *d2.DedupeVerdict != DedupeNovel {
+		t.Fatalf("d2 verdict = %v, want novel (neither has committed yet)", d2.DedupeVerdict)
+	}
+
+	if _, err := s.CommitDiff(ctx, d1.ID, "human-reviewer", vec); err != nil {
+		t.Fatalf("CommitDiff() (d1) error = %v", err)
+	}
+	if _, err := s.CommitDiff(ctx, d2.ID, "human-reviewer", vec); err == nil {
+		t.Fatal("CommitDiff() (d2) committing identical content after d1 already committed it: want error, got nil")
+	}
+}
+
+func TestCommitDiff_LogsAuditEventAtomically(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(24)
+	d, err := s.ProposeDiff(ctx, "agent-a", "user's preferred airline is Qantas", []string{"preferences.travel"}, vec, nil, []string{"preferences.travel"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	fact, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec)
+	if err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_log WHERE event_type = 'diff_committed' AND fact_id = $1 AND subject = 'human-reviewer'`,
+		fact.ID,
+	).Scan(&count); err != nil {
+		t.Fatalf("querying audit_log: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("audit_log rows for diff_committed = %d, want 1 (mutation and audit row must commit atomically)", count)
+	}
+}
+
+func TestCreateGrant_LogsAuditEventAtomically(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_log WHERE event_type = 'grant_created' AND grant_id = $1 AND subject = 'human-reviewer'`,
+		g.ID,
+	).Scan(&count); err != nil {
+		t.Fatalf("querying audit_log: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("audit_log rows for grant_created = %d, want 1", count)
+	}
+}
+
+func TestRejectDiff_LogsAuditEventAtomically(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(25)
+	d, err := s.ProposeDiff(ctx, "agent-a", "a proposal that will be rejected", []string{"identity.basic"}, vec, nil, []string{"identity.basic"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	if err := s.RejectDiff(ctx, d.ID, "human-reviewer"); err != nil {
+		t.Fatalf("RejectDiff() error = %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_log WHERE event_type = 'diff_rejected' AND staged_diff_id = $1 AND subject = 'human-reviewer'`,
+		d.ID,
+	).Scan(&count); err != nil {
+		t.Fatalf("querying audit_log: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("audit_log rows for diff_rejected = %d, want 1", count)
 	}
 }
 
