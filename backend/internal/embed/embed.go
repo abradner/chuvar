@@ -13,8 +13,10 @@ import (
 )
 
 // Dim is the embedding dimensionality, matching the `vector(384)` column in the
-// facts table. Placeholder pending the Research track's model choice — see the
-// migration comment in internal/db/migrations.
+// facts table. 384 matches all-MiniLM-L6-v2's output size — a common, small, fast
+// open embedding model — chosen as a plausible placeholder, not a commitment to
+// that specific model. Placeholder pending the Research track's model choice — see
+// the migration comment in internal/db/migrations.
 const Dim = 384
 
 // Embedder turns text into a fixed-length vector for semantic similarity search.
@@ -22,13 +24,17 @@ type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 }
 
-// Stub is a deterministic, dependency-free Embedder for local development and
-// tests. It is NOT a real semantic embedding — near-meaning text does not reliably
-// land near each other in this space, only near-identical text does. It exists so
-// the dedupe/retrieval pipeline has something to run against before the Research
-// track (Notion: "Research — Scope Classifier & Dedup Model") lands a real model.
-// Swap it out behind the Embedder interface; nothing downstream should need to
-// change.
+// Stub is a deterministic, dependency-free Embedder. It is NOT a real semantic
+// embedding — near-meaning text does not reliably land near each other in this
+// space, only near-identical text does.
+//
+// Despite the name, this isn't test-only code that happens to live in mainline: it
+// is the actual v0 runtime Embedder, wired into both cmd/mcpserver and
+// cmd/apiserver today (see those files' `emb := embed.Stub{}`), not just used from
+// _test.go files. It exists so the dedupe/retrieval pipeline has something to run
+// against before the Research track (Notion: "Research — Scope Classifier & Dedup
+// Model") lands a real model. Swap it out behind the Embedder interface when that
+// lands; nothing downstream should need to change.
 type Stub struct{}
 
 func (Stub) Embed(_ context.Context, text string) ([]float32, error) {
