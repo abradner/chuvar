@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GrantsPage } from "./Grants";
 import { api } from "../api/client";
 import type { Grant } from "../api/client";
@@ -27,6 +27,13 @@ const sampleGrant: Grant = {
 };
 
 describe("GrantsPage", () => {
+  // Without this, assertions like toHaveBeenCalled() can pass because of a call
+  // left over from a previous test, not because this test's own render triggered
+  // one — making the suite's pass/fail depend on run order. Found in review.
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("renders grants for the default subject", async () => {
     vi.mocked(api.listGrants).mockResolvedValue([sampleGrant]);
 
@@ -37,7 +44,6 @@ describe("GrantsPage", () => {
 
   it("rejects a non-numeric TTL instead of silently creating a permanent grant", async () => {
     vi.mocked(api.listGrants).mockResolvedValue([]);
-    await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
 
     render(<GrantsPage />);
     await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
@@ -46,10 +52,23 @@ describe("GrantsPage", () => {
     await userEvent.type(screen.getByLabelText(/TTL/), "not-a-number");
     await userEvent.click(screen.getByRole("button", { name: "Create grant" }));
 
-    expect(await screen.findByText(/TTL must be a positive number/)).toBeInTheDocument();
+    expect(await screen.findByText(/TTL must be a positive whole number/)).toBeInTheDocument();
     // The regression this guards against: NaN * 60 -> NaN -> JSON.stringify(NaN)
     // is `null` -> the backend would treat that as "no expiry" -> a typo silently
     // creates a permanent grant. createGrant must never be called with bad input.
+    expect(api.createGrant).not.toHaveBeenCalled();
+  });
+
+  it("rejects a decimal TTL that wouldn't convert to a whole number of seconds", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([]);
+    render(<GrantsPage />);
+    await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
+
+    await userEvent.type(screen.getByPlaceholderText("identity.basic, projects.spritz.read"), "identity.basic");
+    await userEvent.type(screen.getByLabelText(/TTL/), "0.1");
+    await userEvent.click(screen.getByRole("button", { name: "Create grant" }));
+
+    expect(await screen.findByText(/TTL must be a positive whole number/)).toBeInTheDocument();
     expect(api.createGrant).not.toHaveBeenCalled();
   });
 
@@ -62,7 +81,7 @@ describe("GrantsPage", () => {
     await userEvent.type(screen.getByLabelText(/TTL/), "-5");
     await userEvent.click(screen.getByRole("button", { name: "Create grant" }));
 
-    expect(await screen.findByText(/TTL must be a positive number/)).toBeInTheDocument();
+    expect(await screen.findByText(/TTL must be a positive whole number/)).toBeInTheDocument();
     expect(api.createGrant).not.toHaveBeenCalled();
   });
 

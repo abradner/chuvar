@@ -69,11 +69,15 @@ export function GrantsPage() {
     // permanent grant with no error shown would be exactly the wrong failure
     // mode. Number("") is 0 and Number("abc") is NaN; both need to be rejected
     // explicitly rather than falling through to `undefined` (no expiry).
+    // Number.isInteger (not isFinite) also rejects decimal minutes — the backend's
+    // ttl_seconds is an integer, and something like "0.1" minutes * 60 can land on
+    // a non-integer number of seconds (floating-point rounding) that fails the
+    // backend's JSON decode instead of surfacing a clear validation message here.
     let ttlSeconds: number | undefined;
     if (newTTLMinutes.trim() !== "") {
       const minutes = Number(newTTLMinutes);
-      if (!Number.isFinite(minutes) || minutes <= 0) {
-        setError("TTL must be a positive number of minutes, or left blank for no expiry");
+      if (!Number.isInteger(minutes) || minutes <= 0) {
+        setError("TTL must be a positive whole number of minutes, or left blank for no expiry");
         return;
       }
       ttlSeconds = minutes * 60;
