@@ -1,0 +1,28 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chuvar
+      POSTGRES_PASSWORD: chuvar_dev_only
+      POSTGRES_DB: chuvar
+    ports:
+      # Offset from the standard 5432: several projects likely will run concurrently
+      # on this machine and already claim the default port. Bound to loopback only —
+      # this password is a checked-in dev placeholder, not a secret; without the
+      # 127.0.0.1 prefix Docker publishes on 0.0.0.0 by default, which would expose it
+      # to the whole LAN on a machine like this one that isn't behind a firewall by
+      # default.
+      - "127.0.0.1:54322:5432"
+    volumes:
+      # PG 18+ images use pg_ctlcluster-style layout: mount the parent dir, not
+      # .../data, or the entrypoint refuses to start against a stale/foreign layout.
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chuvar -d chuvar"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  postgres_data:
