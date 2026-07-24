@@ -14,7 +14,7 @@ func TestLoad_MissingRequiredVar(t *testing.T) {
 }
 
 func TestLoad_Defaults(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://localhost:5433/chuvar")
+	t.Setenv("DATABASE_URL", "postgres://localhost:54322/chuvar")
 	t.Setenv("HTTP_ADDR", "")
 	t.Setenv("REQUEST_TIMEOUT", "")
 
@@ -48,7 +48,7 @@ func TestLoad_OverridesApplied(t *testing.T) {
 }
 
 func TestLoad_InvalidDurationFallsBackToDefault(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://localhost:5433/chuvar")
+	t.Setenv("DATABASE_URL", "postgres://localhost:54322/chuvar")
 	t.Setenv("REQUEST_TIMEOUT", "not-a-duration")
 
 	cfg, err := Load()
