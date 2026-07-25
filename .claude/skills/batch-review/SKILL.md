@@ -254,13 +254,18 @@ this repo's own #5→#6 merge: `gh pr merge 5 --delete-branch` closed #6
 because `pr/05-store` vanished before GitHub retargeted #6 to main). Per
 interstitial, in this order:
 1. `gh pr merge <n> --merge` (no `--delete-branch`).
-2. Confirm the next PR's base is now `main` — retarget explicitly if not
+2. Confirm the parent actually reached `MERGED` before touching anything
+   else: with a merge queue enabled, `gh pr merge` can return after merely
+   enqueueing the PR, and this workflow tolerates red interstitial CI —
+   so "the command returned" is not "it merged." Poll
+   `gh pr view <n> --json state,mergedAt` until state is `MERGED`.
+3. Confirm the next PR's base is now `main` — retarget explicitly if not
    (`gh api -X PATCH repos/abradner/chuvar/pulls/<next> -f base=main`).
-3. Only then delete the just-merged branch.
+4. Only then delete the just-merged branch.
 
 If a child PR does end up closed by a premature delete: push the branch
 back from its last known SHA, reopen the PR (`gh api -X PATCH
-.../pulls/<n> -f state=open`), retarget to main, then delete the branch
+repos/{owner}/{repo}/pulls/<n> -f state=open`), retarget to main, then delete the branch
 again. No work is lost — the commits are still reachable from the SHA —
 but confirm state before continuing the train.
 
