@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/pgvector/pgvector-go v0.4.0
 )
 
 require (
