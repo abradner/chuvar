@@ -318,7 +318,12 @@ func TestStagedDiffs_ListApproveReject(t *testing.T) {
 		t.Fatalf("pending diffs = %d, want 2", len(pending))
 	}
 
-	resp := doJSON(t, http.MethodPost, srv.URL+"/api/staged-diffs/"+approveMe.ID+"/approve", decisionRequest{DecidedBy: "test-reviewer"})
+	resp := doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?status=bogus", nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("GET /api/staged-diffs with unknown status: status = %d, want 400", resp.StatusCode)
+	}
+
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/staged-diffs/"+approveMe.ID+"/approve", decisionRequest{DecidedBy: "test-reviewer"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST approve status = %d, want 200", resp.StatusCode)
 	}

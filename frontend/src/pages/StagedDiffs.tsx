@@ -23,7 +23,12 @@ export function StagedDiffsPage() {
     setLoading(true);
     api
       .listStagedDiffs("pending")
-      .then(setDiffs)
+      .then((d) => {
+        setDiffs(d);
+        // A successful reload clears any error banner left over from an earlier
+        // failed load — otherwise a stale error sits above a perfectly good list.
+        setError(null);
+      })
       .catch((e: unknown) => setError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setLoading(false));
   };
