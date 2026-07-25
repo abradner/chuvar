@@ -33,8 +33,8 @@ stack merges bottom-up.
 
 Why the workflow works:
 - Small atomic single-commit interstitials keep the review bots focused on
-  detail instead of getting lost in a diverse changeset — and let Alex hold
-  the whole batch in his head.
+  detail instead of getting lost in a diverse changeset — and let a human operator hold
+  the whole batch in their head.
 - Opening everything ready-for-review means CI starts instantly and the
   feedback window is fully open from minute one.
 - Not reacting mid-stack means main never moves underneath the stack because
@@ -114,6 +114,8 @@ Why the workflow works:
     workflow, not neglect.
   - **CI policy**: interstitial red is acceptable when explained by the
     stack; the followup PR is the release gate.
+  - **Merge policy**: operator-initiated only — no agent merges any
+    batch PR without an explicit go-ahead from the human operator.
   ```
 
 - **Roster sweep — fan-out is not complete until this is done.** When the
@@ -174,8 +176,10 @@ against the interstitial showstopper bar, record for synthesis, stand down.
 - **Followup reactivity**: watch the followup PR from the orchestrating
   session (comment + CI poll with the showstopper filter).
 - **Followup green → merge**: when the followup's CI concludes green and
-  its threads are resolved, wake once more to execute (or hand Alex) the
-  bottom-up merge.
+  its threads are resolved, wake once more to report that the stack is
+  ready and ask for the go-ahead — never to start merging (see the Phase 4
+  gate). The merge train itself only runs on the operator's explicit
+  say-so.
 
 ## Phase 2 — Synthesis (aggregate review + feedback harvest)
 
@@ -227,8 +231,9 @@ to each Batch block.
 
 ## Phase 4 — Merge the stack
 
-**Gate: never start this phase without Alex explicitly saying to merge
-now** — a synthesis pass, a green followup, or an "auto mode" session
+**Gate: never start this phase without the human operator explicitly
+saying to merge now** — a synthesis pass, a green followup, or an "auto
+mode" session
 default is not that signal. This applies even when the rest of the batch
 workflow is running autonomously: pushing merge commits and deleting
 remote branches is exactly the kind of hard-to-reverse, shared-state
@@ -277,7 +282,7 @@ carrying all the reactive work.
 - Merge bottom-up, rapidly and consecutively. Never rebase a reviewed
   branch. Retarget each child to main before deleting its parent's branch —
   don't let `--delete-branch` race GitHub's auto-retarget.
-- Phase 4 needs an explicit, per-batch go-ahead from Alex — never
+- Phase 4 needs an explicit, per-batch go-ahead from the human operator — never
   self-initiate the merge train, including under autonomous/auto-mode
   operation.
 - Only the followup's CI gates the batch. Interstitial red is fine when the
