@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/abradner/chuvar/backend/internal/store/sqlcgen"
 )
 
 // validDepths mirrors the CHECK constraint on grants.depth in the schema — kept in
@@ -43,117 +45,77 @@ func (s *Store) CreateGrant(ctx context.Context, subject string, scopes []string
 		return Grant{}, fmt.Errorf("store: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op if already committed
+	qtx := s.q.WithTx(tx)
 
-	var g Grant
-	err = tx.QueryRow(ctx,
-		`INSERT INTO grants (subject, depth, expires_at)
-		 VALUES ($1, $2, $3)
-		 RETURNING id, subject, depth, created_at, expires_at, revoked_at`,
-		subject, depth, expiresAt,
-	).Scan(&g.ID, &g.Subject, &g.Depth, &g.CreatedAt, &g.ExpiresAt, &g.RevokedAt)
+	row, err := qtx.InsertGrant(ctx, sqlcgen.InsertGrantParams{
+		Subject:   subject,
+		Depth:     depth,
+		ExpiresAt: toTimestamptz(expiresAt),
+	})
 	if err != nil {
 		return Grant{}, fmt.Errorf("store: insert grant: %w", err)
 	}
 
 	for _, sc := range scopes {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO grant_scopes (grant_id, scope) VALUES ($1, $2)`,
-			g.ID, sc,
-		); err != nil {
+		if err := qtx.InsertGrantScope(ctx, sqlcgen.InsertGrantScopeParams{GrantID: row.ID, Scope: sc}); err != nil {
 			return Grant{}, fmt.Errorf("store: insert grant scope %q: %w", sc, err)
 		}
 	}
-	g.Scopes = scopes
 
-	if err := logAudit(ctx, tx, "grant_created", actor, nil, &g.ID, nil, scopes); err != nil {
+	if err := logAudit(ctx, qtx, "grant_created", actor, nil, &row.ID, nil, scopes); err != nil {
 		return Grant{}, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return Grant{}, fmt.Errorf("store: commit grant: %w", err)
 	}
-	return g, nil
+
+	return Grant{
+		ID:        row.ID,
+		Subject:   row.Subject,
+		Scopes:    scopes,
+		Depth:     row.Depth,
+		CreatedAt: row.CreatedAt,
+		ExpiresAt: row.ExpiresAt,
+		RevokedAt: row.RevokedAt,
+	}, nil
 }
 
 // ListGrants returns every grant (active or not) for subject, most recent first.
 func (s *Store) ListGrants(ctx context.Context, subject string) ([]Grant, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, subject, depth, created_at, expires_at, revoked_at
-		 FROM grants WHERE subject = $1 ORDER BY created_at DESC`,
-		subject,
-	)
+	rows, err := s.q.ListGrants(ctx, subject)
 	if err != nil {
 		return nil, fmt.Errorf("store: list grants: %w", err)
 	}
-	defer rows.Close()
 
 	var grants []Grant
-	for rows.Next() {
-		var g Grant
-		if err := rows.Scan(&g.ID, &g.Subject, &g.Depth, &g.CreatedAt, &g.ExpiresAt, &g.RevokedAt); err != nil {
-			return nil, fmt.Errorf("store: scan grant: %w", err)
-		}
-		grants = append(grants, g)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: list grants: %w", err)
-	}
-
-	for i := range grants {
-		scopes, err := s.grantScopes(ctx, grants[i].ID)
+	for _, r := range rows {
+		scopes, err := s.q.ListGrantScopes(ctx, r.ID)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("store: list grant scopes: %w", err)
 		}
-		grants[i].Scopes = scopes
+		grants = append(grants, Grant{
+			ID:        r.ID,
+			Subject:   r.Subject,
+			Scopes:    scopes,
+			Depth:     r.Depth,
+			CreatedAt: r.CreatedAt,
+			ExpiresAt: r.ExpiresAt,
+			RevokedAt: r.RevokedAt,
+		})
 	}
 	return grants, nil
-}
-
-func (s *Store) grantScopes(ctx context.Context, grantID string) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT scope FROM grant_scopes WHERE grant_id = $1`, grantID)
-	if err != nil {
-		return nil, fmt.Errorf("store: list grant scopes: %w", err)
-	}
-	defer rows.Close()
-
-	var scopes []string
-	for rows.Next() {
-		var sc string
-		if err := rows.Scan(&sc); err != nil {
-			return nil, fmt.Errorf("store: scan grant scope: %w", err)
-		}
-		scopes = append(scopes, sc)
-	}
-	return scopes, rows.Err()
 }
 
 // GrantedScopes returns the union of scopes granted to subject across all currently
 // active (non-revoked, unexpired) grants. This is what read-with-scope-check checks
 // requested scopes against.
 func (s *Store) GrantedScopes(ctx context.Context, subject string) ([]string, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT DISTINCT gs.scope
-		 FROM grant_scopes gs
-		 JOIN grants g ON g.id = gs.grant_id
-		 WHERE g.subject = $1
-		   AND g.revoked_at IS NULL
-		   AND (g.expires_at IS NULL OR g.expires_at > now())`,
-		subject,
-	)
+	scopes, err := s.q.GrantedScopes(ctx, subject)
 	if err != nil {
 		return nil, fmt.Errorf("store: granted scopes: %w", err)
 	}
-	defer rows.Close()
-
-	var scopes []string
-	for rows.Next() {
-		var sc string
-		if err := rows.Scan(&sc); err != nil {
-			return nil, fmt.Errorf("store: scan granted scope: %w", err)
-		}
-		scopes = append(scopes, sc)
-	}
-	return scopes, rows.Err()
+	return scopes, nil
 }
 
 // RevokeGrant marks a grant revoked. Idempotent calls (revoking an already-revoked
@@ -171,19 +133,17 @@ func (s *Store) RevokeGrant(ctx context.Context, grantID, actor string) error {
 		return fmt.Errorf("store: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op if already committed
+	qtx := s.q.WithTx(tx)
 
-	tag, err := tx.Exec(ctx,
-		`UPDATE grants SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`,
-		grantID,
-	)
+	rows, err := qtx.RevokeGrant(ctx, grantID)
 	if err != nil {
 		return fmt.Errorf("store: revoke grant: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if rows == 0 {
 		return fmt.Errorf("store: grant %s not found or already revoked", grantID)
 	}
 
-	if err := logAudit(ctx, tx, "grant_revoked", actor, nil, &grantID, nil, nil); err != nil {
+	if err := logAudit(ctx, qtx, "grant_revoked", actor, nil, &grantID, nil, nil); err != nil {
 		return err
 	}
 

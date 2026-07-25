@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/abradner/chuvar/backend/internal/store/sqlcgen"
 )
 
 // dedupeCosineThreshold is the cosine-distance cutoff below which a candidate fact
@@ -33,13 +35,10 @@ const dedupeCosineThreshold = 0.15
 //   - If targetFactID is set, it must be covered by these scopes too: a proposer
 //     can only target a fact they can already read. Without this, an agent could
 //     supply an arbitrary fact UUID (guessed, brute-forced, or leaked exactly as
-//     above) as a supersession target, and — since the approval UI doesn't
-//     currently surface what's being replaced (a separate, UI-layer gap) — get a
-//     human to unknowingly approve silently invalidating an unrelated fact. Also
-//     found in review. This check is necessarily best-effort against a grant that
-//     changes between proposal and approval; it's not a substitute for the
-//     approval UI showing the target explicitly, which is a real fix in its own
-//     right, not just defense in depth.
+//     above) as a supersession target, and — since the approval UI now surfaces
+//     the target's current content (internal/api's getFact / the frontend) — a
+//     human reviewer would at least see the replacement, but this check stops the
+//     proposal from ever being staged in the first place. Also found in review.
 func (s *Store) ProposeDiff(ctx context.Context, subject, content string, scopes []string, embedding []float32, targetFactID *string, proposerGrantedScopes []string) (StagedDiff, error) {
 	if content == "" {
 		return StagedDiff{}, fmt.Errorf("store: diff content must not be empty")
@@ -68,21 +67,30 @@ func (s *Store) ProposeDiff(ctx context.Context, subject, content string, scopes
 	}
 	verdictStr := string(verdict)
 
-	var d StagedDiff
-	var statusStr string
-	var scannedVerdict *string
-	err = s.pool.QueryRow(ctx,
-		`INSERT INTO staged_diffs (subject, content, proposed_scopes, target_fact_id, dedupe_verdict, dedupe_candidate_fact_id)
-		 VALUES ($1, $2, $3, $4, $5, $6)
-		 RETURNING id, subject, content, proposed_scopes, target_fact_id, status, dedupe_verdict, dedupe_candidate_fact_id, created_at`,
-		subject, content, scopes, targetFactID, verdictStr, candidate,
-	).Scan(&d.ID, &d.Subject, &d.Content, &d.ProposedScopes, &d.TargetFactID, &statusStr, &scannedVerdict, &d.DedupeCandidateFactID, &d.CreatedAt)
+	row, err := s.q.InsertStagedDiff(ctx, sqlcgen.InsertStagedDiffParams{
+		Subject:               subject,
+		Content:               content,
+		ProposedScopes:        scopes,
+		TargetFactID:          targetFactID,
+		DedupeVerdict:         &verdictStr,
+		DedupeCandidateFactID: candidate,
+	})
 	if err != nil {
 		return StagedDiff{}, fmt.Errorf("store: insert staged diff: %w", err)
 	}
-	d.Status = DiffStatus(statusStr)
-	if scannedVerdict != nil {
-		dv := DedupeVerdict(*scannedVerdict)
+
+	d := StagedDiff{
+		ID:                    row.ID,
+		Subject:               row.Subject,
+		Content:               row.Content,
+		ProposedScopes:        row.ProposedScopes,
+		TargetFactID:          row.TargetFactID,
+		Status:                DiffStatus(row.Status),
+		DedupeCandidateFactID: row.DedupeCandidateFactID,
+		CreatedAt:             row.CreatedAt,
+	}
+	if row.DedupeVerdict != nil {
+		dv := DedupeVerdict(*row.DedupeVerdict)
 		d.DedupeVerdict = &dv
 	}
 	return d, nil
@@ -97,21 +105,11 @@ func (s *Store) factVisibleToScopes(ctx context.Context, id string, grantedScope
 		return false, nil
 	}
 	prefixes := scopePrefixes(grantedScopes)
-	var visible bool
-	err := s.pool.QueryRow(ctx,
-		`SELECT EXISTS (
-		    SELECT 1 FROM facts f
-		    WHERE f.id = $1
-		      AND f.invalid_at IS NULL
-		      AND EXISTS (SELECT 1 FROM fact_scopes fs WHERE fs.fact_id = f.id)
-		      AND NOT EXISTS (
-		          SELECT 1 FROM fact_scopes fs
-		          WHERE fs.fact_id = f.id
-		            AND NOT (fs.scope = ANY($2) OR fs.scope LIKE ANY($3))
-		      )
-		 )`,
-		id, grantedScopes, prefixes,
-	).Scan(&visible)
+	visible, err := s.q.FactVisibleToScopes(ctx, sqlcgen.FactVisibleToScopesParams{
+		FactID:        id,
+		GrantedScopes: grantedScopes,
+		ScopePrefixes: prefixes,
+	})
 	if err != nil {
 		return false, fmt.Errorf("store: check fact visibility: %w", err)
 	}
@@ -135,22 +133,12 @@ func (s *Store) findDedupeCandidate(ctx context.Context, content string, embeddi
 	}
 	prefixes := scopePrefixes(grantedScopes)
 
-	var candidateID, candidateContent string
-	var distance float64
-	err = s.pool.QueryRow(ctx,
-		`SELECT f.id, f.content, f.embedding <=> $1::vector AS distance
-		 FROM facts f
-		 WHERE f.invalid_at IS NULL AND f.embedding IS NOT NULL
-		   AND EXISTS (SELECT 1 FROM fact_scopes fs WHERE fs.fact_id = f.id)
-		   AND NOT EXISTS (
-		       SELECT 1 FROM fact_scopes fs
-		       WHERE fs.fact_id = f.id
-		         AND NOT (fs.scope = ANY($2) OR fs.scope LIKE ANY($3))
-		   )
-		 ORDER BY f.embedding <=> $1::vector
-		 LIMIT 1`,
-		embParam, grantedScopes, prefixes,
-	).Scan(&candidateID, &candidateContent, &distance)
+	row, err := s.q.FindDedupeCandidate(ctx, sqlcgen.FindDedupeCandidateParams{
+		Embedding1:    *embParam,
+		GrantedScopes: grantedScopes,
+		ScopePrefixes: prefixes,
+		Embedding2:    *embParam,
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DedupeNovel, "", nil
 	}
@@ -159,10 +147,10 @@ func (s *Store) findDedupeCandidate(ctx context.Context, content string, embeddi
 	}
 
 	switch {
-	case candidateContent == content:
-		return DedupeDuplicate, candidateID, nil
-	case distance < dedupeCosineThreshold:
-		return DedupeContradiction, candidateID, nil
+	case row.Content == content:
+		return DedupeDuplicate, row.ID, nil
+	case row.Distance.Float64 < dedupeCosineThreshold:
+		return DedupeContradiction, row.ID, nil
 	default:
 		return DedupeNovel, "", nil
 	}
@@ -172,58 +160,45 @@ func (s *Store) findDedupeCandidate(ctx context.Context, content string, embeddi
 // re-embed a diff's content at approval time — see CommitDiff's doc comment on why
 // the embedding isn't persisted on the diff row itself.
 func (s *Store) GetStagedDiff(ctx context.Context, id string) (StagedDiff, error) {
-	var d StagedDiff
-	var statusStr string
-	var verdictStr *string
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, subject, content, proposed_scopes, target_fact_id, status,
-		        dedupe_verdict, dedupe_candidate_fact_id, created_at, decided_at, decided_by
-		 FROM staged_diffs WHERE id = $1`,
-		id,
-	).Scan(&d.ID, &d.Subject, &d.Content, &d.ProposedScopes, &d.TargetFactID,
-		&statusStr, &verdictStr, &d.DedupeCandidateFactID, &d.CreatedAt, &d.DecidedAt, &d.DecidedBy)
+	row, err := s.q.GetStagedDiff(ctx, id)
 	if err != nil {
 		return StagedDiff{}, fmt.Errorf("store: get staged diff %s: %w", id, err)
 	}
-	d.Status = DiffStatus(statusStr)
-	if verdictStr != nil {
-		dv := DedupeVerdict(*verdictStr)
-		d.DedupeVerdict = &dv
-	}
-	return d, nil
+	return toStagedDiff(row), nil
 }
 
 // ListStagedDiffs returns diffs in the given status, oldest first (review queue
 // order) — used by the approval UI's REST API.
 func (s *Store) ListStagedDiffs(ctx context.Context, status DiffStatus) ([]StagedDiff, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, subject, content, proposed_scopes, target_fact_id, status,
-		        dedupe_verdict, dedupe_candidate_fact_id, created_at, decided_at, decided_by
-		 FROM staged_diffs WHERE status = $1 ORDER BY created_at ASC`,
-		string(status),
-	)
+	rows, err := s.q.ListStagedDiffs(ctx, string(status))
 	if err != nil {
 		return nil, fmt.Errorf("store: list staged diffs: %w", err)
 	}
-	defer rows.Close()
-
 	var diffs []StagedDiff
-	for rows.Next() {
-		var d StagedDiff
-		var statusStr string
-		var verdictStr *string
-		if err := rows.Scan(&d.ID, &d.Subject, &d.Content, &d.ProposedScopes, &d.TargetFactID,
-			&statusStr, &verdictStr, &d.DedupeCandidateFactID, &d.CreatedAt, &d.DecidedAt, &d.DecidedBy); err != nil {
-			return nil, fmt.Errorf("store: scan staged diff: %w", err)
-		}
-		d.Status = DiffStatus(statusStr)
-		if verdictStr != nil {
-			dv := DedupeVerdict(*verdictStr)
-			d.DedupeVerdict = &dv
-		}
-		diffs = append(diffs, d)
+	for _, r := range rows {
+		diffs = append(diffs, toStagedDiff(r))
 	}
-	return diffs, rows.Err()
+	return diffs, nil
+}
+
+func toStagedDiff(row sqlcgen.StagedDiff) StagedDiff {
+	d := StagedDiff{
+		ID:                    row.ID,
+		Subject:               row.Subject,
+		Content:               row.Content,
+		ProposedScopes:        row.ProposedScopes,
+		TargetFactID:          row.TargetFactID,
+		Status:                DiffStatus(row.Status),
+		DedupeCandidateFactID: row.DedupeCandidateFactID,
+		CreatedAt:             row.CreatedAt,
+		DecidedAt:             row.DecidedAt,
+		DecidedBy:             row.DecidedBy,
+	}
+	if row.DedupeVerdict != nil {
+		dv := DedupeVerdict(*row.DedupeVerdict)
+		d.DedupeVerdict = &dv
+	}
+	return d
 }
 
 // RejectDiff marks a pending diff rejected. Never touches `facts`. decidedBy is
@@ -234,20 +209,18 @@ func (s *Store) RejectDiff(ctx context.Context, diffID, decidedBy string) error 
 		return fmt.Errorf("store: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op if already committed
+	qtx := s.q.WithTx(tx)
 
-	tag, err := tx.Exec(ctx,
-		`UPDATE staged_diffs SET status = 'rejected', decided_at = now(), decided_by = $2
-		 WHERE id = $1 AND status = 'pending'`,
-		diffID, decidedBy,
-	)
+	db := decidedBy
+	rows, err := qtx.RejectDiff(ctx, sqlcgen.RejectDiffParams{ID: diffID, DecidedBy: &db})
 	if err != nil {
 		return fmt.Errorf("store: reject diff: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if rows == 0 {
 		return fmt.Errorf("store: diff %s is not pending", diffID)
 	}
 
-	if err := logAudit(ctx, tx, "diff_rejected", decidedBy, nil, nil, &diffID, nil); err != nil {
+	if err := logAudit(ctx, qtx, "diff_rejected", decidedBy, nil, nil, &diffID, nil); err != nil {
 		return err
 	}
 
@@ -270,21 +243,14 @@ func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedd
 		return Fact{}, fmt.Errorf("store: begin commit tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op if already committed
+	qtx := s.q.WithTx(tx)
 
-	var content string
-	var scopes []string
-	var targetFactID *string
-	var status string
-	err = tx.QueryRow(ctx,
-		`SELECT content, proposed_scopes, target_fact_id, status
-		 FROM staged_diffs WHERE id = $1 FOR UPDATE`,
-		diffID,
-	).Scan(&content, &scopes, &targetFactID, &status)
+	diff, err := qtx.LoadStagedDiffForUpdate(ctx, diffID)
 	if err != nil {
 		return Fact{}, fmt.Errorf("store: load staged diff %s: %w", diffID, err)
 	}
-	if status != string(DiffPending) {
-		return Fact{}, fmt.Errorf("store: diff %s is not pending (status=%s)", diffID, status)
+	if diff.Status != string(DiffPending) {
+		return Fact{}, fmt.Errorf("store: diff %s is not pending (status=%s)", diffID, diff.Status)
 	}
 
 	// The dedupe verdict was computed once, at ProposeDiff time. Two identical
@@ -293,24 +259,18 @@ func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedd
 	// only at staging time would let both become real, duplicate facts. Re-run
 	// the exact-content check here, inside this transaction, right before
 	// inserting. This narrows the race to genuinely concurrent commits (the
-	// window between this SELECT and the INSERT below) rather than closing it
+	// window between this check and the INSERT below) rather than closing it
 	// completely — full closure would need a database-level uniqueness
 	// constraint, which doesn't compose cleanly with the supersession CHECK
-	// constraint below without real complexity (a partial unique index can't be
-	// deferrable, so the target-invalidation and new-fact-insert ordering would
-	// need to change too). Flagged as a follow-up, not done here: this is a
-	// large jump in complexity for a race that's already far narrower than the
-	// original bug (no re-check at all).
-	targetExclude := targetFactID
-	var dupExists bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-		    SELECT 1 FROM facts
-		    WHERE invalid_at IS NULL AND content = $1
-		      AND ($2::uuid IS NULL OR id != $2)
-		 )`,
-		content, targetExclude,
-	).Scan(&dupExists); err != nil {
+	// constraint below without real complexity. Flagged as a follow-up, not done
+	// here: a large jump in complexity for a race that's already far narrower
+	// than the original bug (no re-check at all).
+	dupExists, err := qtx.HasActiveDuplicateContent(ctx, sqlcgen.HasActiveDuplicateContentParams{
+		Content:        diff.Content,
+		ExcludeFactID1: diff.TargetFactID,
+		ExcludeFactID2: diff.TargetFactID,
+	})
+	if err != nil {
 		return Fact{}, fmt.Errorf("store: duplicate content check: %w", err)
 	}
 	if dupExists {
@@ -322,28 +282,24 @@ func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedd
 		return Fact{}, err
 	}
 
-	var f Fact
-	err = tx.QueryRow(ctx,
-		`INSERT INTO facts (content, embedding, source_staged_diff_id)
-		 VALUES ($1, $2, $3)
-		 RETURNING id, content, created_at, valid_at`,
-		content, embParam, diffID,
-	).Scan(&f.ID, &f.Content, &f.CreatedAt, &f.ValidAt)
+	factRow, err := qtx.InsertFact(ctx, sqlcgen.InsertFactParams{
+		Content:            diff.Content,
+		Embedding:          embParam,
+		SourceStagedDiffID: diffID,
+	})
 	if err != nil {
 		return Fact{}, fmt.Errorf("store: insert committed fact: %w", err)
 	}
 
-	for _, sc := range scopes {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO fact_scopes (fact_id, scope) VALUES ($1, $2)`,
-			f.ID, sc,
-		); err != nil {
+	for _, sc := range diff.ProposedScopes {
+		if err := qtx.InsertFactScope(ctx, sqlcgen.InsertFactScopeParams{FactID: factRow.ID, Scope: sc}); err != nil {
 			return Fact{}, fmt.Errorf("store: insert fact scope %q: %w", sc, err)
 		}
 	}
-	f.Scopes = scopes
 
-	if targetFactID != nil {
+	f := Fact{ID: factRow.ID, Content: factRow.Content, Scopes: diff.ProposedScopes, CreatedAt: factRow.CreatedAt, ValidAt: factRow.ValidAt}
+
+	if diff.TargetFactID != nil {
 		// Lock the target fact row before checking/setting its supersession state.
 		// Without this, two diffs racing to commit against the same target fact
 		// could both pass an unlocked "WHERE invalid_at IS NULL" check, both
@@ -353,34 +309,29 @@ func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedd
 		// UPDATE serializes the two transactions: the second one blocks here
 		// until the first commits, then re-reads the now-current invalid_at and
 		// correctly detects the conflict instead of racing past it.
-		var targetInvalidAt *time.Time
-		err := tx.QueryRow(ctx,
-			`SELECT invalid_at FROM facts WHERE id = $1 FOR UPDATE`,
-			*targetFactID,
-		).Scan(&targetInvalidAt)
+		targetInvalidAt, err := qtx.LockTargetFact(ctx, *diff.TargetFactID)
 		if err != nil {
-			return Fact{}, fmt.Errorf("store: lock target fact %s: %w", *targetFactID, err)
+			return Fact{}, fmt.Errorf("store: lock target fact %s: %w", *diff.TargetFactID, err)
 		}
 		if targetInvalidAt != nil {
-			return Fact{}, fmt.Errorf("store: target fact %s was already superseded by another diff", *targetFactID)
+			return Fact{}, fmt.Errorf("store: target fact %s was already superseded by another diff", *diff.TargetFactID)
 		}
 
-		if _, err := tx.Exec(ctx,
-			`UPDATE facts SET invalid_at = $2, expired_at = now(), superseded_by = $3 WHERE id = $1`,
-			*targetFactID, f.ValidAt, f.ID,
-		); err != nil {
-			return Fact{}, fmt.Errorf("store: supersede target fact %s: %w", *targetFactID, err)
+		if err := qtx.SupersedeFact(ctx, sqlcgen.SupersedeFactParams{
+			InvalidAt:    pgtype.Timestamptz{Time: f.ValidAt, Valid: true},
+			SupersededBy: &f.ID,
+			TargetID:     *diff.TargetFactID,
+		}); err != nil {
+			return Fact{}, fmt.Errorf("store: supersede target fact %s: %w", *diff.TargetFactID, err)
 		}
 	}
 
-	if _, err := tx.Exec(ctx,
-		`UPDATE staged_diffs SET status = 'committed', decided_at = now(), decided_by = $2 WHERE id = $1`,
-		diffID, decidedBy,
-	); err != nil {
+	db := decidedBy
+	if err := qtx.MarkDiffCommitted(ctx, sqlcgen.MarkDiffCommittedParams{ID: diffID, DecidedBy: &db}); err != nil {
 		return Fact{}, fmt.Errorf("store: mark diff committed: %w", err)
 	}
 
-	if err := logAudit(ctx, tx, "diff_committed", decidedBy, &f.ID, nil, &diffID, scopes); err != nil {
+	if err := logAudit(ctx, qtx, "diff_committed", decidedBy, &f.ID, nil, &diffID, diff.ProposedScopes); err != nil {
 		return Fact{}, err
 	}
 
