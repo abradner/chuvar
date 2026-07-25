@@ -227,13 +227,41 @@ to each Batch block.
 
 ## Phase 4 — Merge the stack
 
-Merge interstitials bottom-up (base first), **plain merge commits** — no
-squash, no rebase; each merge commit wraps exactly one reviewed commit.
-GitHub retargets each stacked PR as its parent merges. Merge rapidly and
-consecutively — interstitial CI red doesn't block when the stack explains
-it. The followup merges last, **squash-and-merge**, carrying all the
-reactive work. Delete head branches as you go (this is also what makes
-GitHub's auto-retargeting fire).
+**Gate: never start this phase without Alex explicitly saying to merge
+now** — a synthesis pass, a green followup, or an "auto mode" session
+default is not that signal. This applies even when the rest of the batch
+workflow is running autonomously: pushing merge commits and deleting
+remote branches is exactly the kind of hard-to-reverse, shared-state
+action that needs a live go-ahead each time, not standing authorization
+from having approved the workflow once. If the stack is ready, say so and
+stop — don't proceed into merging on your own initiative.
+
+Once given the go-ahead: merge interstitials bottom-up (base first),
+**plain merge commits** — no squash, no rebase; each merge commit wraps
+exactly one reviewed commit.
+
+**Retarget each child before deleting its parent's branch — don't rely on
+`--delete-branch` to do both atomically.** GitHub auto-retargets an open PR
+when its base branch merges, but that retarget is not guaranteed to have
+landed before a same-command branch deletion completes — deleting the base
+branch out from under a not-yet-retargeted PR closes it (this happened in
+this repo's own #5→#6 merge: `gh pr merge 5 --delete-branch` closed #6
+because `pr/05-store` vanished before GitHub retargeted #6 to main). Per
+interstitial, in this order:
+1. `gh pr merge <n> --merge` (no `--delete-branch`).
+2. Confirm the next PR's base is now `main` — retarget explicitly if not
+   (`gh api -X PATCH repos/abradner/chuvar/pulls/<next> -f base=main`).
+3. Only then delete the just-merged branch.
+
+If a child PR does end up closed by a premature delete: push the branch
+back from its last known SHA, reopen the PR (`gh api -X PATCH
+.../pulls/<n> -f state=open`), retarget to main, then delete the branch
+again. No work is lost — the commits are still reachable from the SHA —
+but confirm state before continuing the train.
+
+Merge rapidly and consecutively — interstitial CI red doesn't block when
+the stack explains it. The followup merges last, **squash-and-merge**,
+carrying all the reactive work.
 
 ## Rules of thumb
 
@@ -247,7 +275,11 @@ GitHub's auto-retargeting fire).
 - Reactive work lands in the followup. Interstitial threads get "fixed in
   the followup" or "not relevant", never code pushes.
 - Merge bottom-up, rapidly and consecutively. Never rebase a reviewed
-  branch.
+  branch. Retarget each child to main before deleting its parent's branch —
+  don't let `--delete-branch` race GitHub's auto-retarget.
+- Phase 4 needs an explicit, per-batch go-ahead from Alex — never
+  self-initiate the merge train, including under autonomous/auto-mode
+  operation.
 - Only the followup's CI gates the batch. Interstitial red is fine when the
   stack explains it; unexplained red is a real signal.
 - The interstitial showstopper bar is irreversible-on-merge harm — nothing
