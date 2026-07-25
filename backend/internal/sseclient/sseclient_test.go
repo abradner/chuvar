@@ -1,4 +1,4 @@
-package main
+package sseclient
 
 import (
 	"context"
@@ -15,14 +15,14 @@ func TestParseEvent_StagedDiff(t *testing.T) {
 		t.Fatalf("Type = %q, want staged_diff_added", ev.Type)
 	}
 	if ev.Diff == nil || ev.Diff.ID != "d1" || ev.Diff.Content != "user likes tea" {
-		t.Fatalf("Diff = %+v, want a parsed stagedDiff with id=d1", ev.Diff)
+		t.Fatalf("Diff = %+v, want a parsed StagedDiff with id=d1", ev.Diff)
 	}
 }
 
 func TestParseEvent_GrantRequest(t *testing.T) {
 	ev := parseEvent("grant_request_resolved", `{"id":"r1","status":"approved"}`)
 	if ev.Req == nil || ev.Req.ID != "r1" || ev.Req.Status != "approved" {
-		t.Fatalf("Req = %+v, want a parsed grantRequest with id=r1 status=approved", ev.Req)
+		t.Fatalf("Req = %+v, want a parsed GrantRequest with id=r1 status=approved", ev.Req)
 	}
 }
 
@@ -40,10 +40,10 @@ func TestParseEvent_ReadyHasNoPayload(t *testing.T) {
 	}
 }
 
-// TestStreamEvents_ParsesRealSSEResponse exercises the actual HTTP + SSE parsing
-// path (not just parseEvent in isolation) against a real server, the same way
+// TestStream_ParsesRealSSEResponse exercises the actual HTTP + SSE parsing path
+// (not just parseEvent in isolation) against a real server, the same way
 // internal/api/events_test.go tests the producing side.
-func TestStreamEvents_ParsesRealSSEResponse(t *testing.T) {
+func TestStream_ParsesRealSSEResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-token" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -57,22 +57,22 @@ func TestStreamEvents_ParsesRealSSEResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &apiClient{baseURL: srv.URL, token: "test-token", http: &http.Client{}}
-	out := make(chan sseEvent, 8)
+	c := &Client{BaseURL: srv.URL, Token: "test-token", HTTP: &http.Client{}}
+	out := make(chan Event, 8)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	err := c.streamEvents(ctx, out)
+	err := c.Stream(ctx, out)
 	// The handler closes its response after writing two events (no keep-open
-	// loop), so streamEvents should return cleanly once it hits EOF — not an
-	// error a caller needs to treat as a real failure. streamEventsWithReconnect
-	// (main.go) already handles both cases identically (retry either way).
+	// loop), so Stream should return cleanly once it hits EOF — not an error a
+	// caller needs to treat as a real failure. Every consumer's own reconnect
+	// loop already handles both cases identically (retry either way).
 	if err != nil {
-		t.Logf("streamEvents returned %v (expected: server closed the connection)", err)
+		t.Logf("Stream returned %v (expected: server closed the connection)", err)
 	}
 
 	close(out)
-	var events []sseEvent
+	var events []Event
 	for e := range out {
 		events = append(events, e)
 	}
@@ -87,15 +87,15 @@ func TestStreamEvents_ParsesRealSSEResponse(t *testing.T) {
 	}
 }
 
-func TestStreamEvents_UnauthorizedReturnsError(t *testing.T) {
+func TestStream_UnauthorizedReturnsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
 
-	c := &apiClient{baseURL: srv.URL, token: "wrong", http: &http.Client{}}
-	out := make(chan sseEvent, 1)
-	if err := c.streamEvents(context.Background(), out); err == nil {
-		t.Fatal("streamEvents() with a 401 response: want an error, got nil")
+	c := &Client{BaseURL: srv.URL, Token: "wrong", HTTP: &http.Client{}}
+	out := make(chan Event, 1)
+	if err := c.Stream(context.Background(), out); err == nil {
+		t.Fatal("Stream() with a 401 response: want an error, got nil")
 	}
 }

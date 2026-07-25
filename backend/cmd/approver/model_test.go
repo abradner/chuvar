@@ -1,11 +1,15 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/abradner/chuvar/backend/internal/sseclient"
+)
 
 func TestModel_ApplyAddThenResolve(t *testing.T) {
 	m := newModel()
 
-	m.apply(sseEvent{Type: "staged_diff_added", Diff: &stagedDiff{ID: "d1", Subject: "agent-a", Content: "x"}})
+	m.apply(appEvent{Type: "staged_diff_added", Diff: &sseclient.StagedDiff{ID: "d1", Subject: "agent-a", Content: "x"}})
 	if len(m.order) != 1 {
 		t.Fatalf("order = %v, want 1 item", m.order)
 	}
@@ -13,7 +17,7 @@ func TestModel_ApplyAddThenResolve(t *testing.T) {
 		t.Fatal("d1 not in items after staged_diff_added")
 	}
 
-	m.apply(sseEvent{Type: "staged_diff_resolved", Diff: &stagedDiff{ID: "d1"}})
+	m.apply(appEvent{Type: "staged_diff_resolved", Diff: &sseclient.StagedDiff{ID: "d1"}})
 	if len(m.order) != 0 {
 		t.Fatalf("order after resolve = %v, want empty", m.order)
 	}
@@ -24,9 +28,9 @@ func TestModel_ApplyAddThenResolve(t *testing.T) {
 
 func TestModel_UpsertDoesNotDuplicate(t *testing.T) {
 	m := newModel()
-	it := item{kind: kindDiff, diff: &stagedDiff{ID: "d1", Content: "first"}}
+	it := item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "d1", Content: "first"}}
 	m.upsert(it)
-	m.upsert(item{kind: kindDiff, diff: &stagedDiff{ID: "d1", Content: "updated"}})
+	m.upsert(item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "d1", Content: "updated"}})
 
 	if len(m.order) != 1 {
 		t.Fatalf("order = %v, want exactly one entry for a repeated ID", m.order)
@@ -38,7 +42,7 @@ func TestModel_UpsertDoesNotDuplicate(t *testing.T) {
 
 func TestModel_RemoveUnknownIDIsNoop(t *testing.T) {
 	m := newModel()
-	m.upsert(item{kind: kindDiff, diff: &stagedDiff{ID: "d1"}})
+	m.upsert(item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "d1"}})
 	m.remove("does-not-exist")
 	if len(m.order) != 1 {
 		t.Fatalf("order = %v, want unchanged (1 item)", m.order)
@@ -47,8 +51,8 @@ func TestModel_RemoveUnknownIDIsNoop(t *testing.T) {
 
 func TestModel_MoveSelectionClampsToBounds(t *testing.T) {
 	m := newModel()
-	m.upsert(item{kind: kindDiff, diff: &stagedDiff{ID: "d1"}})
-	m.upsert(item{kind: kindDiff, diff: &stagedDiff{ID: "d2"}})
+	m.upsert(item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "d1"}})
+	m.upsert(item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "d2"}})
 
 	m.moveSelection(-5)
 	if m.selected != 0 {
@@ -73,8 +77,8 @@ func TestModel_MoveSelectionOnEmptyQueueIsNoop(t *testing.T) {
 
 func TestModel_RemoveSelectedLastItemMovesSelectionBack(t *testing.T) {
 	m := newModel()
-	m.upsert(item{kind: kindDiff, diff: &stagedDiff{ID: "d1"}})
-	m.upsert(item{kind: kindDiff, diff: &stagedDiff{ID: "d2"}})
+	m.upsert(item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "d1"}})
+	m.upsert(item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "d2"}})
 	m.selected = 1 // the last item, "d2"
 
 	m.remove("d2")
@@ -90,8 +94,8 @@ func TestModel_RemoveSelectedLastItemMovesSelectionBack(t *testing.T) {
 
 func TestModel_MixedDiffsAndRequestsCoexist(t *testing.T) {
 	m := newModel()
-	m.apply(sseEvent{Type: "staged_diff_added", Diff: &stagedDiff{ID: "d1"}})
-	m.apply(sseEvent{Type: "grant_request_added", Req: &grantRequest{ID: "r1"}})
+	m.apply(appEvent{Type: "staged_diff_added", Diff: &sseclient.StagedDiff{ID: "d1"}})
+	m.apply(appEvent{Type: "grant_request_added", Req: &sseclient.GrantRequest{ID: "r1"}})
 
 	if len(m.order) != 2 {
 		t.Fatalf("order = %v, want both a diff and a request", m.order)
@@ -104,7 +108,7 @@ func TestModel_MixedDiffsAndRequestsCoexist(t *testing.T) {
 	}
 
 	// Resolving one must not touch the other.
-	m.apply(sseEvent{Type: "grant_request_resolved", Req: &grantRequest{ID: "r1"}})
+	m.apply(appEvent{Type: "grant_request_resolved", Req: &sseclient.GrantRequest{ID: "r1"}})
 	if len(m.order) != 1 || m.order[0] != "d1" {
 		t.Fatalf("order after resolving r1 = %v, want only d1 left", m.order)
 	}

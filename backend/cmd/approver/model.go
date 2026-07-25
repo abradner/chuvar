@@ -1,5 +1,24 @@
 package main
 
+import "github.com/abradner/chuvar/backend/internal/sseclient"
+
+// appEvent is what flows through this program's single event channel — every
+// sseclient.Event the server sends, plus a few locally-synthesized Types
+// ("status", "connection_error") for this program's own action results and
+// connection state that the server protocol has no frame for. A thin wrapper
+// rather than reusing sseclient.Event directly so those synthetic types don't
+// need to pretend to be server events.
+type appEvent struct {
+	Type   string
+	Diff   *sseclient.StagedDiff
+	Req    *sseclient.GrantRequest
+	Detail string
+}
+
+func fromServerEvent(ev sseclient.Event) appEvent {
+	return appEvent{Type: ev.Type, Diff: ev.Diff, Req: ev.Req, Detail: ev.Detail}
+}
+
 // item is one entry in the review queue — either a staged diff or a grant
 // request, never both. A tagged union rather than an interface: the render and
 // action code both need to switch on kind anyway, and there are exactly two
@@ -7,8 +26,8 @@ package main
 // not an open set a new type will keep getting added to.
 type item struct {
 	kind kind
-	diff *stagedDiff
-	req  *grantRequest
+	diff *sseclient.StagedDiff
+	req  *sseclient.GrantRequest
 }
 
 type kind int
@@ -67,7 +86,7 @@ func (m *model) remove(id string) {
 // regardless of which surface resolved it (this TUI's own action, the web
 // dashboard, another approver instance) — the queue always reflects "what's
 // actually still pending," not just "what this connection decided."
-func (m *model) apply(ev sseEvent) {
+func (m *model) apply(ev appEvent) {
 	switch ev.Type {
 	case "staged_diff_added":
 		m.upsert(item{kind: kindDiff, diff: ev.Diff})

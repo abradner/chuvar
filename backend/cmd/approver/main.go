@@ -8,7 +8,8 @@
 //
 // A separate binary from apiserver/mcpserver, same reasoning as those two: this
 // is a terminal client of the REST API, not a server — it never touches the
-// database or internal/store directly.
+// database or internal/store directly. The actual HTTP/SSE plumbing lives in
+// internal/sseclient, shared with cmd/pushbridge.
 package main
 
 import (
@@ -20,6 +21,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/abradner/chuvar/backend/internal/sseclient"
 )
 
 func main() {
@@ -38,7 +41,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	client := &apiClient{baseURL: baseURL, token: token, http: &http.Client{}}
+	client := &sseclient.Client{BaseURL: baseURL, Token: token, HTTP: &http.Client{}}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -56,7 +59,7 @@ func main() {
 	// goroutine ever touches m directly. That's what keeps model.go's "no mutex
 	// needed" comment true even though key actions run their HTTP call in the
 	// background (below).
-	events := make(chan sseEvent, 64)
+	events := make(chan appEvent, 64)
 	go streamEventsWithReconnect(ctx, client, events)
 
 	keys := ui.ReadKeys(ctx)
@@ -84,32 +87,45 @@ func main() {
 // streamEventsWithReconnect keeps a GET /api/events connection alive, retrying
 // with a fixed backoff on any disconnect (network blip, apiserver restart) —
 // a TUI meant to sit in a pane for hours needs to survive that without the
-// operator noticing, unlike the one-shot connections events_test.go makes.
+// operator noticing.
 //
 // Never closes out: it's shared with runAction's action-result notifications
 // (main's event loop only exits via ctx.Done(), never a closed channel), and
 // this function's own retry loop already exits cleanly on ctx cancellation.
-func streamEventsWithReconnect(ctx context.Context, c *apiClient, out chan<- sseEvent) {
+func streamEventsWithReconnect(ctx context.Context, c *sseclient.Client, out chan<- appEvent) {
 	const retryDelay = 2 * time.Second
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		err := c.streamEvents(ctx, out)
-		if ctx.Err() != nil {
-			return
-		}
-		if err != nil {
-			// Surfaced to the user via a synthetic event rather than a log line —
-			// this program's only output is the TUI itself.
+	raw := make(chan sseclient.Event)
+	go func() {
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			err := c.Stream(ctx, raw)
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				select {
+				case out <- appEvent{Type: "connection_error", Detail: err.Error()}:
+				case <-ctx.Done():
+					return
+				}
+			}
 			select {
-			case out <- sseEvent{Type: "connection_error", Detail: err.Error()}:
+			case <-time.After(retryDelay):
 			case <-ctx.Done():
 				return
 			}
 		}
+	}()
+	for {
 		select {
-		case <-time.After(retryDelay):
+		case ev := <-raw:
+			select {
+			case out <- fromServerEvent(ev):
+			case <-ctx.Done():
+				return
+			}
 		case <-ctx.Done():
 			return
 		}
@@ -123,7 +139,7 @@ func streamEventsWithReconnect(ctx context.Context, c *apiClient, out chan<- sse
 // whether an approval actually succeeded (e.g. it could 409 if someone else
 // resolved it a moment earlier), and the status line reports failures instead
 // of the queue silently lying about what's still pending.
-func handleKey(ctx context.Context, c *apiClient, m *model, k key, events chan<- sseEvent) (quit bool) {
+func handleKey(ctx context.Context, c *sseclient.Client, m *model, k key, events chan<- appEvent) (quit bool) {
 	switch {
 	case k.special == keyCtrlC:
 		return true
@@ -140,9 +156,9 @@ func handleKey(ctx context.Context, c *apiClient, m *model, k key, events chan<-
 		}
 		go runAction(ctx, events, it, func() error {
 			if it.kind == kindDiff {
-				return c.approveStagedDiff(ctx, it.id())
+				return c.ApproveStagedDiff(ctx, it.id())
 			}
-			return c.approveGrantRequest(ctx, it.id())
+			return c.ApproveGrantRequest(ctx, it.id())
 		}, "approved")
 	case k.r == 'r':
 		it, ok := m.current()
@@ -151,9 +167,9 @@ func handleKey(ctx context.Context, c *apiClient, m *model, k key, events chan<-
 		}
 		go runAction(ctx, events, it, func() error {
 			if it.kind == kindDiff {
-				return c.rejectStagedDiff(ctx, it.id())
+				return c.RejectStagedDiff(ctx, it.id())
 			}
-			return c.denyGrantRequest(ctx, it.id())
+			return c.DenyGrantRequest(ctx, it.id())
 		}, "rejected")
 	}
 	return false
@@ -172,13 +188,13 @@ func handleKey(ctx context.Context, c *apiClient, m *model, k key, events chan<-
 // until the server's own "_resolved" event confirms it, since the server is
 // the source of truth for whether an approval actually landed (it could 409 if
 // someone else resolved it a moment earlier).
-func runAction(ctx context.Context, events chan<- sseEvent, it item, do func() error, verb string) {
+func runAction(ctx context.Context, events chan<- appEvent, it item, do func() error, verb string) {
 	msg := fmt.Sprintf("%s %s", verb, it.id()[:8])
 	if err := do(); err != nil {
 		msg = fmt.Sprintf("failed to %s %s: %v", verb, it.id()[:8], err)
 	}
 	select {
-	case events <- sseEvent{Type: "status", Detail: msg}:
+	case events <- appEvent{Type: "status", Detail: msg}:
 	case <-ctx.Done():
 	}
 }
