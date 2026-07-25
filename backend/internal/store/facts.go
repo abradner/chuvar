@@ -86,6 +86,27 @@ func (s *Store) SearchFacts(ctx context.Context, queryText string, queryEmbeddin
 	return facts, rows.Err()
 }
 
+// GetFact fetches a single active or superseded fact by ID. Used by the approval
+// UI's REST API to show what a staged diff's target_fact_id actually is before a
+// human approves — the reviewer should see the content being replaced, not just
+// an opaque UUID. No scope filtering here: this is a reviewer-facing lookup keyed
+// by an ID the reviewer already has from a staged diff they're actively deciding
+// on (internal/api's shared-token auth is what gates who can reach this at all),
+// not a search endpoint that needs to hide facts a caller hasn't been granted.
+func (s *Store) GetFact(ctx context.Context, id string) (Fact, error) {
+	var f Fact
+	err := s.pool.QueryRow(ctx,
+		`SELECT f.id, f.content, f.created_at, f.valid_at,
+		        (SELECT array_agg(fs.scope) FROM fact_scopes fs WHERE fs.fact_id = f.id) AS scopes
+		 FROM facts f WHERE f.id = $1`,
+		id,
+	).Scan(&f.ID, &f.Content, &f.CreatedAt, &f.ValidAt, &f.Scopes)
+	if err != nil {
+		return Fact{}, fmt.Errorf("store: get fact %s: %w", id, err)
+	}
+	return f, nil
+}
+
 const searchFactsSQL = `
 WITH candidate_facts AS (
     -- Scope filter runs here, before any ranking. A fact qualifies only if EVERY
