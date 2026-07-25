@@ -26,7 +26,12 @@ export function GrantsPage() {
     const controller = new AbortController();
     api
       .listGrants(subject.trim(), controller.signal)
-      .then(setGrants)
+      .then((g) => {
+        setGrants(g);
+        // A successful load clears any error banner left over from an earlier
+        // failed load — otherwise a stale error sits above a perfectly good list.
+        setError(null);
+      })
       .catch((e: unknown) => {
         if (e instanceof DOMException && e.name === "AbortError") return;
         setError(e instanceof ApiError ? e.message : String(e));

@@ -11,7 +11,7 @@ export default function App() {
     <div className="app">
       <header>
         <h1>Chuvar</h1>
-        <p className="subtitle">approval dashboard — working title, don't get attached to the name</p>
+        <p className="subtitle">approval dashboard</p>
         <nav>
           <button className={tab === "staged-diffs" ? "active" : ""} onClick={() => setTab("staged-diffs")}>
             Staged diffs
