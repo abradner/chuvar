@@ -3,28 +3,30 @@
 // side of the consent model — nothing here is reachable from an MCP tool, and
 // nothing in mcptools calls into this package.
 //
-// Every route requires a shared-secret bearer token (see requireAuth) — this is a
-// deliberately minimal v0 answer, not a real multi-user auth system: there's one
-// secret, checked on every request, standing in for "only the one trusted operator
-// can reach this." A real system (per-reviewer identity, roles, audit trail of who
-// approved what) is a genuine product decision this project hasn't made yet, and
-// this doesn't presume to make it. What it does close is the gap review found: this
-// package used to have literally no check on who could call approveStagedDiff — the
-// one endpoint that turns a staged diff into a permanent fact (AGENTS.md §3.1) — so
-// "no auth yet" was a real, not theoretical, hole. The server also binds
-// 127.0.0.1 by default (internal/config) and CORS reflects one specific configured
-// origin rather than a wildcard (see Routes/cors below) as defense in depth on top
-// of the token, not instead of it.
+// Every route requires a named, individually-revocable reviewer/device token (see
+// requireAuth and store.AuthenticateReviewerToken) — this replaces the original v0
+// answer of a single shared secret. Every mutation's decided_by/approved_by/
+// revoked_by is now derived from the authenticated token's label (reviewerFromContext),
+// never read from the request body: a client-supplied identity field is exactly
+// the "self-reported, not authenticated" gap flagged after v0 shipped (Notion tasks
+// tracker), since nothing stopped one reviewer's browser session from attributing an
+// approval to a different name. This still isn't real multi-user auth with roles —
+// every active token can do everything any other active token can, matching "one
+// trusted operator, multiple devices" rather than a permissions model — but who
+// performed an action is now provably the token holder, not a string they typed.
+// The server also binds 127.0.0.1 by default (internal/config) and CORS reflects
+// one specific configured origin rather than a wildcard (see Routes/cors below) as
+// defense in depth on top of token auth, not instead of it.
 package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/abradner/chuvar/backend/internal/embed"
@@ -48,30 +50,20 @@ type API struct {
 	// headers entirely rather than falling back to a wildcard.
 	AllowedOrigin string
 
-	// AuthToken gates every route via requireAuth. Required — New panics if it's
-	// empty, the same "fail fast on missing required config" stance as
-	// config.Load (AGENTS.md §6), applied here because an API server with an
-	// empty/unset auth token is worse than one that refuses to start: it would
-	// silently accept every request as authenticated.
-	AuthToken string
-
 	// RequestTimeout bounds how long a single request's context stays alive —
 	// see withRequestTimeout. Required (New panics if <= 0): the zero value would
 	// mean "no timeout," silently undoing the whole point of this field.
 	RequestTimeout time.Duration
 }
 
-func New(st *store.Store, emb embed.Embedder, allowedOrigin, authToken string, requestTimeout time.Duration) *API {
-	if authToken == "" {
-		panic("api: AuthToken must not be empty — see the package comment")
-	}
+func New(st *store.Store, emb embed.Embedder, allowedOrigin string, requestTimeout time.Duration) *API {
 	if requestTimeout <= 0 {
 		panic("api: RequestTimeout must be positive — a zero or negative value disables request cancellation entirely")
 	}
 	if err := validateAllowedOrigin(allowedOrigin); err != nil {
 		panic("api: " + err.Error())
 	}
-	return &API{Store: st, Embedder: emb, AllowedOrigin: allowedOrigin, AuthToken: authToken, RequestTimeout: requestTimeout}
+	return &API{Store: st, Embedder: emb, AllowedOrigin: allowedOrigin, RequestTimeout: requestTimeout}
 }
 
 // validateAllowedOrigin rejects anything that isn't either empty (CORS disabled)
@@ -123,6 +115,9 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("GET /api/grants", a.listGrants)
 	mux.HandleFunc("POST /api/grants", a.createGrant)
 	mux.HandleFunc("POST /api/grants/{id}/revoke", a.revokeGrant)
+	mux.HandleFunc("GET /api/tokens", a.listTokens)
+	mux.HandleFunc("POST /api/tokens", a.createToken)
+	mux.HandleFunc("POST /api/tokens/{id}/revoke", a.revokeToken)
 	return a.cors(a.requireAuth(a.limitBody(a.withRequestTimeout(mux))))
 }
 
@@ -181,20 +176,29 @@ func writeStoreError(w http.ResponseWriter, status int, op, clientMessage string
 	writeJSON(w, status, errorResponse{Error: clientMessage})
 }
 
-// requireAuth checks a shared-secret bearer token on every request. Constant-time
-// comparison (crypto/subtle) so a timing side-channel can't help an attacker guess
-// the token byte by byte — cheap to get right, so there's no reason not to.
+// requireAuth authenticates the bearer token against store.AuthenticateReviewerToken
+// and, on success, attaches the token's label to the request context via
+// reviewerFromContext — every handler that mutates state (approve/reject a diff,
+// create/revoke a grant, issue/revoke a token) reads the acting reviewer from there,
+// never from the request body. See the package comment for why.
 func (a *API) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const prefix = "Bearer "
 		auth := r.Header.Get("Authorization")
-		if len(auth) != len(prefix)+len(a.AuthToken) ||
-			auth[:len(prefix)] != prefix ||
-			subtle.ConstantTimeCompare([]byte(auth[len(prefix):]), []byte(a.AuthToken)) != 1 {
+		if !strings.HasPrefix(auth, prefix) {
 			writeError(w, http.StatusUnauthorized, errUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r)
+		label, ok, err := a.Store.AuthenticateReviewerToken(r.Context(), strings.TrimPrefix(auth, prefix))
+		if err != nil {
+			writeStoreError(w, http.StatusInternalServerError, "requireAuth", "could not authenticate", err)
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusUnauthorized, errUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), reviewerContextKey{}, label)))
 	})
 }
 
@@ -203,6 +207,24 @@ var errUnauthorized = unauthorizedError{}
 type unauthorizedError struct{}
 
 func (unauthorizedError) Error() string { return "unauthorized" }
+
+// reviewerContextKey is an unexported type so this package's context value can
+// never collide with a key set by another package — the standard Go idiom for
+// context keys (see context.WithValue's doc comment).
+type reviewerContextKey struct{}
+
+// reviewerFromContext returns the authenticated reviewer's token label, set by
+// requireAuth on every request that reaches a handler. Panics if called on a
+// request that didn't go through requireAuth — every route in Routes() does, so
+// this is a programmer error (a new route added outside the auth chain), not a
+// runtime condition to handle gracefully.
+func reviewerFromContext(ctx context.Context) string {
+	label, ok := ctx.Value(reviewerContextKey{}).(string)
+	if !ok {
+		panic("api: reviewerFromContext called on a request that bypassed requireAuth")
+	}
+	return label
+}
 
 // cors applies a single, explicitly-configured allowed origin — never a wildcard.
 // AllowedOrigin empty means no CORS headers are sent at all (browsers then enforce

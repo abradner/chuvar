@@ -3,7 +3,6 @@ import { api, ApiError, type Grant } from "../api/client";
 
 export function GrantsPage() {
   const [subject, setSubject] = useState("agent-a");
-  const [reviewer, setReviewer] = useState("");
   const [grants, setGrants] = useState<Grant[]>([]);
   // Load errors and form/mutation errors are separate state on purpose: the list
   // effect re-runs on subject changes and refreshKey bumps, and a successful load
@@ -49,7 +48,7 @@ export function GrantsPage() {
     setBusyId(id);
     setError(null);
     try {
-      await api.revokeGrant(id, reviewer);
+      await api.revokeGrant(id);
       setRefreshKey((k) => k + 1);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
@@ -92,7 +91,7 @@ export function GrantsPage() {
 
     setCreating(true);
     try {
-      await api.createGrant(subject.trim(), scopes, newDepth, reviewer, ttlSeconds);
+      await api.createGrant(subject.trim(), scopes, newDepth, ttlSeconds);
       setNewScopes("");
       setRefreshKey((k) => k + 1);
     } catch (e) {
@@ -105,15 +104,6 @@ export function GrantsPage() {
   return (
     <section>
       <h2>Grants</h2>
-      <label className="reviewer-field">
-        Reviewing as
-        <input
-          value={reviewer}
-          onChange={(e) => setReviewer(e.target.value)}
-          placeholder="your name"
-          aria-label="Reviewer name"
-        />
-      </label>
       <label className="subject-field">
         Subject
         <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="agent-a" />
@@ -131,7 +121,7 @@ export function GrantsPage() {
               {g.expires_at && ` · expires ${new Date(g.expires_at).toLocaleString()}`}
             </p>
             {g.active && (
-              <button disabled={busyId === g.id || !reviewer.trim()} onClick={() => revoke(g.id)} className="secondary">
+              <button disabled={busyId === g.id} onClick={() => revoke(g.id)} className="secondary">
                 Revoke
               </button>
             )}
@@ -174,7 +164,7 @@ export function GrantsPage() {
             onChange={(e) => setNewTTLMinutes(e.target.value)}
           />
         </label>
-        <button type="submit" disabled={creating || !reviewer.trim()}>
+        <button type="submit" disabled={creating}>
           Create grant
         </button>
       </form>

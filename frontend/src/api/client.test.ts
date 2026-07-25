@@ -51,7 +51,7 @@ describe("api client", () => {
         throw new Error("json() should not be called for a 204 response");
       },
     });
-    const result = await api.revokeGrant("grant-1", "reviewer-a");
+    const result = await api.revokeGrant("grant-1");
     expect(result).toBeUndefined();
   });
 
@@ -60,27 +60,27 @@ describe("api client", () => {
     await expect(api.listGrants("agent-a")).rejects.toBeInstanceOf(ApiError);
   });
 
-  it("sends the decided_by body on approveStagedDiff", async () => {
+  it("sends no body on approveStagedDiff — decided_by is derived server-side from the auth token", async () => {
     const fetchMock = mockFetchOnce({ ok: true, status: 200, json: async () => ({}) });
-    await api.approveStagedDiff("diff-1", "reviewer-a");
+    await api.approveStagedDiff("diff-1");
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain("/api/staged-diffs/diff-1/approve");
-    expect(JSON.parse(init.body as string)).toEqual({ decided_by: "reviewer-a" });
+    expect(init.body).toBeUndefined();
   });
 
-  it("sends the revoked_by body on revokeGrant", async () => {
+  it("sends no body on revokeGrant — revoked_by is derived server-side from the auth token", async () => {
     const fetchMock = mockFetchOnce({ ok: true, status: 204 });
-    await api.revokeGrant("grant-1", "reviewer-a");
+    await api.revokeGrant("grant-1");
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain("/api/grants/grant-1/revoke");
-    expect(JSON.parse(init.body as string)).toEqual({ revoked_by: "reviewer-a" });
+    expect(init.body).toBeUndefined();
   });
 
-  it("sends the approved_by body on createGrant", async () => {
+  it("sends the grant fields on createGrant, with no approved_by — derived server-side from the auth token", async () => {
     const fetchMock = mockFetchOnce({ ok: true, status: 201, json: async () => ({}) });
-    await api.createGrant("agent-a", ["identity.basic"], "facts", "reviewer-a", 300);
+    await api.createGrant("agent-a", ["identity.basic"], "facts", 300);
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain("/api/grants");
@@ -88,7 +88,6 @@ describe("api client", () => {
       subject: "agent-a",
       scopes: ["identity.basic"],
       depth: "facts",
-      approved_by: "reviewer-a",
       ttl_seconds: 300,
     });
   });

@@ -186,15 +186,13 @@ button.secondary {
   gap: 8px;
 }
 
-.subject-field,
-.reviewer-field {
+.subject-field {
   display: block;
   margin-bottom: 20px;
   font-size: 14px;
 }
 
-.subject-field input,
-.reviewer-field input {
+.subject-field input {
   display: block;
   margin-top: 4px;
 }

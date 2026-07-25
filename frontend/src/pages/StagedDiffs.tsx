@@ -14,7 +14,6 @@ export function StagedDiffsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [reviewer, setReviewer] = useState("");
   // Keyed by target_fact_id, not diff id — several diffs could (in principle)
   // target the same fact, and there's no reason to fetch it twice.
   const [targetFacts, setTargetFacts] = useState<Record<string, TargetFactState>>({});
@@ -73,9 +72,9 @@ export function StagedDiffsPage() {
     setError(null);
     try {
       if (action === "approve") {
-        await api.approveStagedDiff(id, reviewer);
+        await api.approveStagedDiff(id);
       } else {
-        await api.rejectStagedDiff(id, reviewer);
+        await api.rejectStagedDiff(id);
       }
       setDiffs((prev) => prev.filter((d) => d.id !== id));
     } catch (e) {
@@ -90,15 +89,6 @@ export function StagedDiffsPage() {
   return (
     <section>
       <h2>Pending review</h2>
-      <label className="reviewer-field">
-        Reviewing as
-        <input
-          value={reviewer}
-          onChange={(e) => setReviewer(e.target.value)}
-          placeholder="your name"
-          aria-label="Reviewer name"
-        />
-      </label>
       {error && <p className="error">{error}</p>}
       {diffs.length === 0 && <p className="empty">Nothing waiting for review.</p>}
       <ul className="diff-list">
@@ -136,13 +126,10 @@ export function StagedDiffsPage() {
                 )}
               </p>
               <div className="actions">
-                <button
-                  disabled={busyId === d.id || !reviewer.trim() || targetUnresolved}
-                  onClick={() => decide(d.id, "approve")}
-                >
+                <button disabled={busyId === d.id || targetUnresolved} onClick={() => decide(d.id, "approve")}>
                   Approve
                 </button>
-                <button disabled={busyId === d.id || !reviewer.trim()} onClick={() => decide(d.id, "reject")} className="secondary">
+                <button disabled={busyId === d.id} onClick={() => decide(d.id, "reject")} className="secondary">
                   Reject
                 </button>
               </div>
