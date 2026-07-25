@@ -1,7 +1,9 @@
 // Package mcptools registers the v0 MCP tool surface: read_with_scope_check,
-// propose_write, list_grants. This is intentionally the entire tool surface — no
-// deterministic write/delete tool exists here, and none should be added without
-// revisiting AGENTS.md §3.1 first.
+// propose_write, list_grants, request_grant. This is intentionally the entire
+// tool surface — no deterministic write/delete tool exists here, and none should
+// be added without revisiting AGENTS.md §3.1 first. request_grant follows the same
+// shape as propose_write: it stages a request, never creates a real grant — only
+// a human, via the REST API, does that (store.ApproveGrantRequest).
 package mcptools
 
 import (
@@ -55,15 +57,17 @@ const (
 // session, so the process's own launch environment (see cmd/mcpserver, MCP_SUBJECT)
 // is the actual trust boundary, not client-supplied tool arguments. This doesn't
 // solve identity for the REST API (internal/api), which legitimately serves many
-// human reviewers over HTTP and has its own, still-open gap — see that package's
-// comment. Nor does it invent real multi-tenant auth; it closes the one clean,
-// narrow hole this transport model has an obvious answer for. A real auth layer
-// later replaces "one configured subject" with "subject derived from an
-// authenticated session," same shape.
+// human reviewers over HTTP — that side is now covered by per-reviewer device
+// tokens (see that package's comment) rather than a client-supplied string. Nor
+// does it invent real multi-tenant auth; it closes the one clean, narrow hole this
+// transport model has an obvious answer for. A real auth layer later replaces "one
+// configured subject" with "subject derived from an authenticated session," same
+// shape.
 func Register(s *mcp.Server, subject string, st *store.Store, emb embed.Embedder, b *bouncer.Bouncer) {
 	registerListGrants(s, subject, st)
 	registerReadWithScopeCheck(s, subject, st, emb)
 	registerProposeWrite(s, subject, b)
+	registerRequestGrant(s, subject, st)
 }
 
 // toolError logs the real error server-side and returns a generic, client-facing

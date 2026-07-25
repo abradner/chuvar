@@ -7,6 +7,7 @@ package sqlcgen
 import (
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
@@ -48,6 +49,20 @@ type Grant struct {
 	CreatedAt time.Time
 	ExpiresAt *time.Time
 	RevokedAt *time.Time
+}
+
+type GrantRequest struct {
+	ID                  string
+	Subject             string
+	RequestedScopes     []string
+	Depth               string
+	RequestedTtlSeconds pgtype.Int4
+	Justification       string
+	Status              string
+	CreatedAt           time.Time
+	DecidedAt           *time.Time
+	DecidedBy           *string
+	ResultingGrantID    *string
 }
 
 type GrantScope struct {

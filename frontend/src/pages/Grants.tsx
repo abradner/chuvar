@@ -1,9 +1,10 @@
 import { type FormEvent, useEffect, useState } from "react";
-import { api, ApiError, type Grant } from "../api/client";
+import { api, ApiError, type Grant, type GrantRequest } from "../api/client";
 
 export function GrantsPage() {
   const [subject, setSubject] = useState("agent-a");
   const [grants, setGrants] = useState<Grant[]>([]);
+  const [requests, setRequests] = useState<GrantRequest[]>([]);
   // Load errors and form/mutation errors are separate state on purpose: the list
   // effect re-runs on subject changes and refreshKey bumps, and a successful load
   // clearing a shared error would also erase an unrelated validation or
@@ -43,6 +44,42 @@ export function GrantsPage() {
       });
     return () => controller.abort();
   }, [subject, refreshKey]);
+
+  // Pending grant requests are shown across all subjects, not just the one typed
+  // into the Subject field above — a request is exactly the thing that tells the
+  // operator a new subject exists and wants access, so filtering it by the
+  // subject field would hide the requests most worth seeing.
+  useEffect(() => {
+    const controller = new AbortController();
+    api
+      .listGrantRequests("pending", controller.signal)
+      .then(setRequests)
+      .catch((e: unknown) => {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        setLoadError(e instanceof ApiError ? e.message : String(e));
+      });
+    return () => controller.abort();
+  }, [refreshKey]);
+
+  const decideRequest = async (id: string, action: "approve" | "deny") => {
+    setBusyId(id);
+    setError(null);
+    try {
+      if (action === "approve") {
+        await api.approveGrantRequest(id);
+      } else {
+        await api.denyGrantRequest(id);
+      }
+      setRequests((prev) => prev.filter((r) => r.id !== id));
+      // An approval creates a real grant, which may belong to the subject
+      // currently shown below — refresh that list too.
+      setRefreshKey((k) => k + 1);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const revoke = async (id: string) => {
     setBusyId(id);
@@ -104,13 +141,42 @@ export function GrantsPage() {
   return (
     <section>
       <h2>Grants</h2>
+      {loadError && <p className="error">{loadError}</p>}
+      {error && <p className="error">{error}</p>}
+
+      {requests.length > 0 && (
+        <>
+          <h3>Requested by agents</h3>
+          <ul className="grant-request-list">
+            {requests.map((r) => (
+              <li key={r.id} className="grant-card">
+                <p className="diff-meta">
+                  <span className="proposer">from {r.subject}</span>
+                </p>
+                <p className="scopes">{r.requested_scopes.join(", ")}</p>
+                <p className="grant-meta">
+                  depth: {r.depth}
+                  {r.requested_ttl_seconds != null && ` · ${Math.round(r.requested_ttl_seconds / 60)} min`}
+                </p>
+                {r.justification && <p className="diff-content">{r.justification}</p>}
+                <div className="actions">
+                  <button disabled={busyId === r.id} onClick={() => decideRequest(r.id, "approve")}>
+                    Approve
+                  </button>
+                  <button disabled={busyId === r.id} onClick={() => decideRequest(r.id, "deny")} className="secondary">
+                    Deny
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
       <label className="subject-field">
         Subject
         <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="agent-a" />
       </label>
-
-      {loadError && <p className="error">{loadError}</p>}
-      {error && <p className="error">{error}</p>}
 
       <ul className="grant-list">
         {grants.map((g) => (

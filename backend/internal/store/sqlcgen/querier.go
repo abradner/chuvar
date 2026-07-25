@@ -10,13 +10,16 @@ import (
 )
 
 type Querier interface {
+	ApproveGrantRequest(ctx context.Context, arg ApproveGrantRequestParams) (int64, error)
 	CountActiveReviewerTokens(ctx context.Context) (int64, error)
+	DenyGrantRequest(ctx context.Context, arg DenyGrantRequestParams) (int64, error)
 	FactVisibleToScopes(ctx context.Context, arg FactVisibleToScopesParams) (bool, error)
 	// embedding_1/embedding_2 are the same repeated-named-param workaround used
 	// elsewhere in this migration (see facts.sql's SearchFacts) — bound to the
 	// identical value at the call site.
 	FindDedupeCandidate(ctx context.Context, arg FindDedupeCandidateParams) (FindDedupeCandidateRow, error)
 	GetFact(ctx context.Context, id string) (GetFactRow, error)
+	GetGrantRequest(ctx context.Context, id string) (GrantRequest, error)
 	GetStagedDiff(ctx context.Context, id string) (StagedDiff, error)
 	GrantedScopes(ctx context.Context, subject string) ([]string, error)
 	// Two distinct named params bound to the identical exclude-fact-ID value at the
@@ -28,13 +31,16 @@ type Querier interface {
 	InsertFact(ctx context.Context, arg InsertFactParams) (InsertFactRow, error)
 	InsertFactScope(ctx context.Context, arg InsertFactScopeParams) error
 	InsertGrant(ctx context.Context, arg InsertGrantParams) (Grant, error)
+	InsertGrantRequest(ctx context.Context, arg InsertGrantRequestParams) (GrantRequest, error)
 	InsertGrantScope(ctx context.Context, arg InsertGrantScopeParams) error
 	InsertReviewerToken(ctx context.Context, arg InsertReviewerTokenParams) (InsertReviewerTokenRow, error)
 	InsertStagedDiff(ctx context.Context, arg InsertStagedDiffParams) (InsertStagedDiffRow, error)
+	ListGrantRequests(ctx context.Context, status string) ([]GrantRequest, error)
 	ListGrantScopes(ctx context.Context, grantID string) ([]string, error)
 	ListGrants(ctx context.Context, subject string) ([]Grant, error)
 	ListReviewerTokens(ctx context.Context) ([]ListReviewerTokensRow, error)
 	ListStagedDiffs(ctx context.Context, status string) ([]StagedDiff, error)
+	LoadGrantRequestForUpdate(ctx context.Context, id string) (LoadGrantRequestForUpdateRow, error)
 	LoadStagedDiffForUpdate(ctx context.Context, id string) (LoadStagedDiffForUpdateRow, error)
 	LockTargetFact(ctx context.Context, id string) (*time.Time, error)
 	LookupActiveReviewerToken(ctx context.Context, tokenHash []byte) (LookupActiveReviewerTokenRow, error)

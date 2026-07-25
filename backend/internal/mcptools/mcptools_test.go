@@ -34,7 +34,7 @@ func testSession(t *testing.T, subject string) (*mcp.ClientSession, *store.Store
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -124,7 +124,7 @@ func TestSubjectIsBoundNotClientSupplied(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 	st := store.New(pool)
@@ -272,7 +272,7 @@ func TestReadWithScopeCheck_RevokedMidEmbedIsRejected(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -362,5 +362,71 @@ func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 	}
 	if len(afterCommit.Facts) != 1 {
 		t.Fatalf("read after commit facts = %+v, want 1", afterCommit.Facts)
+	}
+}
+
+func TestRequestGrant_ViaMCP(t *testing.T) {
+	session, st := testSession(t, "agent-a")
+	ctx := context.Background()
+
+	out := callTool[requestGrantOutput](t, session, "request_grant", requestGrantArgs{
+		RequestedScopes: []string{"identity.basic"},
+		Justification:   "need this to answer a question about the user",
+	})
+	if out.Status != "pending" {
+		t.Fatalf("request_grant status = %q, want pending", out.Status)
+	}
+	if out.RequestID == "" {
+		t.Fatal("request_grant did not return a request_id")
+	}
+
+	// It never creates a real grant directly — the whole point of this tool is
+	// that it stages a request for human review (AGENTS.md §3.1 shape).
+	granted, err := st.GrantedScopes(ctx, "agent-a")
+	if err != nil {
+		t.Fatalf("GrantedScopes() error = %v", err)
+	}
+	if len(granted) != 0 {
+		t.Fatalf("GrantedScopes() after request_grant = %v, want empty (no auto-approval)", granted)
+	}
+
+	// The request is bound to the session's subject, same as every other tool —
+	// not client-suppliable.
+	reqs, err := st.ListGrantRequests(ctx, store.GrantRequestPending)
+	if err != nil {
+		t.Fatalf("ListGrantRequests() error = %v", err)
+	}
+	if len(reqs) != 1 || reqs[0].Subject != "agent-a" {
+		t.Fatalf("ListGrantRequests() = %+v, want one request from agent-a", reqs)
+	}
+}
+
+func TestRequestGrant_InvalidScopeIsError(t *testing.T) {
+	session, _ := testSession(t, "agent-a")
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "request_grant",
+		Arguments: requestGrantArgs{RequestedScopes: []string{"Not A Valid Scope"}},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() transport error = %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("request_grant with an invalid scope succeeded, want a tool error")
+	}
+}
+
+func TestRequestGrant_EmptyScopesIsError(t *testing.T) {
+	session, _ := testSession(t, "agent-a")
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "request_grant",
+		Arguments: requestGrantArgs{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() transport error = %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("request_grant with no scopes succeeded, want a tool error")
 	}
 }

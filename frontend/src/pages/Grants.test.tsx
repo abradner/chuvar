@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GrantsPage } from "./Grants";
 import { api } from "../api/client";
-import type { Grant } from "../api/client";
+import type { Grant, GrantRequest } from "../api/client";
 
 vi.mock("../api/client", async () => {
   const actual = await vi.importActual<typeof import("../api/client")>("../api/client");
@@ -13,6 +13,9 @@ vi.mock("../api/client", async () => {
       listGrants: vi.fn(),
       createGrant: vi.fn(),
       revokeGrant: vi.fn(),
+      listGrantRequests: vi.fn(),
+      approveGrantRequest: vi.fn(),
+      denyGrantRequest: vi.fn(),
     },
   };
 });
@@ -26,12 +29,28 @@ const sampleGrant: Grant = {
   created_at: "2026-07-23T00:00:00Z",
 };
 
+const sampleGrantRequest: GrantRequest = {
+  id: "req-1",
+  subject: "agent-c",
+  requested_scopes: ["identity.basic"],
+  depth: "facts",
+  requested_ttl_seconds: 3600,
+  justification: "need this to greet the user by name",
+  status: "pending",
+  created_at: "2026-07-26T00:00:00Z",
+};
+
 describe("GrantsPage", () => {
   // Without this, assertions like toHaveBeenCalled() can pass because of a call
   // left over from a previous test, not because this test's own render triggered
   // one — making the suite's pass/fail depend on run order. Found in review.
   beforeEach(() => {
     vi.clearAllMocks();
+    // Every test renders GrantsPage, which now always fetches pending grant
+    // requests alongside the subject's grants — default to none so existing
+    // tests that don't care about requests aren't left with an unresolved
+    // promise (a bare vi.fn() call returns undefined, not a Promise).
+    vi.mocked(api.listGrantRequests).mockResolvedValue([]);
   });
 
   it("renders grants for the default subject", async () => {
@@ -147,5 +166,42 @@ describe("GrantsPage", () => {
     });
     // revoked_by is no longer a client-supplied argument — derived server-side.
     expect(api.revokeGrant).toHaveBeenCalledWith("grant-1");
+  });
+
+  it("shows pending grant requests from any subject and removes one after approving it", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([]);
+    // Once for the initial render, then empty for the refetch decideRequest
+    // triggers after a successful decision (a real backend would no longer
+    // return an approved request from ?status=pending).
+    vi.mocked(api.listGrantRequests).mockResolvedValueOnce([sampleGrantRequest]).mockResolvedValue([]);
+    vi.mocked(api.approveGrantRequest).mockResolvedValue(sampleGrant);
+
+    render(<GrantsPage />);
+
+    expect(await screen.findByText("from agent-c")).toBeInTheDocument();
+    expect(screen.getByText("need this to greet the user by name")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("from agent-c")).not.toBeInTheDocument();
+    });
+    expect(api.approveGrantRequest).toHaveBeenCalledWith("req-1");
+  });
+
+  it("removes a grant request from the list after denying it", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([]);
+    vi.mocked(api.listGrantRequests).mockResolvedValueOnce([sampleGrantRequest]).mockResolvedValue([]);
+    vi.mocked(api.denyGrantRequest).mockResolvedValue(undefined);
+
+    render(<GrantsPage />);
+    await screen.findByText("from agent-c");
+
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("from agent-c")).not.toBeInTheDocument();
+    });
+    expect(api.denyGrantRequest).toHaveBeenCalledWith("req-1");
   });
 });
