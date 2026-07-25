@@ -5,6 +5,12 @@ export function GrantsPage() {
   const [subject, setSubject] = useState("agent-a");
   const [reviewer, setReviewer] = useState("");
   const [grants, setGrants] = useState<Grant[]>([]);
+  // Load errors and form/mutation errors are separate state on purpose: the list
+  // effect re-runs on subject changes and refreshKey bumps, and a successful load
+  // clearing a shared error would also erase an unrelated validation or
+  // create/revoke error the operator is still reading (flagged by review on #13).
+  // Each banner is cleared only by its own path.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -28,13 +34,13 @@ export function GrantsPage() {
       .listGrants(subject.trim(), controller.signal)
       .then((g) => {
         setGrants(g);
-        // A successful load clears any error banner left over from an earlier
-        // failed load — otherwise a stale error sits above a perfectly good list.
-        setError(null);
+        // A successful load clears any stale banner from an earlier failed load —
+        // and only that banner; form/mutation errors live in `error` and survive.
+        setLoadError(null);
       })
       .catch((e: unknown) => {
         if (e instanceof DOMException && e.name === "AbortError") return;
-        setError(e instanceof ApiError ? e.message : String(e));
+        setLoadError(e instanceof ApiError ? e.message : String(e));
       });
     return () => controller.abort();
   }, [subject, refreshKey]);
@@ -113,6 +119,7 @@ export function GrantsPage() {
         <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="agent-a" />
       </label>
 
+      {loadError && <p className="error">{loadError}</p>}
       {error && <p className="error">{error}</p>}
 
       <ul className="grant-list">

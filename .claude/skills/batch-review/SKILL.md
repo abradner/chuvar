@@ -57,8 +57,9 @@ Why the workflow works:
   assuming the stack lands anywhere. Merging a PR whose base branch's own PR
   already merged is the specific trap (this repo's PR #4).
 - **Backend validation** (from `backend/`): Postgres up first
-  (`docker compose up -d`, port 54322; on the dev box the main checkout's
-  container may already hold the port — reuse it). Then
+  (`sudo -n docker compose up -d` — Docker needs elevated access in this
+  sandbox, AGENTS.md §4.5; port 54322, and on the dev box the main
+  checkout's container may already hold the port — reuse it). Then
   `DATABASE_URL=postgres://chuvar:chuvar_dev_only@127.0.0.1:54322/chuvar?sslmode=disable mise exec -- go test -p 1 ./...`
   — **`-p 1` is mandatory** (shared-database test isolation, AGENTS.md §4)
   — plus `mise exec -- go vet ./...`.
