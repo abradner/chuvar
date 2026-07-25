@@ -152,6 +152,13 @@ boxes per the pitch), so keep that constraint in mind if/when this section gets 
   a branch and a PR, both so there's a real review checkpoint (see "Review discipline" below) and
   so the public commit history reads the way an open-source project's should.
 
+- **Multi-PR batches follow `.claude/skills/batch-review`** — stacked single-commit PRs, all
+  review feedback write-only until a single synthesis pass, one followup PR at the top of the
+  stack, merge bottom-up. Author-side agents: a review comment or CI event on a non-followup
+  batch PR is a ledger entry, not a work order — do not respond piecemeal. Reviewers (human or
+  bot): review fully as normal; unanswered comments on batch PRs are the workflow operating as
+  designed, not feedback being ignored.
+
 ### Review discipline
 
 The v0 build (Jul 2026) shipped 12 commits, then got an independent, adversarial
