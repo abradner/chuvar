@@ -430,3 +430,24 @@ func TestRequestGrant_EmptyScopesIsError(t *testing.T) {
 		t.Fatal("request_grant with no scopes succeeded, want a tool error")
 	}
 }
+
+// TestRequestGrant_NegativeTTLIsError is the regression test for the review
+// finding: a negative ttl_seconds used to fall through the same branch as an
+// omitted one, silently becoming "no expiry" instead of a rejected value.
+func TestRequestGrant_NegativeTTLIsError(t *testing.T) {
+	session, _ := testSession(t, "agent-a")
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "request_grant",
+		Arguments: requestGrantArgs{
+			RequestedScopes: []string{"identity.basic"},
+			TTLSeconds:      -60,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() transport error = %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("request_grant with a negative ttl_seconds succeeded, want a tool error")
+	}
+}

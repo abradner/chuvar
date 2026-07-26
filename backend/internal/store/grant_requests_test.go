@@ -150,3 +150,27 @@ func TestRequestGrant_EmptyScopesRejected(t *testing.T) {
 		t.Fatal("RequestGrant() with no scopes succeeded, want an error")
 	}
 }
+
+// TestRequestGrant_DuplicateScopesDedupedSoApprovalSucceeds is the regression
+// test for the review finding: without deduping, ApproveGrantRequest's
+// per-scope grant_scopes insert would fail on the (grant_id, scope) primary
+// key, leaving a request that staged fine but could never be approved.
+func TestRequestGrant_DuplicateScopesDedupedSoApprovalSucceeds(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	req, err := s.RequestGrant(ctx, "agent-a", []string{"identity.basic", "identity.basic"}, "facts", nil, "")
+	if err != nil {
+		t.Fatalf("RequestGrant() error = %v", err)
+	}
+	if len(req.RequestedScopes) != 1 {
+		t.Fatalf("RequestedScopes = %v, want deduped to 1", req.RequestedScopes)
+	}
+
+	// Without deduping in RequestGrant, this would fail here instead: approval
+	// inserts one grant_scopes row per proposed scope, and (grant_id, scope)
+	// is that table's primary key.
+	if _, err := s.ApproveGrantRequest(ctx, req.ID, "human-reviewer"); err != nil {
+		t.Fatalf("ApproveGrantRequest() error = %v (duplicate scopes not deduped before staging?)", err)
+	}
+}

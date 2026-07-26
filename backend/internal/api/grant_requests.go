@@ -1,7 +1,9 @@
 package api
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/abradner/chuvar/backend/internal/store"
@@ -82,6 +84,10 @@ func (a *API) approveGrantRequest(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	approvedBy := reviewerFromContext(r.Context())
 
+	if !a.grantRequestExists(w, r, id) {
+		return
+	}
+
 	g, err := a.Store.ApproveGrantRequest(r.Context(), id, approvedBy)
 	if err != nil {
 		writeStoreError(w, http.StatusConflict, "approveGrantRequest", "could not approve grant request — it may no longer be pending", err)
@@ -95,9 +101,28 @@ func (a *API) denyGrantRequest(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	deniedBy := reviewerFromContext(r.Context())
 
+	if !a.grantRequestExists(w, r, id) {
+		return
+	}
+
 	if err := a.Store.DenyGrantRequest(r.Context(), id, deniedBy); err != nil {
 		writeStoreError(w, http.StatusConflict, "denyGrantRequest", "could not deny grant request — it may no longer be pending", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// grantRequestExists distinguishes "no such request" (404) from "exists but
+// isn't pending anymore" (409, handled by the caller's own store-error branch)
+// — before this, approve/deny returned 409 for both, which is indistinguishable
+// from the caller's perspective (a typo'd ID looks identical to a request
+// someone else already decided). Writes the 404 response itself; the caller
+// should return immediately when this reports false. Found in review.
+func (a *API) grantRequestExists(w http.ResponseWriter, r *http.Request, id string) bool {
+	if _, err := a.Store.GetGrantRequest(r.Context(), id); err != nil {
+		slog.Error("api: grantRequestExists", "id", id, "error", err)
+		writeError(w, http.StatusNotFound, errors.New("grant request not found"))
+		return false
+	}
+	return true
 }
