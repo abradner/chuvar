@@ -214,8 +214,34 @@ func safe(s string) string {
 		if (r >= 0x00 && r <= 0x1f) || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			return ' '
 		}
+		if isBidiControl(r) {
+			return ' '
+		}
 		return r
 	}, s)
+}
+
+// isBidiControl reports whether r is a Unicode bidirectional-formatting
+// character. Found in review (Codex P2), the same followup PR, on the same
+// underlying issue as the C0/C1 fix above: none of those are control bytes
+// in the traditional sense, but U+202E (RLO) and its relatives let text
+// override the terminal's left-to-right rendering order — the
+// "Trojan Source" class of attack (CVE-2021-42574). Agent content containing
+// one could visually reorder itself, or reorder the trusted "[contradiction]"
+// suffix renderSummary appends after it, misleading a reviewer about what
+// they're approving before their next keypress acts on it. This is the fixed,
+// stable set defined by Unicode (not derivable from a stdlib predicate) —
+// explicit directional embedding/override/isolate controls plus the two
+// directional marks.
+func isBidiControl(r rune) bool {
+	switch r {
+	case 0x061c, // Arabic Letter Mark
+		0x200e, 0x200f, // LRM, RLM
+		0x202a, 0x202b, 0x202c, 0x202d, 0x202e, // LRE, RLE, PDF, LRO, RLO
+		0x2066, 0x2067, 0x2068, 0x2069: // LRI, RLI, FSI, PDI
+		return true
+	}
+	return false
 }
 
 // truncate shortens s to at most n runes, appending an ellipsis marker in

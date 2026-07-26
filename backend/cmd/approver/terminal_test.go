@@ -60,6 +60,21 @@ func TestSafe_StripsC1Controls(t *testing.T) {
 	}
 }
 
+// TestSafe_StripsBidiControls is the regression test for the review finding
+// on this same followup PR (Codex P2): U+202E (RLO) and its relatives aren't
+// control bytes, but they can visually reorder text on a terminal that honors
+// the bidi algorithm — the "Trojan Source" class of attack (CVE-2021-42574).
+// Agent content containing one could reorder itself, or reorder the trusted
+// "[contradiction]" suffix renderSummary appends after it, before a reviewer
+// acts on what they think they saw.
+func TestSafe_StripsBidiControls(t *testing.T) {
+	rlo := string(rune(0x202e)) // Right-to-Left Override
+	got := safe("before" + rlo + "after")
+	if got != "before after" {
+		t.Errorf("safe() = %q, want U+202E (RLO) replaced with a space", got)
+	}
+}
+
 func TestShortID_HandlesShortInput(t *testing.T) {
 	// Regression test for the panic risk found in review: a bare id[:8] would
 	// panic on any ID shorter than 8 characters.
