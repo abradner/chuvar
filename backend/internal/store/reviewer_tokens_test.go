@@ -128,3 +128,26 @@ func TestCreateReviewerToken_EmptyLabelRejected(t *testing.T) {
 		t.Fatal("CreateReviewerToken() with an empty label succeeded, want an error")
 	}
 }
+
+// TestAuthenticateReviewerToken_RealDBErrorIsReturnedNotMaskedAs401 is the
+// regression test for the review finding: a genuine database failure must
+// surface as an error, not silently collapse into the same (false, nil)
+// result as "no such token" — the latter is what turns a real outage into an
+// unlogged 401 that never gets investigated.
+func TestAuthenticateReviewerToken_RealDBErrorIsReturnedNotMaskedAs401(t *testing.T) {
+	s, _ := testStore(t)
+
+	// An already-canceled context makes the query fail with something other
+	// than pgx.ErrNoRows — a stand-in here for any real connectivity failure,
+	// without needing to actually take the database down mid-test.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, ok, err := s.AuthenticateReviewerToken(ctx, "irrelevant-plaintext")
+	if err == nil {
+		t.Fatal("AuthenticateReviewerToken() with a canceled context: want a non-nil error, got nil (real failure masked as unauthenticated)")
+	}
+	if ok {
+		t.Error("AuthenticateReviewerToken() reported ok=true despite a query error")
+	}
+}
