@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GrantsPage } from "./Grants";
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
 import type { Grant, GrantRequest } from "../api/client";
 
 vi.mock("../api/client", async () => {
@@ -203,5 +203,20 @@ describe("GrantsPage", () => {
       expect(screen.queryByText("from agent-c")).not.toBeInTheDocument();
     });
     expect(api.denyGrantRequest).toHaveBeenCalledWith("req-1");
+  });
+
+  // Regression test for the review finding (flagged independently by two
+  // reviewers): the grants list and the grant-requests list load via two
+  // separate, independently-resolving effects. A shared error state meant a
+  // grant-requests failure could be silently erased by an unrelated grants
+  // success landing afterward — the operator would see no pending requests
+  // and no explanation why.
+  it("keeps the grant-requests load error visible even after the grants load succeeds", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([]);
+    vi.mocked(api.listGrantRequests).mockRejectedValue(new ApiError(500, "could not list grant requests"));
+
+    render(<GrantsPage />);
+
+    expect(await screen.findByText("could not list grant requests")).toBeInTheDocument();
   });
 });

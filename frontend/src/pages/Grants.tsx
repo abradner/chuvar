@@ -9,8 +9,15 @@ export function GrantsPage() {
   // effect re-runs on subject changes and refreshKey bumps, and a successful load
   // clearing a shared error would also erase an unrelated validation or
   // create/revoke error the operator is still reading (flagged by review on #13).
-  // Each banner is cleared only by its own path.
+  // Each banner is cleared only by its own path. requestsLoadError is further
+  // split out from loadError for the same reason, one level down: the grants
+  // effect and the grant-requests effect both bump on refreshKey and run
+  // independently, so a shared error here had the identical bug reintroduced —
+  // a grant-requests fetch failing, then a grants fetch succeeding a moment
+  // later, would silently clear the request-list failure the operator hadn't
+  // even seen yet. Found in review (reported independently by two reviewers).
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [requestsLoadError, setRequestsLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -53,10 +60,13 @@ export function GrantsPage() {
     const controller = new AbortController();
     api
       .listGrantRequests("pending", controller.signal)
-      .then(setRequests)
+      .then((r) => {
+        setRequests(r);
+        setRequestsLoadError(null);
+      })
       .catch((e: unknown) => {
         if (e instanceof DOMException && e.name === "AbortError") return;
-        setLoadError(e instanceof ApiError ? e.message : String(e));
+        setRequestsLoadError(e instanceof ApiError ? e.message : String(e));
       });
     return () => controller.abort();
   }, [refreshKey]);
@@ -142,6 +152,7 @@ export function GrantsPage() {
     <section>
       <h2>Grants</h2>
       {loadError && <p className="error">{loadError}</p>}
+      {requestsLoadError && <p className="error">{requestsLoadError}</p>}
       {error && <p className="error">{error}</p>}
 
       {requests.length > 0 && (
