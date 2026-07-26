@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,9 +14,11 @@ func TestNtfyNotifier_PostsTitleMessageAndClickLink(t *testing.T) {
 		gotPath = r.URL.Path
 		gotTitle = r.Header.Get("Title")
 		gotClick = r.Header.Get("Click")
-		buf := make([]byte, 1024)
-		n, _ := r.Body.Read(buf)
-		gotBody = string(buf[:n])
+		// io.ReadAll, not a single Read() call: Read is not guaranteed to fill
+		// the buffer or return the whole body in one call — a single call can
+		// flake or truncate on a body split across reads. Found in review.
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()

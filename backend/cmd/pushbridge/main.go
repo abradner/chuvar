@@ -80,6 +80,9 @@ func main() {
 // would just be noise on the one channel meant to interrupt them.
 func run(ctx context.Context, c *sseclient.Client, n *ntfyNotifier, webBaseURL string) {
 	const retryDelay = 2 * time.Second
+	// notified tracks IDs this process has already sent a notification for,
+	// across reconnects — see handleEvent's doc comment for why this exists.
+	notified := map[string]struct{}{}
 	for {
 		if ctx.Err() != nil {
 			return
@@ -92,10 +95,28 @@ func run(ctx context.Context, c *sseclient.Client, n *ntfyNotifier, webBaseURL s
 		for {
 			select {
 			case ev := <-events:
-				handleEvent(ctx, n, webBaseURL, ev)
+				handleEvent(ctx, n, webBaseURL, notified, ev)
 			case err := <-done:
 				if ctx.Err() == nil {
 					slog.Warn("pushbridge: stream disconnected, reconnecting", "error", err)
+				}
+				// Stream returning on `done` and events still holding
+				// buffered frames aren't mutually exclusive: select above can
+				// pick done while events has unread items in it, and moving
+				// straight to the retry delay would silently drop them —
+				// including a resolution for something that got added and
+				// then resolved in the brief window before the disconnect,
+				// which this process would then never learn about. Drain
+				// whatever's already buffered before reconnecting. Found in
+				// review.
+			drain:
+				for {
+					select {
+					case ev := <-events:
+						handleEvent(ctx, n, webBaseURL, notified, ev)
+					default:
+						break drain
+					}
 				}
 				break consume
 			case <-ctx.Done():
@@ -111,11 +132,25 @@ func run(ctx context.Context, c *sseclient.Client, n *ntfyNotifier, webBaseURL s
 	}
 }
 
-func handleEvent(ctx context.Context, n *ntfyNotifier, webBaseURL string, ev sseclient.Event) {
-	var title, message, link string
+// handleEvent notifies on a newly-seen "_added" event and clears an item from
+// notified on its "_resolved" counterpart.
+//
+// The notified deduplication exists because of how streamEvents (internal/api)
+// behaves on reconnect: a fresh connection starts from an empty baseline and
+// re-announces every still-pending item as "added" (events.go's own doc
+// comment on this — it's deliberate, so a client reconnecting after a drop
+// gets a full snapshot rather than a gap). Without tracking what's already
+// been notified, a flapping network connection would re-notify the operator
+// for the same unresolved item every reconnect, potentially every couple of
+// seconds. A failed notify() is deliberately NOT marked as notified — so a
+// transient ntfy outage gets retried on the next re-announce instead of the
+// item being silently and permanently suppressed. Found in review.
+func handleEvent(ctx context.Context, n *ntfyNotifier, webBaseURL string, notified map[string]struct{}, ev sseclient.Event) {
+	var id, title, message, link string
 	switch ev.Type {
 	case "staged_diff_added":
 		d := ev.Diff
+		id = d.ID
 		title = "New staged diff from " + d.Subject
 		message = d.Content
 		if d.DedupeVerdict != nil && *d.DedupeVerdict == "contradiction" {
@@ -124,16 +159,28 @@ func handleEvent(ctx context.Context, n *ntfyNotifier, webBaseURL string, ev sse
 		link = webBaseURL
 	case "grant_request_added":
 		r := ev.Req
+		id = r.ID
 		title = "Grant request from " + r.Subject
 		message = fmt.Sprintf("scopes: %v", r.RequestedScopes)
 		if r.Justification != "" {
 			message += " — " + r.Justification
 		}
 		link = webBaseURL
+	case "staged_diff_resolved":
+		delete(notified, ev.Diff.ID)
+		return
+	case "grant_request_resolved":
+		delete(notified, ev.Req.ID)
+		return
 	default:
+		return
+	}
+	if _, already := notified[id]; already {
 		return
 	}
 	if err := n.notify(ctx, title, message, link); err != nil {
 		slog.Error("pushbridge: sending notification", "error", err)
+		return
 	}
+	notified[id] = struct{}{}
 }
