@@ -30,16 +30,6 @@ func run() error {
 		return err
 	}
 
-	// API_AUTH_TOKEN gates every route (see internal/api's package comment).
-	// Required, fail-fast — same stance as MCP_SUBJECT in cmd/mcpserver: an API
-	// server that silently started with no way to check who's calling is worse
-	// than one that refuses to start at all, given approveStagedDiff is the one
-	// endpoint that turns a staged diff into a permanent fact.
-	authToken, ok := os.LookupEnv("API_AUTH_TOKEN")
-	if !ok || authToken == "" {
-		return fmt.Errorf("apiserver: required environment variable API_AUTH_TOKEN is not set")
-	}
-
 	if err := db.Migrate(cfg.DatabaseURL); err != nil {
 		return err
 	}
@@ -51,6 +41,11 @@ func run() error {
 	}
 	defer pool.Close()
 
+	st := store.New(pool)
+	if err := bootstrapReviewerToken(ctx, st); err != nil {
+		return err
+	}
+
 	// CORS_ALLOWED_ORIGIN is optional — the Vite dev server's default port is a
 	// reasonable default for local dev, but this is deliberately not baked into
 	// config.Config: it's specific to this binary, not shared with cmd/mcpserver.
@@ -59,7 +54,7 @@ func run() error {
 		allowedOrigin = "http://localhost:5173"
 	}
 
-	a := api.New(store.New(pool), embed.Stub{}, allowedOrigin, authToken, cfg.RequestTimeout)
+	a := api.New(st, embed.Stub{}, allowedOrigin, cfg.RequestTimeout)
 
 	// Read/Write/IdleTimeout and ReadHeaderTimeout all come from cfg.RequestTimeout
 	// rather than being left at the zero-value http.Server default (no timeout at
@@ -76,4 +71,42 @@ func run() error {
 
 	slog.Info("apiserver: listening", "addr", cfg.HTTPAddr, "allowedOrigin", allowedOrigin)
 	return server.ListenAndServe()
+}
+
+// bootstrapReviewerToken ensures there is always at least one way in. Reviewer
+// tokens (internal/api's package comment) replaced the old single shared
+// API_AUTH_TOKEN, but that created a new startup problem: a fresh install has zero
+// tokens in reviewer_tokens, and nothing can create the first one through the API
+// itself (every route requires an already-authenticated token). REVIEWER_BOOTSTRAP_TOKEN
+// breaks that circularity — same "fail fast on missing required config" stance as
+// the old API_AUTH_TOKEN, but scoped to exactly when it's actually needed:
+//
+//   - No active tokens exist yet (fresh install, or every token got revoked —
+//     accidental full lockout is the "break glass" case this also covers): the env
+//     var is required, and its value becomes a new token labeled "bootstrap". An
+//     unset var here is a boot-time error, the same as the old API_AUTH_TOKEN being
+//     unset — a server nobody can ever authenticate to is exactly the "silently
+//     starts in a state worse than refusing to start" case that stance exists for.
+//   - At least one active token already exists: the var is ignored if present
+//     (harmless to leave set for a future lockout) and not required — the org has
+//     already worked out its own device-token distribution, so there's no config
+//     gap to fail fast on.
+func bootstrapReviewerToken(ctx context.Context, st *store.Store) error {
+	n, err := st.CountActiveReviewerTokens(ctx)
+	if err != nil {
+		return fmt.Errorf("apiserver: checking for existing reviewer tokens: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+
+	bootstrap, ok := os.LookupEnv("REVIEWER_BOOTSTRAP_TOKEN")
+	if !ok || bootstrap == "" {
+		return fmt.Errorf("apiserver: no reviewer tokens exist and required environment variable REVIEWER_BOOTSTRAP_TOKEN is not set")
+	}
+	if _, err := st.CreateReviewerToken(ctx, "bootstrap", bootstrap); err != nil {
+		return fmt.Errorf("apiserver: creating bootstrap reviewer token: %w", err)
+	}
+	slog.Info("apiserver: no reviewer tokens existed; created one from REVIEWER_BOOTSTRAP_TOKEN", "label", "bootstrap")
+	return nil
 }

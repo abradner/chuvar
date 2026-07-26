@@ -36,10 +36,6 @@ const sampleTargetFact: Fact = {
   valid_at: "2026-07-20T00:00:00Z",
 };
 
-async function fillReviewer(name = "reviewer-a") {
-  await userEvent.type(screen.getByLabelText("Reviewer name"), name);
-}
-
 describe("StagedDiffsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -64,35 +60,22 @@ describe("StagedDiffsPage", () => {
     expect(await screen.findByText("Nothing waiting for review.")).toBeInTheDocument();
   });
 
-  it("requires a reviewer name before Approve/Reject are enabled", async () => {
-    vi.mocked(api.listStagedDiffs).mockResolvedValue([sampleDiff]);
-
-    render(<StagedDiffsPage />);
-    await screen.findByText("user prefers flat whites");
-
-    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Reject" })).toBeDisabled();
-
-    await fillReviewer();
-
-    expect(screen.getByRole("button", { name: "Approve" })).not.toBeDisabled();
-    expect(screen.getByRole("button", { name: "Reject" })).not.toBeDisabled();
-  });
-
-  it("removes a diff from the list after approving it, using the entered reviewer name", async () => {
+  it("removes a diff from the list after approving it", async () => {
     vi.mocked(api.listStagedDiffs).mockResolvedValue([sampleDiff]);
     vi.mocked(api.approveStagedDiff).mockResolvedValue(undefined);
 
     render(<StagedDiffsPage />);
     await screen.findByText("user prefers flat whites");
-    await fillReviewer();
 
     await userEvent.click(screen.getByRole("button", { name: "Approve" }));
 
     await waitFor(() => {
       expect(screen.queryByText("user prefers flat whites")).not.toBeInTheDocument();
     });
-    expect(api.approveStagedDiff).toHaveBeenCalledWith("diff-1", "reviewer-a");
+    // decided_by is no longer a client-supplied argument — it's derived
+    // server-side from the authenticated reviewer token (see internal/api's
+    // package comment).
+    expect(api.approveStagedDiff).toHaveBeenCalledWith("diff-1");
   });
 
   it("shows the target fact's current content for a diff that supersedes one, and blocks approval until it loads", async () => {
@@ -107,10 +90,12 @@ describe("StagedDiffsPage", () => {
 
     render(<StagedDiffsPage />);
     await screen.findByText("user prefers flat whites");
-    await fillReviewer();
 
     expect(screen.getByText("This replaces an existing fact:")).toBeInTheDocument();
-    expect(screen.getByText("Loading target fact…")).toBeInTheDocument();
+    // findByText (not getByText): the target-fact fetch effect runs in a
+    // follow-up render after the diffs list itself commits, so this text isn't
+    // guaranteed to be in the DOM the instant the assertion above returns.
+    expect(await screen.findByText("Loading target fact…")).toBeInTheDocument();
     // The whole point: a target that hasn't resolved yet must not be approvable —
     // approving blind on an unconfirmed replacement is the exact risk this UI
     // exists to prevent.

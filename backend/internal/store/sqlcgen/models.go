@@ -55,6 +55,15 @@ type GrantScope struct {
 	Scope   string
 }
 
+type ReviewerToken struct {
+	ID         string
+	Label      string
+	TokenHash  []byte
+	CreatedAt  time.Time
+	LastUsedAt *time.Time
+	RevokedAt  *time.Time
+}
+
 type StagedDiff struct {
 	ID                    string
 	Subject               string

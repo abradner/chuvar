@@ -88,13 +88,16 @@ type createGrantRequest struct {
 	Scopes     []string `json:"scopes"`
 	Depth      string   `json:"depth"`
 	TTLSeconds *int     `json:"ttl_seconds,omitempty"`
-	ApprovedBy string   `json:"approved_by"`
 }
 
 // createGrant handles POST /api/grants. This is the human-approval side of the
 // consent model: a grant only ever gets created through this endpoint (or directly
 // in the store, e.g. in tests) — never as a side effect of an agent's own request.
+// approved_by is the authenticated reviewer (reviewerFromContext), not a request
+// body field — see the package comment.
 func (a *API) createGrant(w http.ResponseWriter, r *http.Request) {
+	approvedBy := reviewerFromContext(r.Context())
+
 	var req createGrantRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("decoding request body: %w", err))
@@ -102,15 +105,6 @@ func (a *API) createGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Subject == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("subject is required"))
-		return
-	}
-	// Required for the same reason decidedBy is required on staged-diff
-	// decisions (staged_diffs.go): this is written straight into the permanent
-	// audit trail (store.CreateGrant logs it atomically with the insert), so a
-	// missing value is a 400, not a silently fabricated "unknown-approver"
-	// identity.
-	if req.ApprovedBy == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("approved_by is required"))
 		return
 	}
 	if req.Depth == "" {
@@ -158,7 +152,7 @@ func (a *API) createGrant(w http.ResponseWriter, r *http.Request) {
 		ttl = &d
 	}
 
-	g, err := a.Store.CreateGrant(r.Context(), req.Subject, req.Scopes, req.Depth, ttl, req.ApprovedBy)
+	g, err := a.Store.CreateGrant(r.Context(), req.Subject, req.Scopes, req.Depth, ttl, approvedBy)
 	if err != nil {
 		writeStoreError(w, http.StatusInternalServerError, "createGrant", "could not create grant", err)
 		return
@@ -166,23 +160,12 @@ func (a *API) createGrant(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toGrantView(g))
 }
 
-type revokeGrantRequest struct {
-	RevokedBy string `json:"revoked_by"`
-}
-
-// revokeGrant handles POST /api/grants/{id}/revoke.
+// revokeGrant handles POST /api/grants/{id}/revoke. revoked_by is the
+// authenticated reviewer (reviewerFromContext), not a request body field.
 func (a *API) revokeGrant(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	var req revokeGrantRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("decoding request body: %w", err))
-		return
-	}
-	if req.RevokedBy == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("revoked_by is required"))
-		return
-	}
-	if err := a.Store.RevokeGrant(r.Context(), id, req.RevokedBy); err != nil {
+	revokedBy := reviewerFromContext(r.Context())
+	if err := a.Store.RevokeGrant(r.Context(), id, revokedBy); err != nil {
 		writeStoreError(w, http.StatusConflict, "revokeGrant", "could not revoke grant — it may not exist or already be revoked", err)
 		return
 	}

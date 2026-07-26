@@ -10,6 +10,7 @@ import (
 )
 
 type Querier interface {
+	CountActiveReviewerTokens(ctx context.Context) (int64, error)
 	FactVisibleToScopes(ctx context.Context, arg FactVisibleToScopesParams) (bool, error)
 	// embedding_1/embedding_2 are the same repeated-named-param workaround used
 	// elsewhere in this migration (see facts.sql's SearchFacts) — bound to the
@@ -28,17 +29,22 @@ type Querier interface {
 	InsertFactScope(ctx context.Context, arg InsertFactScopeParams) error
 	InsertGrant(ctx context.Context, arg InsertGrantParams) (Grant, error)
 	InsertGrantScope(ctx context.Context, arg InsertGrantScopeParams) error
+	InsertReviewerToken(ctx context.Context, arg InsertReviewerTokenParams) (InsertReviewerTokenRow, error)
 	InsertStagedDiff(ctx context.Context, arg InsertStagedDiffParams) (InsertStagedDiffRow, error)
 	ListGrantScopes(ctx context.Context, grantID string) ([]string, error)
 	ListGrants(ctx context.Context, subject string) ([]Grant, error)
+	ListReviewerTokens(ctx context.Context) ([]ListReviewerTokensRow, error)
 	ListStagedDiffs(ctx context.Context, status string) ([]StagedDiff, error)
 	LoadStagedDiffForUpdate(ctx context.Context, id string) (LoadStagedDiffForUpdateRow, error)
 	LockTargetFact(ctx context.Context, id string) (*time.Time, error)
+	LookupActiveReviewerToken(ctx context.Context, tokenHash []byte) (LookupActiveReviewerTokenRow, error)
 	MarkDiffCommitted(ctx context.Context, arg MarkDiffCommittedParams) error
 	RejectDiff(ctx context.Context, arg RejectDiffParams) (int64, error)
 	RevokeGrant(ctx context.Context, id string) (int64, error)
+	RevokeReviewerToken(ctx context.Context, id string) (int64, error)
 	SearchFacts(ctx context.Context, arg SearchFactsParams) ([]SearchFactsRow, error)
 	SupersedeFact(ctx context.Context, arg SupersedeFactParams) error
+	TouchReviewerToken(ctx context.Context, id string) error
 }
 
 var _ Querier = (*Queries)(nil)

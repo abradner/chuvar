@@ -4,14 +4,19 @@
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
 
-// The backend now requires a bearer token on every route (see internal/api's
-// package comment — a deliberately minimal v0 auth answer, one shared secret, not
-// real per-user identity). Baking it into the frontend bundle via a Vite env var
-// means anyone who can load this page can read it out of the built JS — acceptable
-// here because the whole point of the token is "prove you're the one trusted local
-// operator," and the bundle is served from the same trust boundary (loopback,
-// single operator) as the API itself. This is not a pattern to reuse for anything
-// serving untrusted users.
+// The backend requires a bearer token on every route — since the reviewer-tokens
+// change (internal/api's package comment), this is a named, individually
+// revocable device token, not a single shared secret across every browser that
+// loads this page. Baking it into the frontend bundle via a Vite env var still
+// means anyone who can load this page can read it out of the built JS —
+// acceptable here for the same reason as before: the bundle is served from the
+// same trust boundary (loopback, single operator) as the API itself, and this
+// specific browser profile having its own token (rather than one secret shared
+// by every device) is what makes it individually revocable without affecting
+// anyone else's session. Not a pattern to reuse for anything serving untrusted
+// users. Every request's decided_by/approved_by/revoked_by is now derived
+// server-side from this token, never sent in the request body — see the removed
+// reviewer-name field this replaced.
 const AUTH_TOKEN = import.meta.env.VITE_API_AUTH_TOKEN ?? "";
 
 // Every request gets a default timeout so a hung connection can't pin a component's
@@ -87,32 +92,21 @@ export const api = {
   listStagedDiffs: (status = "pending", signal?: AbortSignal) =>
     request<StagedDiff[]>(`/api/staged-diffs?status=${encodeURIComponent(status)}`, { signal }),
 
-  approveStagedDiff: (id: string, decidedBy: string) =>
-    request<unknown>(`/api/staged-diffs/${id}/approve`, {
-      method: "POST",
-      body: JSON.stringify({ decided_by: decidedBy }),
-    }),
+  approveStagedDiff: (id: string) =>
+    request<unknown>(`/api/staged-diffs/${id}/approve`, { method: "POST" }),
 
-  rejectStagedDiff: (id: string, decidedBy: string) =>
-    request<void>(`/api/staged-diffs/${id}/reject`, {
-      method: "POST",
-      body: JSON.stringify({ decided_by: decidedBy }),
-    }),
+  rejectStagedDiff: (id: string) => request<void>(`/api/staged-diffs/${id}/reject`, { method: "POST" }),
 
   listGrants: (subject: string, signal?: AbortSignal) =>
     request<Grant[]>(`/api/grants?subject=${encodeURIComponent(subject)}`, { signal }),
 
-  createGrant: (subject: string, scopes: string[], depth: string, approvedBy: string, ttlSeconds?: number) =>
+  createGrant: (subject: string, scopes: string[], depth: string, ttlSeconds?: number) =>
     request<Grant>("/api/grants", {
       method: "POST",
-      body: JSON.stringify({ subject, scopes, depth, approved_by: approvedBy, ttl_seconds: ttlSeconds }),
+      body: JSON.stringify({ subject, scopes, depth, ttl_seconds: ttlSeconds }),
     }),
 
-  revokeGrant: (id: string, revokedBy: string) =>
-    request<void>(`/api/grants/${id}/revoke`, {
-      method: "POST",
-      body: JSON.stringify({ revoked_by: revokedBy }),
-    }),
+  revokeGrant: (id: string) => request<void>(`/api/grants/${id}/revoke`, { method: "POST" }),
 
   getFact: (id: string, signal?: AbortSignal) => request<Fact>(`/api/facts/${id}`, { signal }),
 };

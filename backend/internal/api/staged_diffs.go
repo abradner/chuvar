@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -112,38 +111,14 @@ func (a *API) listStagedDiffs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, views)
 }
 
-type decisionRequest struct {
-	DecidedBy string `json:"decided_by"`
-}
-
-// decidedBy extracts who's approving/rejecting a diff. This gets written straight
-// into the permanent decided_by column on the audit trail, so a malformed or
-// missing value is a 400, not a silently fabricated "unknown-reviewer" identity —
-// AGENTS.md §6 is explicit that the consent/audit path must not swallow errors
-// silently, and laundering a bad request into a fake-but-plausible-looking audit
-// identity is exactly that.
-func decidedBy(r *http.Request) (string, error) {
-	var req decisionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return "", fmt.Errorf("decoding request body: %w", err)
-	}
-	if req.DecidedBy == "" {
-		return "", errors.New("decided_by is required")
-	}
-	return req.DecidedBy, nil
-}
-
 // approveStagedDiff handles POST /api/staged-diffs/{id}/approve. This is the only
 // path in the whole system, outside the store package's own tests, that turns a
-// staged diff into a real fact — see AGENTS.md §3.1. Gated by requireAuth (see the
-// package comment) same as every other route here.
+// staged diff into a real fact — see AGENTS.md §3.1. decided_by is the
+// authenticated reviewer (reviewerFromContext), not a request body field — see
+// the package comment.
 func (a *API) approveStagedDiff(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	reviewer, err := decidedBy(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
+	reviewer := reviewerFromContext(r.Context())
 
 	diff, err := a.Store.GetStagedDiff(r.Context(), id)
 	if err != nil {
@@ -173,14 +148,11 @@ func (a *API) approveStagedDiff(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, fact)
 }
 
-// rejectStagedDiff handles POST /api/staged-diffs/{id}/reject.
+// rejectStagedDiff handles POST /api/staged-diffs/{id}/reject. decided_by is the
+// authenticated reviewer, same as approveStagedDiff.
 func (a *API) rejectStagedDiff(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	reviewer, err := decidedBy(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
+	reviewer := reviewerFromContext(r.Context())
 
 	if err := a.Store.RejectDiff(r.Context(), id, reviewer); err != nil {
 		writeStoreError(w, http.StatusConflict, "rejectStagedDiff", "could not reject diff — it may no longer be pending", err)

@@ -16,6 +16,10 @@ import (
 	"github.com/abradner/chuvar/backend/internal/store"
 )
 
+// testAuthToken is the plaintext of a reviewer token seeded into the store by
+// testServer (see below), reused across most tests as "the" authenticated
+// credential — analogous to the shared secret constant this replaced, but now
+// backed by a real reviewer_tokens row rather than a value the API trusts blindly.
 const testAuthToken = "test-token-do-not-use-in-prod"
 
 func testServer(t *testing.T) (*httptest.Server, *store.Store) {
@@ -34,12 +38,15 @@ func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
 	st := store.New(pool)
-	a := New(st, embed.Stub{}, "http://localhost:5173", testAuthToken, 10*time.Second)
+	if _, err := st.CreateReviewerToken(ctx, "test-reviewer", testAuthToken); err != nil {
+		t.Fatalf("seeding reviewer token: %v", err)
+	}
+	a := New(st, embed.Stub{}, "http://localhost:5173", 10*time.Second)
 	srv := httptest.NewServer(a.Routes())
 	t.Cleanup(srv.Close)
 	return srv, st
@@ -117,13 +124,36 @@ func TestRequireAuth_CorrectTokenAccepted(t *testing.T) {
 	}
 }
 
+func TestRequireAuth_RevokedTokenRejected(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	tok, err := st.CreateReviewerToken(ctx, "throwaway-device", "throwaway-plaintext")
+	if err != nil {
+		t.Fatalf("CreateReviewerToken() error = %v", err)
+	}
+
+	resp := doJSONWithAuth(t, http.MethodGet, srv.URL+"/api/grants?subject=agent-a", nil, "throwaway-plaintext")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/grants with a freshly created token: status = %d, want 200", resp.StatusCode)
+	}
+
+	if err := st.RevokeReviewerToken(ctx, tok.ID); err != nil {
+		t.Fatalf("RevokeReviewerToken() error = %v", err)
+	}
+
+	resp = doJSONWithAuth(t, http.MethodGet, srv.URL+"/api/grants?subject=agent-a", nil, "throwaway-plaintext")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /api/grants with a revoked token: status = %d, want 401", resp.StatusCode)
+	}
+}
+
 func TestCreateAndListGrants(t *testing.T) {
 	srv, _ := testServer(t)
 
 	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
-		ApprovedBy: "human-reviewer",
-		Subject:    "agent-a",
-		Scopes:     []string{"identity.basic"},
+		Subject: "agent-a",
+		Scopes:  []string{"identity.basic"},
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("POST /api/grants status = %d, want 201", resp.StatusCode)
@@ -147,9 +177,8 @@ func TestCreateGrant_InvalidScopeRejected(t *testing.T) {
 	srv, _ := testServer(t)
 
 	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
-		ApprovedBy: "human-reviewer",
-		Subject:    "agent-a",
-		Scopes:     []string{"Not A Valid Scope"},
+		Subject: "agent-a",
+		Scopes:  []string{"Not A Valid Scope"},
 	})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST /api/grants with invalid scope: status = %d, want 400", resp.StatusCode)
@@ -160,10 +189,9 @@ func TestCreateGrant_InvalidDepthRejected(t *testing.T) {
 	srv, _ := testServer(t)
 
 	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
-		ApprovedBy: "human-reviewer",
-		Subject:    "agent-a",
-		Scopes:     []string{"identity.basic"},
-		Depth:      "bogus",
+		Subject: "agent-a",
+		Scopes:  []string{"identity.basic"},
+		Depth:   "bogus",
 	})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST /api/grants with invalid depth: status = %d, want 400", resp.StatusCode)
@@ -185,7 +213,6 @@ func TestCreateGrant_NegativeTTLRejected(t *testing.T) {
 
 	negative := -60
 	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
-		ApprovedBy: "human-reviewer",
 		Subject:    "agent-a",
 		Scopes:     []string{"identity.basic"},
 		TTLSeconds: &negative,
@@ -199,9 +226,8 @@ func TestCreateGrant_DuplicateScopesRejected(t *testing.T) {
 	srv, _ := testServer(t)
 
 	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
-		ApprovedBy: "human-reviewer",
-		Subject:    "agent-a",
-		Scopes:     []string{"identity.basic", "identity.basic"},
+		Subject: "agent-a",
+		Scopes:  []string{"identity.basic", "identity.basic"},
 	})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST /api/grants with duplicate scopes: status = %d, want 400", resp.StatusCode)
@@ -220,7 +246,6 @@ func TestCreateGrant_TTLTooLargeRejected(t *testing.T) {
 
 	huge := maxGrantTTLSeconds + 1
 	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
-		ApprovedBy: "human-reviewer",
 		Subject:    "agent-a",
 		Scopes:     []string{"identity.basic"},
 		TTLSeconds: &huge,
@@ -230,40 +255,12 @@ func TestCreateGrant_TTLTooLargeRejected(t *testing.T) {
 	}
 }
 
-func TestCreateGrant_MissingApprovedByRejected(t *testing.T) {
-	srv, _ := testServer(t)
-
-	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
-		Subject: "agent-a",
-		Scopes:  []string{"identity.basic"},
-	})
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("POST /api/grants with no approved_by: status = %d, want 400", resp.StatusCode)
-	}
-}
-
-func TestRevokeGrant_MissingRevokedByRejected(t *testing.T) {
-	srv, _ := testServer(t)
-
-	created := decodeInto[grantView](t, doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
-		ApprovedBy: "human-reviewer",
-		Subject:    "agent-a",
-		Scopes:     []string{"identity.basic"},
-	}))
-
-	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants/"+created.ID+"/revoke", revokeGrantRequest{})
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("POST revoke with no revoked_by: status = %d, want 400", resp.StatusCode)
-	}
-}
-
 func TestCreateGrant_EmptyScopesRejected(t *testing.T) {
 	srv, _ := testServer(t)
 
 	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
-		ApprovedBy: "human-reviewer",
-		Subject:    "agent-a",
-		Scopes:     []string{},
+		Subject: "agent-a",
+		Scopes:  []string{},
 	})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST /api/grants with no scopes: status = %d, want 400", resp.StatusCode)
@@ -274,12 +271,11 @@ func TestRevokeGrant(t *testing.T) {
 	srv, _ := testServer(t)
 
 	created := decodeInto[grantView](t, doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
-		ApprovedBy: "human-reviewer",
-		Subject:    "agent-a",
-		Scopes:     []string{"identity.basic"},
+		Subject: "agent-a",
+		Scopes:  []string{"identity.basic"},
 	}))
 
-	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants/"+created.ID+"/revoke", revokeGrantRequest{RevokedBy: "human-reviewer"})
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants/"+created.ID+"/revoke", nil)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("POST revoke status = %d, want 204", resp.StatusCode)
 	}
@@ -290,7 +286,7 @@ func TestRevokeGrant(t *testing.T) {
 	}
 
 	// Revoking again should fail, not silently succeed.
-	resp = doJSON(t, http.MethodPost, srv.URL+"/api/grants/"+created.ID+"/revoke", revokeGrantRequest{RevokedBy: "human-reviewer"})
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/grants/"+created.ID+"/revoke", nil)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("POST revoke (already revoked) status = %d, want 409", resp.StatusCode)
 	}
@@ -323,12 +319,12 @@ func TestStagedDiffs_ListApproveReject(t *testing.T) {
 		t.Fatalf("GET /api/staged-diffs with unknown status: status = %d, want 400", resp.StatusCode)
 	}
 
-	resp = doJSON(t, http.MethodPost, srv.URL+"/api/staged-diffs/"+approveMe.ID+"/approve", decisionRequest{DecidedBy: "test-reviewer"})
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/staged-diffs/"+approveMe.ID+"/approve", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST approve status = %d, want 200", resp.StatusCode)
 	}
 
-	resp = doJSON(t, http.MethodPost, srv.URL+"/api/staged-diffs/"+rejectMe.ID+"/reject", decisionRequest{DecidedBy: "test-reviewer"})
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/staged-diffs/"+rejectMe.ID+"/reject", nil)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("POST reject status = %d, want 204", resp.StatusCode)
 	}
@@ -369,42 +365,10 @@ func TestGetFact_ViaAPI(t *testing.T) {
 	}
 }
 
-func TestApproveStagedDiff_MissingDecidedByRejected(t *testing.T) {
-	srv, st := testServer(t)
-	ctx := context.Background()
-
-	vec := make([]float32, 384)
-	diff, err := st.ProposeDiff(ctx, "agent-a", "user likes tea", []string{"preferences.tea"}, vec, nil, nil)
-	if err != nil {
-		t.Fatalf("ProposeDiff() error = %v", err)
-	}
-
-	// Regression case from review: a missing/empty decided_by used to silently
-	// become "unknown-reviewer" in the permanent audit trail rather than being
-	// rejected. It must now be a 400, and the diff must remain untouched (still
-	// pending, not committed).
-	resp := doJSON(t, http.MethodPost, srv.URL+"/api/staged-diffs/"+diff.ID+"/approve", decisionRequest{DecidedBy: ""})
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("POST approve with empty decided_by: status = %d, want 400", resp.StatusCode)
-	}
-
-	pending := decodeInto[[]stagedDiffView](t, doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?status=pending", nil))
-	found := false
-	for _, d := range pending {
-		if d.ID == diff.ID {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("diff should still be pending after a rejected approve request, but it's gone from the pending list")
-	}
-}
-
 func TestApproveStagedDiff_NotFoundReturnsCleanError(t *testing.T) {
 	srv, _ := testServer(t)
 
-	resp := doJSON(t, http.MethodPost, srv.URL+"/api/staged-diffs/00000000-0000-0000-0000-000000000000/approve",
-		decisionRequest{DecidedBy: "test-reviewer"})
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/staged-diffs/00000000-0000-0000-0000-000000000000/approve", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("POST approve for nonexistent diff: status = %d, want 404", resp.StatusCode)
 	}
@@ -464,7 +428,7 @@ func TestNew_WildcardOriginRejected(t *testing.T) {
 			t.Fatal("New() with CORS_ALLOWED_ORIGIN=\"*\": want panic, got none")
 		}
 	}()
-	New(nil, nil, "*", testAuthToken, 10*time.Second)
+	New(nil, nil, "*", 10*time.Second)
 }
 
 func TestNew_NullOriginRejected(t *testing.T) {
@@ -473,7 +437,7 @@ func TestNew_NullOriginRejected(t *testing.T) {
 			t.Fatal(`New() with CORS_ALLOWED_ORIGIN="null": want panic, got none`)
 		}
 	}()
-	New(nil, nil, "null", testAuthToken, 10*time.Second)
+	New(nil, nil, "null", 10*time.Second)
 }
 
 func TestNew_OriginWithPathRejected(t *testing.T) {
@@ -482,7 +446,7 @@ func TestNew_OriginWithPathRejected(t *testing.T) {
 			t.Fatal("New() with a CORS_ALLOWED_ORIGIN containing a path: want panic, got none")
 		}
 	}()
-	New(nil, nil, "http://localhost:5173/app", testAuthToken, 10*time.Second)
+	New(nil, nil, "http://localhost:5173/app", 10*time.Second)
 }
 
 func TestNew_NonPositiveRequestTimeoutRejected(t *testing.T) {
@@ -491,7 +455,7 @@ func TestNew_NonPositiveRequestTimeoutRejected(t *testing.T) {
 			t.Fatal("New() with a zero RequestTimeout: want panic, got none")
 		}
 	}()
-	New(nil, nil, "", testAuthToken, 0)
+	New(nil, nil, "", 0)
 }
 
 // slowThenCheckContextEmbedder sleeps past the request timeout, then reports
@@ -526,16 +490,19 @@ func TestWithRequestTimeout_CancelsSlowHandlerContext(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
 	st := store.New(pool)
+	if _, err := st.CreateReviewerToken(ctx, "test-reviewer", testAuthToken); err != nil {
+		t.Fatalf("seeding reviewer token: %v", err)
+	}
 	canceled := make(chan bool, 1)
 	// RequestTimeout much shorter than the embedder's sleep: without
 	// withRequestTimeout wiring a.RequestTimeout into the handler's context, the
 	// embedder would just sleep out its full duration and report canceled=false.
-	a := New(st, slowThenCheckContextEmbedder{sleep: 200 * time.Millisecond, canceled: canceled}, "", testAuthToken, 20*time.Millisecond)
+	a := New(st, slowThenCheckContextEmbedder{sleep: 200 * time.Millisecond, canceled: canceled}, "", 20*time.Millisecond)
 	srv := httptest.NewServer(a.Routes())
 	t.Cleanup(srv.Close)
 
@@ -544,8 +511,7 @@ func TestWithRequestTimeout_CancelsSlowHandlerContext(t *testing.T) {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/staged-diffs/"+diff.ID+"/approve",
-		bytes.NewReader([]byte(`{"decided_by":"human-reviewer"}`)))
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/staged-diffs/"+diff.ID+"/approve", nil)
 	if err != nil {
 		t.Fatalf("building request: %v", err)
 	}
@@ -577,12 +543,74 @@ func TestLimitBody_OversizedRequestRejected(t *testing.T) {
 	// Without the body limit, this request would fully decode and succeed (201); the
 	// limit has to be what turns it into a body-read failure instead.
 	oversized := createGrantRequest{
-		ApprovedBy: "human-reviewer",
-		Subject:    strings.Repeat("a", maxRequestBodyBytes+1),
-		Scopes:     []string{"identity.basic"},
+		Subject: strings.Repeat("a", maxRequestBodyBytes+1),
+		Scopes:  []string{"identity.basic"},
 	}
 	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants", oversized)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST /api/grants with an oversized body: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestCreateToken_LifecycleIssueAuthenticateRevoke(t *testing.T) {
+	srv, _ := testServer(t)
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "pi5-tui"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /api/tokens status = %d, want 201", resp.StatusCode)
+	}
+	created := decodeInto[createTokenResponse](t, resp)
+	if created.Token == "" {
+		t.Fatal("POST /api/tokens response did not include a plaintext token")
+	}
+	if !created.Active {
+		t.Error("newly created token should be Active")
+	}
+
+	// The new token authenticates a request on its own.
+	resp = doJSONWithAuth(t, http.MethodGet, srv.URL+"/api/grants?subject=agent-a", nil, created.Token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/grants with the newly issued token: status = %d, want 200", resp.StatusCode)
+	}
+
+	// It shows up in the listing (without the plaintext).
+	tokens := decodeInto[[]tokenView](t, doJSON(t, http.MethodGet, srv.URL+"/api/tokens", nil))
+	found := false
+	for _, tk := range tokens {
+		if tk.ID == created.ID {
+			found = true
+			if tk.Label != "pi5-tui" {
+				t.Errorf("listed token label = %q, want %q", tk.Label, "pi5-tui")
+			}
+		}
+	}
+	if !found {
+		t.Error("newly created token not present in GET /api/tokens")
+	}
+
+	// Revoke it, then confirm it can no longer authenticate.
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/tokens/"+created.ID+"/revoke", nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /api/tokens/{id}/revoke status = %d, want 204", resp.StatusCode)
+	}
+	resp = doJSONWithAuth(t, http.MethodGet, srv.URL+"/api/grants?subject=agent-a", nil, created.Token)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /api/grants with a revoked token: status = %d, want 401", resp.StatusCode)
+	}
+
+	// Revoking again should fail, not silently succeed — same "no-op revoke" stance
+	// as RevokeGrant.
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/tokens/"+created.ID+"/revoke", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("POST /api/tokens/{id}/revoke (already revoked) status = %d, want 409", resp.StatusCode)
+	}
+}
+
+func TestCreateToken_MissingLabelRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /api/tokens with no label: status = %d, want 400", resp.StatusCode)
 	}
 }

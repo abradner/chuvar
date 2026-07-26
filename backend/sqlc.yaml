@@ -2,7 +2,7 @@ version: "2"
 sql:
   - engine: "postgresql"
     queries: "internal/store/queries"
-    schema: "internal/db/migrations/20260722234814_init.up.sql"
+    schema: "internal/db/migrations"
     # Live-DB analysis rather than static schema parsing: sqlc's static parser
     # doesn't know pgvector's `vector` type or `<=>` operator, since those come
     # from the extension, not core Postgres. Reuses the same DATABASE_URL every
