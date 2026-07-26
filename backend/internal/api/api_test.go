@@ -38,7 +38,7 @@ func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -490,7 +490,7 @@ func TestWithRequestTimeout_CancelsSlowHandlerContext(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -612,5 +612,60 @@ func TestCreateToken_MissingLabelRejected(t *testing.T) {
 	resp := doJSON(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST /api/tokens with no label: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestGrantRequests_ListApproveDeny(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	toApprove, err := st.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "need to greet the user by name")
+	if err != nil {
+		t.Fatalf("RequestGrant() error = %v", err)
+	}
+	toDeny, err := st.RequestGrant(ctx, "agent-b", []string{"preferences.food"}, "facts", nil, "")
+	if err != nil {
+		t.Fatalf("RequestGrant() error = %v", err)
+	}
+
+	pending := decodeInto[[]grantRequestView](t, doJSON(t, http.MethodGet, srv.URL+"/api/grant-requests?status=pending", nil))
+	if len(pending) != 2 {
+		t.Fatalf("pending grant requests = %d, want 2", len(pending))
+	}
+
+	resp := doJSON(t, http.MethodGet, srv.URL+"/api/grant-requests?status=bogus", nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("GET /api/grant-requests with unknown status: status = %d, want 400", resp.StatusCode)
+	}
+
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/grant-requests/"+toApprove.ID+"/approve", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST approve status = %d, want 200", resp.StatusCode)
+	}
+	approved := decodeInto[grantView](t, resp)
+	if !approved.Active {
+		t.Error("approving a grant request should produce an Active grant")
+	}
+
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/grant-requests/"+toDeny.ID+"/deny", nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST deny status = %d, want 204", resp.StatusCode)
+	}
+
+	stillPending := decodeInto[[]grantRequestView](t, doJSON(t, http.MethodGet, srv.URL+"/api/grant-requests?status=pending", nil))
+	if len(stillPending) != 0 {
+		t.Fatalf("pending grant requests after decisions = %d, want 0", len(stillPending))
+	}
+
+	// The subject that had its request approved now actually holds the grant.
+	grants := decodeInto[[]grantView](t, doJSON(t, http.MethodGet, srv.URL+"/api/grants?subject=agent-a", nil))
+	if len(grants) != 1 {
+		t.Fatalf("GET /api/grants?subject=agent-a returned %d grants, want 1", len(grants))
+	}
+
+	// Approving/denying again should fail, not silently succeed.
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/grant-requests/"+toApprove.ID+"/approve", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("POST approve (already approved) status = %d, want 409", resp.StatusCode)
 	}
 }

@@ -56,6 +56,20 @@ export interface Fact {
   valid_at: string;
 }
 
+export interface GrantRequest {
+  id: string;
+  subject: string;
+  requested_scopes: string[];
+  depth: string;
+  requested_ttl_seconds?: number;
+  justification: string;
+  status: "pending" | "approved" | "denied";
+  created_at: string;
+  decided_at?: string;
+  decided_by?: string;
+  resulting_grant_id?: string;
+}
+
 class ApiError extends Error {
   status: number;
 
@@ -109,6 +123,13 @@ export const api = {
   revokeGrant: (id: string) => request<void>(`/api/grants/${id}/revoke`, { method: "POST" }),
 
   getFact: (id: string, signal?: AbortSignal) => request<Fact>(`/api/facts/${id}`, { signal }),
+
+  listGrantRequests: (status = "pending", signal?: AbortSignal) =>
+    request<GrantRequest[]>(`/api/grant-requests?status=${encodeURIComponent(status)}`, { signal }),
+
+  approveGrantRequest: (id: string) => request<Grant>(`/api/grant-requests/${id}/approve`, { method: "POST" }),
+
+  denyGrantRequest: (id: string) => request<void>(`/api/grant-requests/${id}/deny`, { method: "POST" }),
 };
 
 export { ApiError };
