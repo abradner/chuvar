@@ -57,17 +57,25 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// middleware (see Routes()), but the underlying http.Server's own
 	// WriteTimeout (cmd/apiserver, set from the same RequestTimeout) still
 	// applies at the socket level and would silently kill this stream after
-	// the same ~10s regardless — clearing it here, for this response only,
-	// is exactly what ResponseController.SetWriteDeadline exists for; no
-	// other route's timeout is weakened by this.
+	// the same ~10s regardless — clearing it here (not just once, see send()
+	// below) is exactly what ResponseController.SetWriteDeadline exists for;
+	// no other route's timeout is weakened by this. Probing it up front, once,
+	// still catches "this connection doesn't support deadlines at all" early
+	// rather than only on the first real write.
 	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("streaming not supported by this connection"))
+		// writeStoreError, not writeError: this is an internal-failure case
+		// (the connection's transport doesn't support write deadlines at
+		// all, not something the client did wrong) and err itself is real
+		// diagnostic information worth logging, not just a discarded value.
+		// writeError is for client-input problems this package constructed
+		// itself; using it here would both mislabel the failure and drop the
+		// real error. Found in review.
+		writeStoreError(w, http.StatusInternalServerError, "streamEvents.SetWriteDeadline", "streaming not supported by this connection", err)
 		return
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
 	send := func(event string, data any) bool {
@@ -76,6 +84,15 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 			slog.Error("api: streamEvents: encoding event", "event", event, "error", err)
 			return false
 		}
+		// A finite deadline scoped to just this one write, not the connection
+		// clearing done above at connect time: a stalled reader (client
+		// stopped reading but kept the TCP connection open) could otherwise
+		// block this Fprintf/Flush forever, pinning the handler goroutine —
+		// with enough stalled clients, that's a resource-exhaustion path.
+		// Resetting it before every write keeps the *stream* unbounded (each
+		// successful write earns the next frame a fresh window) while
+		// bounding any single stuck one. Found in review.
+		_ = rc.SetWriteDeadline(time.Now().Add(a.RequestTimeout))
 		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b); err != nil {
 			return false
 		}
@@ -97,7 +114,21 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 	seenRequests := map[string]struct{}{}
 
 	poll := func() bool {
-		diffs, err := a.Store.ListStagedDiffs(ctx, store.DiffPending)
+		// Every Store call below shares one bounded child context, not the
+		// stream's own deadline-free ctx: without this, a hung DB (network
+		// partition, a stuck query) leaves this call blocked indefinitely,
+		// pinning both this goroutine and the pool connection it holds for as
+		// long as the client stays connected — across enough stalled
+		// connections, that starves the pool the approval endpoints need.
+		// a.RequestTimeout is the same bound every other route already uses
+		// for "how long should one unit of work take" (withRequestTimeout,
+		// api.go); reusing it here rather than inventing a second knob.
+		// Scoped to just one poll cycle, not the whole connection, so the
+		// *stream* itself still runs indefinitely. Found in review.
+		pollCtx, cancel := context.WithTimeout(ctx, a.RequestTimeout)
+		defer cancel()
+
+		diffs, err := a.Store.ListStagedDiffs(pollCtx, store.DiffPending)
 		if err != nil {
 			logPollError("api: streamEvents: listing staged diffs", err)
 			return false
@@ -115,9 +146,20 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 			if _, ok := currentDiffs[id]; ok {
 				continue
 			}
-			resolved, err := a.Store.GetStagedDiff(ctx, id)
+			resolved, err := a.Store.GetStagedDiff(pollCtx, id)
 			if err != nil {
+				// Keep tracking this ID rather than letting the
+				// seenDiffs = currentDiffs assignment below silently forget
+				// it: a transient fetch failure here must not mean the
+				// client never learns this diff resolved. The next poll
+				// retries the fetch — and since it's a real content lookup
+				// (not "poll again to see if it's still pending," which
+				// currentDiffs already answered "no" to), retrying, not
+				// giving up after one failure, is what actually recovers
+				// from a blip instead of just deferring the same loss.
+				// Found in review.
 				logPollError("api: streamEvents: fetching resolved staged diff", err, "id", id)
+				currentDiffs[id] = struct{}{}
 				continue
 			}
 			if !send("staged_diff_resolved", toStagedDiffView(resolved)) {
@@ -126,7 +168,7 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		seenDiffs = currentDiffs
 
-		reqs, err := a.Store.ListGrantRequests(ctx, store.GrantRequestPending)
+		reqs, err := a.Store.ListGrantRequests(pollCtx, store.GrantRequestPending)
 		if err != nil {
 			logPollError("api: streamEvents: listing grant requests", err)
 			return false
@@ -144,9 +186,11 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 			if _, ok := currentRequests[id]; ok {
 				continue
 			}
-			resolved, err := a.Store.GetGrantRequest(ctx, id)
+			resolved, err := a.Store.GetGrantRequest(pollCtx, id)
 			if err != nil {
+				// See the matching comment in the staged-diffs loop above.
 				logPollError("api: streamEvents: fetching resolved grant request", err, "id", id)
+				currentRequests[id] = struct{}{}
 				continue
 			}
 			if !send("grant_request_resolved", toGrantRequestView(resolved)) {
