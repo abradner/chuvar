@@ -121,7 +121,18 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("GET /api/tokens", a.listTokens)
 	mux.HandleFunc("POST /api/tokens", a.createToken)
 	mux.HandleFunc("POST /api/tokens/{id}/revoke", a.revokeToken)
-	return a.cors(a.requireAuth(a.limitBody(a.withRequestTimeout(mux))))
+
+	// /api/events (events.go) is mounted outside withRequestTimeout deliberately:
+	// every other route is a quick request/response and benefits from a bounded
+	// context, but streamEvents is meant to stay open indefinitely — wrapping it
+	// in the same ~10s context would cancel the stream itself, not just bound a
+	// slow store call. Its own doc comment covers the matching socket-level
+	// WriteTimeout concern.
+	top := http.NewServeMux()
+	top.HandleFunc("GET /api/events", a.streamEvents)
+	top.Handle("/", a.withRequestTimeout(mux))
+
+	return a.cors(a.requireAuth(a.limitBody(top)))
 }
 
 // withRequestTimeout bounds the context every handler receives at a.RequestTimeout.
