@@ -69,6 +69,17 @@ func registerRequestGrant(s *mcp.Server, subject string, st *store.Store) {
 			return nil, requestGrantOutput{}, fmt.Errorf("request_grant: depth must be one of summary, facts, full (got %q)", depth)
 		}
 
+		// A negative ttl_seconds used to fall through the `> 0` check below
+		// exactly like an omitted one, silently turning "an invalid value" into
+		// "no expiry requested" — the opposite of what the tool's own contract
+		// promises (omission, not an invalid value, means no expiry). Reject it
+		// explicitly instead. Zero is still treated as "omitted": ttl_seconds
+		// has no pointer type to distinguish an explicit 0 from a field the
+		// caller left out entirely, and 0 is nonsensical either reading.
+		// Found in review.
+		if args.TTLSeconds < 0 {
+			return nil, requestGrantOutput{}, fmt.Errorf("request_grant: ttl_seconds must be positive if provided (got %d)", args.TTLSeconds)
+		}
 		var ttl *int
 		if args.TTLSeconds > 0 {
 			ttl = &args.TTLSeconds

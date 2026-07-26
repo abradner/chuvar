@@ -113,3 +113,40 @@ func TestModel_MixedDiffsAndRequestsCoexist(t *testing.T) {
 		t.Fatalf("order after resolving r1 = %v, want only d1 left", m.order)
 	}
 }
+
+// TestModel_RemoveItemBeforeSelectedKeepsSameItemSelected is the regression
+// test for the wrong-item-approval risk found in review: with [A, B, C] and B
+// selected, another surface resolving A must not silently move the cursor to
+// C — the reviewer is still looking at B, and the next 'a'/'r' keypress must
+// still act on B.
+func TestModel_RemoveItemBeforeSelectedKeepsSameItemSelected(t *testing.T) {
+	m := newModel()
+	m.upsert(item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "a"}})
+	m.upsert(item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "b"}})
+	m.upsert(item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "c"}})
+	m.selected = 1 // "b"
+
+	m.remove("a")
+
+	it, ok := m.current()
+	if !ok || it.id() != "b" {
+		t.Fatalf("current() = %+v, ok=%v, want b (the item the reviewer was looking at, not c)", it, ok)
+	}
+}
+
+// TestModel_RemoveItemAfterSelectedDoesNotMoveSelection is the mirror case:
+// removing something after the selected item must leave selection untouched.
+func TestModel_RemoveItemAfterSelectedDoesNotMoveSelection(t *testing.T) {
+	m := newModel()
+	m.upsert(item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "a"}})
+	m.upsert(item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "b"}})
+	m.upsert(item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "c"}})
+	m.selected = 0 // "a"
+
+	m.remove("c")
+
+	it, ok := m.current()
+	if !ok || it.id() != "a" {
+		t.Fatalf("current() = %+v, ok=%v, want a (unchanged)", it, ok)
+	}
+}

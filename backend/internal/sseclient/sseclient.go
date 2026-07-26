@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // StagedDiff and GrantRequest mirror the JSON shapes internal/api's
@@ -153,7 +154,19 @@ func parseEvent(eventName, data string) Event {
 	}
 }
 
+// actionTimeout bounds a single approve/reject/approve/deny REST call. Callers
+// (cmd/approver's runAction, in particular) pass this program's own top-level
+// ctx — cancelled on SIGINT/SIGTERM, otherwise long-lived for as long as the
+// process runs — not something scoped to one HTTP request. Without a bound
+// here, a stalled server or network would hang that call indefinitely,
+// leaking the goroutine it runs in and leaving the TUI's status line never
+// updated for that action. Found in review.
+const actionTimeout = 10 * time.Second
+
 func (c *Client) postAction(ctx context.Context, path string) error {
+	ctx, cancel := context.WithTimeout(ctx, actionTimeout)
+	defer cancel()
+
 	req, err := c.newRequest(ctx, http.MethodPost, path)
 	if err != nil {
 		return err

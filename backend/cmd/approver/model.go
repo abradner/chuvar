@@ -74,6 +74,20 @@ func (m *model) remove(id string) {
 	for i, oid := range m.order {
 		if oid == id {
 			m.order = append(m.order[:i], m.order[i+1:]...)
+			// Removing an item strictly before the selected one shifts every
+			// later index down by one, so selected has to move with it or it
+			// silently ends up pointing at a different item than the one the
+			// reviewer was looking at. This was a real risk, not just a
+			// display glitch: SSE resolutions and keypresses both flow
+			// through main's single select loop, so a resolution for an
+			// earlier item arriving between two keypresses could otherwise
+			// make the very next 'a'/'r' act on the wrong item. Found in
+			// review. i == m.selected (the selected item is the one being
+			// removed) intentionally falls through unchanged — the index now
+			// already points at the next item, or gets clamped below.
+			if i < m.selected {
+				m.selected--
+			}
 			break
 		}
 	}

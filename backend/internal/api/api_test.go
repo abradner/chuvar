@@ -669,3 +669,81 @@ func TestGrantRequests_ListApproveDeny(t *testing.T) {
 		t.Fatalf("POST approve (already approved) status = %d, want 409", resp.StatusCode)
 	}
 }
+
+func TestCreateToken_WhitespaceOnlyLabelRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "   "})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /api/tokens with a whitespace-only label: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestCreateToken_LabelIsTrimmed(t *testing.T) {
+	srv, _ := testServer(t)
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "  pi5-tui  "})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /api/tokens status = %d, want 201", resp.StatusCode)
+	}
+	created := decodeInto[createTokenResponse](t, resp)
+	if created.Label != "pi5-tui" {
+		t.Errorf("Label = %q, want trimmed to %q", created.Label, "pi5-tui")
+	}
+}
+
+func TestGrantRequestActions_NonexistentIDReturns404(t *testing.T) {
+	srv, _ := testServer(t)
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grant-requests/00000000-0000-0000-0000-000000000000/approve", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("POST approve for nonexistent grant request: status = %d, want 404", resp.StatusCode)
+	}
+
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/grant-requests/00000000-0000-0000-0000-000000000000/deny", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("POST deny for nonexistent grant request: status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestGrantRequestActions_AlreadyDecidedReturns409(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	req, err := st.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "")
+	if err != nil {
+		t.Fatalf("RequestGrant() error = %v", err)
+	}
+	if _, err := st.ApproveGrantRequest(ctx, req.ID, "human-reviewer"); err != nil {
+		t.Fatalf("ApproveGrantRequest() error = %v", err)
+	}
+
+	// The request genuinely exists (so grantRequestExists must not 404 it) but
+	// is no longer pending — this must stay a distinguishable 409, not 404.
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grant-requests/"+req.ID+"/approve", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("POST approve on an already-approved request: status = %d, want 409", resp.StatusCode)
+	}
+}
+
+// TestGrantRequestActions_RealDBErrorIsNotMaskedAs404 is the regression test
+// for the review finding on this same followup PR: the first version of
+// grantRequestExists treated *every* GetGrantRequest error as "not found," so
+// a real database failure during approve/deny would come back as a 404
+// instead of the 500 it actually is — masking the same class of failure
+// AuthenticateReviewerToken's own regression test (in this batch) guards
+// against, just one layer up. A syntactically invalid UUID triggers a real
+// Postgres error ("invalid input syntax for type uuid"), not
+// pgx.ErrNoRows — a realistic way to exercise the non-404 path through an
+// ordinary HTTP request, without needing to fake a connection failure.
+func TestGrantRequestActions_RealDBErrorIsNotMaskedAs404(t *testing.T) {
+	srv, _ := testServer(t)
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grant-requests/not-a-valid-uuid/approve", nil)
+	if resp.StatusCode == http.StatusNotFound {
+		t.Fatal("POST approve with a malformed ID: got 404, want a real database error to surface as 500 (not masked as not-found)")
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("POST approve with a malformed ID: status = %d, want 500", resp.StatusCode)
+	}
+}

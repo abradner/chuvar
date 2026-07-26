@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/abradner/chuvar/backend/internal/store"
 )
@@ -94,6 +95,12 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("decoding request body: %w", err))
 		return
 	}
+	// Trimmed before the empty/length checks, not after: a label of "   " is
+	// non-empty and under the length limit as typed, but it's meaningless as
+	// an identifier and would still end up recorded as the actor in every
+	// audit event this token's holder produces (decided_by/approved_by/
+	// revoked_by, per this package's comment). Found in review.
+	req.Label = strings.TrimSpace(req.Label)
 	if req.Label == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("label is required"))
 		return

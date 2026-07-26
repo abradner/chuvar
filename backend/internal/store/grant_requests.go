@@ -78,6 +78,15 @@ func (s *Store) RequestGrant(ctx context.Context, subject string, scopes []strin
 	if subject == "" {
 		return GrantRequest{}, fmt.Errorf("store: subject must not be empty")
 	}
+	// Deduped, not rejected: an agent listing the same scope twice isn't a
+	// malformed request worth bouncing back with an error (the same call
+	// bouncer.ProposeWrite already makes for a staged diff's proposed scopes,
+	// via scope.Dedupe — this mirrors it for the analogous agent-initiated
+	// path). Without this, a duplicate here would stage successfully but
+	// ApproveGrantRequest's per-scope grant_scopes insert would fail on the
+	// (grant_id, scope) primary key, leaving a request that looks valid but
+	// can never be approved. Found in review.
+	scopes = dedupeStrings(scopes)
 
 	row, err := s.q.InsertGrantRequest(ctx, sqlcgen.InsertGrantRequestParams{
 		Subject:             subject,
@@ -229,4 +238,22 @@ func (s *Store) DenyGrantRequest(ctx context.Context, id, decidedBy string) erro
 		return fmt.Errorf("store: commit grant request denial: %w", err)
 	}
 	return nil
+}
+
+// dedupeStrings returns s with exact duplicates removed, preserving
+// first-appearance order. A package-local equivalent of internal/scope's
+// Dedupe rather than importing that package here: store treats scopes as
+// plain strings throughout (CreateGrant, InsertGrantScope) — validating their
+// shape is the API/mcptools boundary's job, not this layer's.
+func dedupeStrings(s []string) []string {
+	seen := make(map[string]bool, len(s))
+	out := make([]string, 0, len(s))
+	for _, v := range s {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }

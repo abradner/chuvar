@@ -55,10 +55,15 @@ func (t *terminalUI) Close() {
 }
 
 // ReadKeys reads raw bytes from stdin and parses them into key values on a
-// background goroutine, closing the channel when ctx is canceled or stdin
-// closes. Escape sequences (arrow keys) are two bytes behind the initial 0x1b —
-// this only recognizes the specific up/down sequences this program uses, not a
-// general terminal-escape parser.
+// background goroutine, closing the channel when stdin closes or a send would
+// block past ctx being canceled. os.Stdin.Read itself is a blocking syscall
+// with no way to hand it a context, so ctx cancellation alone does not stop
+// this goroutine while it's waiting on a keypress that never comes — it only
+// takes effect at the next send attempt after a byte does arrive, or when
+// stdin is closed out from under it (Close(), on process shutdown). Escape
+// sequences (arrow keys) are two bytes behind the initial 0x1b — this only
+// recognizes the specific up/down sequences this program uses, not a general
+// terminal-escape parser. Found in review (doc accuracy).
 func (t *terminalUI) ReadKeys(ctx context.Context) <-chan key {
 	out := make(chan key)
 	go func() {
@@ -152,45 +157,105 @@ func renderSummary(it item) string {
 		if d.DedupeVerdict != nil {
 			verdict = " [" + *d.DedupeVerdict + "]"
 		}
-		return fmt.Sprintf("write  %-16s %s%s", truncate(d.Subject, 16), truncate(d.Content, 50), verdict)
+		return fmt.Sprintf("write  %-16s %s%s", truncate(safe(d.Subject), 16), truncate(safe(d.Content), 50), verdict)
 	}
 	r := it.req
-	return fmt.Sprintf("grant  %-16s %s", truncate(r.Subject, 16), strings.Join(r.RequestedScopes, ", "))
+	return fmt.Sprintf("grant  %-16s %s", truncate(safe(r.Subject), 16), strings.Join(r.RequestedScopes, ", "))
 }
 
 func renderDetail(it item) string {
 	var b strings.Builder
 	if it.kind == kindDiff {
 		d := it.diff
-		fmt.Fprintf(&b, "from %s\r\n", d.Subject)
+		fmt.Fprintf(&b, "from %s\r\n", safe(d.Subject))
 		if d.TargetFactID != nil {
 			b.WriteString("⚠ this replaces an existing fact (fetch it via the web UI before approving)\r\n")
 		}
-		fmt.Fprintf(&b, "%s\r\n", d.Content)
+		fmt.Fprintf(&b, "%s\r\n", safe(d.Content))
 		fmt.Fprintf(&b, "scopes: %s\r\n", strings.Join(d.ProposedScopes, ", "))
 		if d.DedupeVerdict != nil && *d.DedupeVerdict == "contradiction" {
 			b.WriteString("⚠ contradiction — review carefully, this may conflict with an existing fact\r\n")
 		}
 	} else {
 		r := it.req
-		fmt.Fprintf(&b, "from %s\r\n", r.Subject)
+		fmt.Fprintf(&b, "from %s\r\n", safe(r.Subject))
 		fmt.Fprintf(&b, "requesting: %s (depth: %s)\r\n", strings.Join(r.RequestedScopes, ", "), r.Depth)
 		if r.RequestedTTLSeconds != nil {
 			fmt.Fprintf(&b, "for %d minutes\r\n", *r.RequestedTTLSeconds/60)
 		}
 		if r.Justification != "" {
-			fmt.Fprintf(&b, "justification: %s\r\n", r.Justification)
+			fmt.Fprintf(&b, "justification: %s\r\n", safe(r.Justification))
 		}
 	}
 	return b.String()
 }
 
+// safe strips terminal control-sequence injection vectors from agent-supplied
+// free text (Subject/Content/Justification) before it's ever written to the
+// reviewer's screen. This program's whole premise is that agent input is
+// untrusted until a human reviews it — but "review" itself happens by reading
+// this terminal, so a raw control byte in that text (most importantly ESC
+// 0x1b, which begins every ANSI/CSI escape sequence) would let a malicious or
+// compromised agent rewrite what's on screen: clear the pane, hide the actual
+// scopes or the ⚠ contradiction warning above, or overlay a fake prompt,
+// before the reviewer's next keypress acts on what they think they saw.
+// Scopes and Depth aren't passed through this — both are already restricted
+// to a closed character set/enum before they ever reach here (scope.Validate,
+// the depth CHECK constraint), so they're not free text an agent controls the
+// bytes of. Found in review (security).
+func safe(s string) string {
+	return strings.Map(func(r rune) rune {
+		// C0 controls (0x00-0x1F) + DEL, plus the C1 range (0x80-0x9F) —
+		// found in review (Codex P1) on this same followup PR: the first
+		// version of this fix only stripped C0/DEL, but terminals that honor
+		// 8-bit C1 controls treat U+009B as CSI too, so agent text encoding
+		// that codepoint could still open an escape sequence and rewrite the
+		// approval pane, bypassing the original fix entirely.
+		if (r >= 0x00 && r <= 0x1f) || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return ' '
+		}
+		if isBidiControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// isBidiControl reports whether r is a Unicode bidirectional-formatting
+// character. Found in review (Codex P2), the same followup PR, on the same
+// underlying issue as the C0/C1 fix above: none of those are control bytes
+// in the traditional sense, but U+202E (RLO) and its relatives let text
+// override the terminal's left-to-right rendering order — the
+// "Trojan Source" class of attack (CVE-2021-42574). Agent content containing
+// one could visually reorder itself, or reorder the trusted "[contradiction]"
+// suffix renderSummary appends after it, misleading a reviewer about what
+// they're approving before their next keypress acts on it. This is the fixed,
+// stable set defined by Unicode (not derivable from a stdlib predicate) —
+// explicit directional embedding/override/isolate controls plus the two
+// directional marks.
+func isBidiControl(r rune) bool {
+	switch r {
+	case 0x061c, // Arabic Letter Mark
+		0x200e, 0x200f, // LRM, RLM
+		0x202a, 0x202b, 0x202c, 0x202d, 0x202e, // LRE, RLE, PDF, LRO, RLO
+		0x2066, 0x2067, 0x2068, 0x2069: // LRI, RLI, FSI, PDI
+		return true
+	}
+	return false
+}
+
+// truncate shortens s to at most n runes, appending an ellipsis marker in
+// place of the last one when it does. Rune-based rather than s[:n] byte
+// slicing: Subject/Content can contain multi-byte UTF-8 (the render code
+// already prints Unicode symbols like ⚠ itself), and byte-slicing mid-rune
+// produces invalid UTF-8 in the truncated output. Found in review.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
 	if n <= 1 {
-		return s[:n]
+		return string(r[:n])
 	}
-	return s[:n-1] + "…"
+	return string(r[:n-1]) + "…"
 }

@@ -1,0 +1,1 @@
+ALTER TABLE grant_requests DROP CONSTRAINT grant_requests_ttl_positive;

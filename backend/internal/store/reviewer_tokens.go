@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/abradner/chuvar/backend/internal/store/sqlcgen"
 )
@@ -63,7 +66,18 @@ func (s *Store) CreateReviewerToken(ctx context.Context, label, plaintext string
 func (s *Store) AuthenticateReviewerToken(ctx context.Context, plaintext string) (label string, ok bool, err error) {
 	row, err := s.q.LookupActiveReviewerToken(ctx, HashToken(plaintext))
 	if err != nil {
-		return "", false, nil //nolint:nilerr // sqlc pgx.ErrNoRows and genuine DB errors are both "not authenticated" here; see doc comment
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", false, nil
+		}
+		// A real DB failure (connection lost, pool exhausted, a migration
+		// that hasn't run) used to be swallowed into the same "not
+		// authenticated" result as a merely-unknown token — every request
+		// during an outage would come back as an unlogged 401, making the
+		// outage itself invisible instead of surfacing as the 500 it
+		// actually is. Only "no matching row" means unauthenticated; every
+		// other error is a real failure the caller (requireAuth) should log
+		// and report as one. Found in review.
+		return "", false, fmt.Errorf("store: authenticate reviewer token: %w", err)
 	}
 	if err := s.q.TouchReviewerToken(ctx, row.ID); err != nil {
 		return "", false, fmt.Errorf("store: touch reviewer token: %w", err)

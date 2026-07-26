@@ -189,12 +189,24 @@ func handleKey(ctx context.Context, c *sseclient.Client, m *model, k key, events
 // the source of truth for whether an approval actually landed (it could 409 if
 // someone else resolved it a moment earlier).
 func runAction(ctx context.Context, events chan<- appEvent, it item, do func() error, verb string) {
-	msg := fmt.Sprintf("%s %s", verb, it.id()[:8])
+	id := shortID(it.id())
+	msg := fmt.Sprintf("%s %s", verb, id)
 	if err := do(); err != nil {
-		msg = fmt.Sprintf("failed to %s %s: %v", verb, it.id()[:8], err)
+		msg = fmt.Sprintf("failed to %s %s: %v", verb, id, err)
 	}
 	select {
 	case events <- appEvent{Type: "status", Detail: msg}:
 	case <-ctx.Done():
 	}
+}
+
+// shortID returns up to the first 8 characters of id for the status line.
+// IDs come from server-supplied SSE payloads (sseclient.StagedDiff.ID etc.),
+// so a bare id[:8] would panic on any future ID shape shorter than that
+// rather than degrading gracefully. Found in review.
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
