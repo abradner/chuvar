@@ -3,8 +3,9 @@ package api
 import (
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/abradner/chuvar/backend/internal/store"
 )
@@ -116,13 +117,24 @@ func (a *API) denyGrantRequest(w http.ResponseWriter, r *http.Request) {
 // isn't pending anymore" (409, handled by the caller's own store-error branch)
 // — before this, approve/deny returned 409 for both, which is indistinguishable
 // from the caller's perspective (a typo'd ID looks identical to a request
-// someone else already decided). Writes the 404 response itself; the caller
-// should return immediately when this reports false. Found in review.
+// someone else already decided). Writes the response itself; the caller
+// should return immediately when this reports false.
+//
+// Only pgx.ErrNoRows means "not found" — a first version of this fix (found in
+// review on this same followup PR) treated *every* GetGrantRequest error as a
+// 404, which silently turned a real database outage into "this grant request
+// doesn't exist" instead of the 500 it actually is. That's the identical
+// error-masking class this batch already fixed once in
+// store.AuthenticateReviewerToken; this closes the same gap here.
 func (a *API) grantRequestExists(w http.ResponseWriter, r *http.Request, id string) bool {
-	if _, err := a.Store.GetGrantRequest(r.Context(), id); err != nil {
-		slog.Error("api: grantRequestExists", "id", id, "error", err)
+	_, err := a.Store.GetGrantRequest(r.Context(), id)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, errors.New("grant request not found"))
 		return false
 	}
-	return true
+	writeStoreError(w, http.StatusInternalServerError, "grantRequestExists", "could not check grant request", err)
+	return false
 }

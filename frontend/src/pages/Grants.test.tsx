@@ -212,11 +212,34 @@ describe("GrantsPage", () => {
   // success landing afterward — the operator would see no pending requests
   // and no explanation why.
   it("keeps the grant-requests load error visible even after the grants load succeeds", async () => {
-    vi.mocked(api.listGrants).mockResolvedValue([]);
+    // Forces the exact ordering the bug depended on, rather than trusting
+    // two immediately-resolving promises to interleave the right way by
+    // accident (flagged in review: the original version of this test could
+    // pass even against the buggy shared-error-state implementation,
+    // depending on microtask scheduling). listGrants is held open until
+    // after the grant-requests error is already on screen, then resolved —
+    // if the two effects still shared error state, that resolution would
+    // clear the banner we just asserted is there.
+    let resolveGrants: (g: Grant[]) => void = () => {};
+    vi.mocked(api.listGrants).mockReturnValue(
+      new Promise((resolve) => {
+        resolveGrants = resolve;
+      }),
+    );
     vi.mocked(api.listGrantRequests).mockRejectedValue(new ApiError(500, "could not list grant requests"));
 
     render(<GrantsPage />);
 
     expect(await screen.findByText("could not list grant requests")).toBeInTheDocument();
+
+    resolveGrants([]);
+
+    // Wait for the grants promise to actually flow through its effect and
+    // update the DOM (the empty-grants message only appears once that
+    // state update has landed) before re-asserting the error is untouched —
+    // just awaiting the mock having been *called* would prove nothing, since
+    // that already happened at the initial render, before resolveGrants ran.
+    await screen.findByText("No grants for this subject.");
+    expect(screen.getByText("could not list grant requests")).toBeInTheDocument();
   });
 });

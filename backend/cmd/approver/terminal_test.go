@@ -44,6 +44,22 @@ func TestTruncate_ShortStringUnchanged(t *testing.T) {
 	}
 }
 
+// TestSafe_StripsC1Controls is the regression test for the review finding on
+// this same followup PR: the first version of safe() only stripped C0
+// controls and DEL, leaving the C1 range (U+0080-U+009F) intact. U+009B is
+// CSI on terminals that honor 8-bit C1 controls — functionally equivalent to
+// ESC-[ for opening an escape sequence — so agent text containing it could
+// still rewrite the approval pane even after the original fix.
+func TestSafe_StripsC1Controls(t *testing.T) {
+	// U+009B (C1 CSI) built via rune conversion rather than embedding the raw
+	// control byte as a source-file literal.
+	c1csi := string(rune(0x9b))
+	got := safe("before" + c1csi + "2Jafter")
+	if got != "before 2Jafter" {
+		t.Errorf("safe() = %q, want U+009B (C1 CSI) replaced with a space", got)
+	}
+}
+
 func TestShortID_HandlesShortInput(t *testing.T) {
 	// Regression test for the panic risk found in review: a bare id[:8] would
 	// panic on any ID shorter than 8 characters.

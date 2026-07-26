@@ -205,7 +205,13 @@ func renderDetail(it item) string {
 // bytes of. Found in review (security).
 func safe(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		// C0 controls (0x00-0x1F) + DEL, plus the C1 range (0x80-0x9F) —
+		// found in review (Codex P1) on this same followup PR: the first
+		// version of this fix only stripped C0/DEL, but terminals that honor
+		// 8-bit C1 controls treat U+009B as CSI too, so agent text encoding
+		// that codepoint could still open an escape sequence and rewrite the
+		// approval pane, bypassing the original fix entirely.
+		if (r >= 0x00 && r <= 0x1f) || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			return ' '
 		}
 		return r
