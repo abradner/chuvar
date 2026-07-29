@@ -77,6 +77,7 @@ type ReviewerToken struct {
 	CreatedAt  time.Time
 	LastUsedAt *time.Time
 	RevokedAt  *time.Time
+	TotpSecret *string
 }
 
 type StagedDiff struct {

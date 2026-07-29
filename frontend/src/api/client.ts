@@ -80,16 +80,27 @@ class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit & { signal?: AbortSignal }): Promise<T> {
+// totpCode carries the device-local second factor (see backend/internal/api's
+// requireTOTP) for mutations that grant or extend authority — every other
+// request omits the header entirely rather than sending it empty.
+async function request<T>(
+  path: string,
+  init?: RequestInit & { signal?: AbortSignal; totpCode?: string },
+): Promise<T> {
   const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
   const signal = init?.signal ? AbortSignal.any([timeoutSignal, init.signal]) : timeoutSignal;
 
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${AUTH_TOKEN}`,
+  };
+  if (init?.totpCode) {
+    headers["X-Chuvar-TOTP-Code"] = init.totpCode;
+  }
+
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${AUTH_TOKEN}`,
-    },
     ...init,
+    headers,
     signal,
   });
   if (!res.ok) {
@@ -106,18 +117,22 @@ export const api = {
   listStagedDiffs: (status = "pending", signal?: AbortSignal) =>
     request<StagedDiff[]>(`/api/staged-diffs?status=${encodeURIComponent(status)}`, { signal }),
 
-  approveStagedDiff: (id: string) =>
-    request<unknown>(`/api/staged-diffs/${id}/approve`, { method: "POST" }),
+  // approveStagedDiff/createGrant/approveGrantRequest require totpCode — the
+  // backend's requireTOTP gate rejects these without a valid device-local
+  // second factor (see backend/internal/api/api.go's Routes doc comment).
+  approveStagedDiff: (id: string, totpCode: string) =>
+    request<unknown>(`/api/staged-diffs/${id}/approve`, { method: "POST", totpCode }),
 
   rejectStagedDiff: (id: string) => request<void>(`/api/staged-diffs/${id}/reject`, { method: "POST" }),
 
   listGrants: (subject: string, signal?: AbortSignal) =>
     request<Grant[]>(`/api/grants?subject=${encodeURIComponent(subject)}`, { signal }),
 
-  createGrant: (subject: string, scopes: string[], depth: string, ttlSeconds?: number) =>
+  createGrant: (subject: string, scopes: string[], depth: string, totpCode: string, ttlSeconds?: number) =>
     request<Grant>("/api/grants", {
       method: "POST",
       body: JSON.stringify({ subject, scopes, depth, ttl_seconds: ttlSeconds }),
+      totpCode,
     }),
 
   revokeGrant: (id: string) => request<void>(`/api/grants/${id}/revoke`, { method: "POST" }),
@@ -127,7 +142,8 @@ export const api = {
   listGrantRequests: (status = "pending", signal?: AbortSignal) =>
     request<GrantRequest[]>(`/api/grant-requests?status=${encodeURIComponent(status)}`, { signal }),
 
-  approveGrantRequest: (id: string) => request<Grant>(`/api/grant-requests/${id}/approve`, { method: "POST" }),
+  approveGrantRequest: (id: string, totpCode: string) =>
+    request<Grant>(`/api/grant-requests/${id}/approve`, { method: "POST", totpCode }),
 
   denyGrantRequest: (id: string) => request<void>(`/api/grant-requests/${id}/deny`, { method: "POST" }),
 };

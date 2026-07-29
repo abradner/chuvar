@@ -140,6 +140,9 @@ func streamEventsWithReconnect(ctx context.Context, c *sseclient.Client, out cha
 // resolved it a moment earlier), and the status line reports failures instead
 // of the queue silently lying about what's still pending.
 func handleKey(ctx context.Context, c *sseclient.Client, m *model, k key, events chan<- appEvent) (quit bool) {
+	if m.prompt != nil {
+		return handlePromptKey(ctx, c, m, k, events)
+	}
 	switch {
 	case k.special == keyCtrlC:
 		return true
@@ -154,12 +157,10 @@ func handleKey(ctx context.Context, c *sseclient.Client, m *model, k key, events
 		if !ok {
 			return false
 		}
-		go runAction(ctx, events, it, func() error {
-			if it.kind == kindDiff {
-				return c.ApproveStagedDiff(ctx, it.id())
-			}
-			return c.ApproveGrantRequest(ctx, it.id())
-		}, "approved")
+		// Approving requires a TOTP code (requireTOTP, internal/api/api.go) —
+		// open the prompt instead of firing the request; handlePromptKey does
+		// the actual approve once a code is entered.
+		m.prompt = &promptState{it: it}
 	case k.r == 'r':
 		it, ok := m.current()
 		if !ok {
@@ -171,6 +172,41 @@ func handleKey(ctx context.Context, c *sseclient.Client, m *model, k key, events
 			}
 			return c.DenyGrantRequest(ctx, it.id())
 		}, "rejected")
+	}
+	return false
+}
+
+// handlePromptKey drives an in-progress TOTP code entry (m.prompt != nil).
+// Ctrl-C still quits outright (a stuck prompt shouldn't trap the reviewer);
+// digits accumulate up to 6, backspace removes one, Enter submits the approve
+// action with whatever code has been entered so far (the server, not this
+// program, is the source of truth on whether it's valid), and any other key
+// cancels the prompt without acting — there's no dedicated Escape handling
+// (ReadKeys' doc comment on why a bare Escape isn't reliably available here).
+func handlePromptKey(ctx context.Context, c *sseclient.Client, m *model, k key, events chan<- appEvent) (quit bool) {
+	if k.special == keyCtrlC {
+		return true
+	}
+	switch {
+	case k.special == keyEnter:
+		p := m.prompt
+		m.prompt = nil
+		go runAction(ctx, events, p.it, func() error {
+			if p.it.kind == kindDiff {
+				return c.ApproveStagedDiff(ctx, p.it.id(), p.code)
+			}
+			return c.ApproveGrantRequest(ctx, p.it.id(), p.code)
+		}, "approved")
+	case k.special == keyBackspace:
+		if n := len(m.prompt.code); n > 0 {
+			m.prompt.code = m.prompt.code[:n-1]
+		}
+	case k.r >= '0' && k.r <= '9':
+		if len(m.prompt.code) < 6 {
+			m.prompt.code += string(k.r)
+		}
+	default:
+		m.prompt = nil
 	}
 	return false
 }

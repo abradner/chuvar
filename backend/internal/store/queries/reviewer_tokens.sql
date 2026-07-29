@@ -1,11 +1,14 @@
 -- name: InsertReviewerToken :one
-INSERT INTO reviewer_tokens (label, token_hash)
-VALUES ($1, $2)
+INSERT INTO reviewer_tokens (label, token_hash, totp_secret)
+VALUES ($1, $2, $3)
 RETURNING id, label, created_at;
 
 -- name: LookupActiveReviewerToken :one
 SELECT id, label FROM reviewer_tokens
 WHERE token_hash = $1 AND revoked_at IS NULL;
+
+-- name: GetReviewerTOTPSecret :one
+SELECT totp_secret FROM reviewer_tokens WHERE id = $1;
 
 -- name: TouchReviewerToken :exec
 UPDATE reviewer_tokens SET last_used_at = now() WHERE id = $1;

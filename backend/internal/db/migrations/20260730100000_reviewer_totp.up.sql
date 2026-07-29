@@ -1,0 +1,19 @@
+-- Device-local second factor for capability-granting mutations. Today the same
+-- CHUVAR_API_TOKEN plaintext that a reviewer's terminal/browser holds is also
+-- sufficient, on its own, to approve a grant request — so anything with shell
+-- access to the reviewer's environment can approve its own request (Notion:
+-- "Passkeys/WebAuthn reviewer auth", flagged blocking for the Agent Capability
+-- Broker). Full WebAuthn needs its own design pass (enrollment bootstrap, RP ID,
+-- a story for headless cmd/approver/cmd/pushbridge) and isn't attempted here —
+-- this is the narrower interim stopgap: a TOTP (RFC 6238) secret enrolled once
+-- per device alongside its bearer token, entered as a one-time code on mutations
+-- that grant or extend authority. A code from an authenticator app on the
+-- reviewer's own phone is a factor shell access to the server environment alone
+-- cannot produce.
+--
+-- Nullable: existing tokens (and any created without enrolling a code) simply
+-- cannot pass the new gate — fails closed on gated endpoints, unaffected on
+-- every read/stream route. Stored as the base32 secret text (not hashed): unlike
+-- a bearer token, verification needs the live secret to compute the expected
+-- code, not just a comparison against a stored digest.
+ALTER TABLE reviewer_tokens ADD COLUMN totp_secret TEXT;

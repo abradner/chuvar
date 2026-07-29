@@ -96,7 +96,7 @@ type createGrantRequest struct {
 // approved_by is the authenticated reviewer (reviewerFromContext), not a request
 // body field — see the package comment.
 func (a *API) createGrant(w http.ResponseWriter, r *http.Request) {
-	approvedBy := reviewerFromContext(r.Context())
+	approvedBy := reviewerFromContext(r.Context()).Label
 
 	var req createGrantRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -164,7 +164,7 @@ func (a *API) createGrant(w http.ResponseWriter, r *http.Request) {
 // authenticated reviewer (reviewerFromContext), not a request body field.
 func (a *API) revokeGrant(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	revokedBy := reviewerFromContext(r.Context())
+	revokedBy := reviewerFromContext(r.Context()).Label
 	if err := a.Store.RevokeGrant(r.Context(), id, revokedBy); err != nil {
 		writeStoreError(w, http.StatusConflict, "revokeGrant", "could not revoke grant — it may not exist or already be revoked", err)
 		return

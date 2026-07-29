@@ -51,6 +51,11 @@ describe("GrantsPage", () => {
     // tests that don't care about requests aren't left with an unresolved
     // promise (a bare vi.fn() call returns undefined, not a Promise).
     vi.mocked(api.listGrantRequests).mockResolvedValue([]);
+    // Approve/create prompt for the TOTP second factor via window.prompt (a
+    // deliberately minimal stopgap UI — see the component's comment). Default
+    // to a fixed code so tests not specifically about that prompt don't have
+    // to stub it themselves.
+    vi.spyOn(window, "prompt").mockReturnValue("123456");
   });
 
   it("renders grants for the default subject", async () => {
@@ -126,8 +131,22 @@ describe("GrantsPage", () => {
       "agent-a",
       ["identity.basic", "projects.spritz.read"],
       "facts",
+      "123456",
       300,
     );
+  });
+
+  it("does not create a grant when the TOTP prompt is cancelled", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([]);
+    vi.spyOn(window, "prompt").mockReturnValue(null);
+
+    render(<GrantsPage />);
+    await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
+
+    await userEvent.type(screen.getByPlaceholderText("identity.basic, projects.spritz.read"), "identity.basic");
+    await userEvent.click(screen.getByRole("button", { name: "Create grant" }));
+
+    expect(api.createGrant).not.toHaveBeenCalled();
   });
 
   it("disables the submit button while a create request is in flight", async () => {
@@ -186,7 +205,7 @@ describe("GrantsPage", () => {
     await waitFor(() => {
       expect(screen.queryByText("from agent-c")).not.toBeInTheDocument();
     });
-    expect(api.approveGrantRequest).toHaveBeenCalledWith("req-1");
+    expect(api.approveGrantRequest).toHaveBeenCalledWith("req-1", "123456");
   });
 
   it("removes a grant request from the list after denying it", async () => {

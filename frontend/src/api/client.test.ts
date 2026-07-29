@@ -62,11 +62,29 @@ describe("api client", () => {
 
   it("sends no body on approveStagedDiff — decided_by is derived server-side from the auth token", async () => {
     const fetchMock = mockFetchOnce({ ok: true, status: 200, json: async () => ({}) });
-    await api.approveStagedDiff("diff-1");
+    await api.approveStagedDiff("diff-1", "123456");
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain("/api/staged-diffs/diff-1/approve");
     expect(init.body).toBeUndefined();
+  });
+
+  it("sends the TOTP code as a header on approveStagedDiff, not the request body", async () => {
+    const fetchMock = mockFetchOnce({ ok: true, status: 200, json: async () => ({}) });
+    await api.approveStagedDiff("diff-1", "123456");
+
+    const [, init] = fetchMock.mock.calls[0];
+    const headers = init.headers as Record<string, string>;
+    expect(headers["X-Chuvar-TOTP-Code"]).toBe("123456");
+  });
+
+  it("omits the TOTP header entirely on requests that don't need it", async () => {
+    const fetchMock = mockFetchOnce({ ok: true, status: 200, json: async () => [] });
+    await api.listGrants("agent-a");
+
+    const [, init] = fetchMock.mock.calls[0];
+    const headers = init.headers as Record<string, string>;
+    expect(headers["X-Chuvar-TOTP-Code"]).toBeUndefined();
   });
 
   it("sends no body on revokeGrant — revoked_by is derived server-side from the auth token", async () => {
@@ -80,7 +98,7 @@ describe("api client", () => {
 
   it("sends the grant fields on createGrant, with no approved_by — derived server-side from the auth token", async () => {
     const fetchMock = mockFetchOnce({ ok: true, status: 201, json: async () => ({}) });
-    await api.createGrant("agent-a", ["identity.basic"], "facts", 300);
+    await api.createGrant("agent-a", ["identity.basic"], "facts", "123456", 300);
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain("/api/grants");

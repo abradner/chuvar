@@ -25,6 +25,7 @@ const (
 	keyDown
 	keyEnter
 	keyCtrlC
+	keyBackspace
 )
 
 // terminalUI owns raw-mode terminal state. MakeRaw disables line buffering and
@@ -81,6 +82,8 @@ func (t *terminalUI) ReadKeys(ctx context.Context) <-chan key {
 				k = key{special: keyCtrlC}
 			case b == '\r' || b == '\n':
 				k = key{special: keyEnter}
+			case b == 0x7f || b == 0x08: // DEL or BS — terminals vary on which they send
+				k = key{special: keyBackspace}
 			case b == 0x1b:
 				// Best-effort: read the next two bytes of a CSI arrow sequence
 				// (ESC [ A/B). A bare Escape with nothing following will block
@@ -144,7 +147,12 @@ func (t *terminalUI) Render(m *model) {
 		b.WriteString(renderDetail(it))
 	}
 
-	b.WriteString("\r\n[j/k or ↑/↓] navigate  [a]pprove  [r]eject/deny  [q]uit\r\n")
+	if m.prompt != nil {
+		fmt.Fprintf(&b, "\r\nenter TOTP code (device-local second factor, required to approve): %s\r\n", strings.Repeat("*", len(m.prompt.code)))
+		b.WriteString("[0-9] enter digits  [enter] submit  [any other key] cancel\r\n")
+	} else {
+		b.WriteString("\r\n[j/k or ↑/↓] navigate  [a]pprove  [r]eject/deny  [q]uit\r\n")
+	}
 
 	t.out.WriteString(b.String())
 	t.out.Flush()

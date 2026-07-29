@@ -68,11 +68,19 @@ export function StagedDiffsPage() {
   }, [diffs]);
 
   const decide = async (id: string, action: "approve" | "reject") => {
+    // approveStagedDiff is the only path (besides tests) that turns a staged
+    // diff into a real fact, so it's gated behind requireTOTP the same as a
+    // grant approval — reject isn't, since it only discards a proposal.
+    let totpCode = "";
+    if (action === "approve") {
+      totpCode = window.prompt("Enter TOTP code to approve") ?? "";
+      if (!totpCode) return;
+    }
     setBusyId(id);
     setError(null);
     try {
       if (action === "approve") {
-        await api.approveStagedDiff(id);
+        await api.approveStagedDiff(id, totpCode);
       } else {
         await api.rejectStagedDiff(id);
       }
