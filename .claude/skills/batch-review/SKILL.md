@@ -123,8 +123,26 @@ squash — which is why the manual flavour here does not squash interstitials.
   every retrieval path — a security property), §6 (trust-boundary questions,
   secure-by-default network settings, closed-vocabulary validation,
   regression-tested fixes seen to fail first).
-- Deferrals go to a GitHub issue (see #12 for the shape). Not a PR-body
-  table — that goes stale between rounds and vanishes on merge.
+- **Deferrals go to a Notion task** in the *Memory Vault Tasks Tracker*
+  (AGENTS.md §6 already makes that the team's real view of progress), **with
+  its metadata set** — a bare title in the tracker is barely better than a
+  PR-body table:
+
+  | Property | Set it to |
+  |---|---|
+  | Task name | The finding, not the symptom |
+  | Status | `Not started` |
+  | Impact | `High` / `Medium` / `Low` — a deferred correctness bug is not Low |
+  | Effort level | `Small` / `Medium` / `Large` |
+  | Format | `🐞 Bug`, `💻 Tech Debt`, `🚧 KTLO`, `🔬 Research/Spike`, … (multi) |
+  | Function | usually `Code/Tech`; `Docs/Ops` for tooling and workflow |
+  | Project | relate it to the Chuvar project row |
+
+  The body carries the finding, the reasoning, and acceptance criteria.
+  **Not a GitHub issue** — an earlier revision of this skill said issue #12
+  was the shape to follow; #12 was a one-off, not the convention, and the
+  rule was wrong. **Not a PR-body table** either: that goes stale between
+  rounds and vanishes on merge.
 - Release: `bin/release-tag` cuts a `v<UTC yyyymmddHHMM>` tag at main's tip
   and refuses a main that isn't green. There is **no image build yet**
   (deployment undecided, AGENTS.md §5), so today the tag marks a release
@@ -248,9 +266,12 @@ Normally nothing to do — the stack sits still while CI and reviews land. Two
 contingencies can interrupt it; the two standing rules after them always
 apply.
 
-**Main moved for unrelated reasons.** Merge main into affected branches —
-never rebase a branch carrying review context by hand (stacked flavour:
-`gh stack rebase` is the recorded exception).
+**Main moved for unrelated reasons.** *Manual flavour:* merge main into
+affected branches — never rebase a branch carrying review context by hand.
+Steps 1–4 below assume that merge. *Stacked flavour:* do **not** run them —
+`gh stack rebase` then `gh stack submit` is the native operation and the
+recorded exception to the never-rebase rule; the intent rules in steps 2–4
+still apply to resolving its conflicts.
 
 1. Find the branch's true payload: `git log HEAD --not origin/main --oneline`.
 2. Resolve conflicts; stale hunks take main's side.
@@ -382,7 +403,9 @@ One PR, stacked on the cap, carrying all reactive work. It contains:
 Then resolve every interstitial thread: `fixed in the followup (#<n>)` or
 `not relevant: <one line>`. This is the only time the batch touches its own
 review threads. In the same pass, append `- **Followup**: #<n>` to each Batch
-block.
+block — in **both** flavours. It is a policy line, not a position line: the
+stack map renders parentage but has no concept of which PR carries the
+reactive work, so it stays even in the trimmed stacked block.
 
 The followup is the one place to watch the live dripfeed. Its bar is broader
 than an interstitial's, because it is the release gate: fix anything that
@@ -406,7 +429,12 @@ diff. Spend the Codex budget here.
    ```bash
    gh api -X PATCH repos/{owner}/{repo}/pulls/N -f base=<cap-branch>
    ```
-5. **Mark ready.** The draft→ready edge triggers Copilot on the now-narrow
+5. **Stacked flavour only: link the followup into the stack object** —
+   between the retarget and marking ready. Skip this and the followup stays
+   a loose PR outside the stack, which the Phase 7 pre-flight is supposed to
+   catch. The mechanism is **UNVERIFIED**; see the deltas for the candidates
+   and the degrade path if it misbehaves.
+6. **Mark ready.** The draft→ready edge triggers Copilot on the now-narrow
    diff.
 
 ### Re-soliciting review per round
@@ -457,8 +485,8 @@ the cap arriving** — regardless of how few files are in play.
 At the cap, or once findings stop being correctness regressions:
 
 - Fix only genuine defects in shipped behaviour.
-- Everything else becomes a **ticket** with the finding, reasoning, and
-  acceptance criteria.
+- Everything else becomes a **Notion task** with the finding, reasoning, and
+  acceptance criteria — metadata set, per Repo specifics.
 - If one small change draws three or more findings, **revert and ticket it**.
   It needs design time, not another patch.
 
@@ -653,7 +681,8 @@ followup degrades independently of the interstitials.
   the previous round's code. Past that, fix real defects, ticket the rest.
 - Never trust an aggregate review signal.
 - A merge is not a release.
-- Write every deferral down as a ticket, not a PR-body table.
+- Write every deferral down as a Notion task in the Memory Vault Tasks
+  Tracker, metadata set — not a GitHub issue, not a PR-body table.
 
 ## Evidence
 
