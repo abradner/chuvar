@@ -1,0 +1,220 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+# Supersede in-flight runs for the same ref. The batch-review workflow opens a
+# stack of PRs at once and iterates a followup PR over several rounds; without
+# this, every push leaves its predecessor's full run burning paid minutes. Not
+# applied to main — each merged commit keeps its own conclusive run, which is
+# what Phase 5 (release tag) checks before tagging.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# All jobs run on GitHub's arm64 hosted runners (`ubuntu-24.04-arm`).
+# Billing confirms the account has them on private repos and prices them at
+# $0.005/min against x64's $0.006 — ~17% off every run. Every tool here is
+# arm64-native: pgvector publishes a multi-arch image, and mise resolves
+# arm64 builds of Go, Bun and sqlc. It also matches the arm64 dev box, so a
+# CI-only architecture bug can't hide.
+#
+# If a job ever sits Queued rather than starting, suspect this label first —
+# an unavailable runner label queues indefinitely instead of failing, and
+# `timeout-minutes` does not bound queue time. Falling back is a
+# search-and-replace to `ubuntu-latest`.
+jobs:
+  # Detect which half of the repo the diff touches so a frontend-only change
+  # doesn't pay for Postgres + the Go suite, and vice versa. Shared files
+  # (this workflow, mise.toml, docker-compose.yml) run everything.
+  changes:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      # Full history: on push events paths-filter diffs against
+      # github.event.before, which a depth-1 checkout does not have locally.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          # Default 'some' quantifier is correct here: these are plain OR
+          # patterns with no negations. (A filter that excludes a subtree —
+          # e.g. '**' plus '!frontend/**' — needs
+          # predicate-quantifier: 'every', or every file matches '**' and the
+          # negation silently never applies.)
+          filters: |
+            backend:
+              - 'backend/**'
+              - 'mise.toml'
+              - 'docker-compose.yml'
+              - '.github/workflows/ci.yml'
+            frontend:
+              - 'frontend/**'
+              - 'mise.toml'
+              - '.github/workflows/ci.yml'
+
+  backend:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      # Must be pgvector, not stock postgres: the init migration runs
+      # CREATE EXTENSION vector, and sqlc analyses queries against this live
+      # database precisely because its static parser doesn't know the vector
+      # type or the <=> operator. Keep the tag in step with
+      # docker-compose.yml.
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: chuvar
+          POSTGRES_PASSWORD: chuvar_dev_only
+          POSTGRES_DB: chuvar
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U chuvar -d chuvar"
+          --health-interval=2s
+          --health-timeout=5s
+          --health-retries=20
+
+    env:
+      # Unlike local dev (54322, to dodge spritz's Postgres on this machine),
+      # the runner's service port is free — so 5432 here is correct, not a
+      # copy-paste slip.
+      DATABASE_URL: postgres://chuvar:chuvar_dev_only@localhost:5432/chuvar?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # mise.toml is the single source of truth for the toolchain (Go, Bun,
+      # sqlc) — pinning versions again here would just drift from it.
+      # `mise exec --` on each step below is deliberate parity with the local
+      # commands in AGENTS.md, so a step can be copy-pasted either way.
+      - uses: jdx/mise-action@v4
+        with:
+          install: true
+          cache: true
+
+      # Every integration test skips itself when DATABASE_URL is unset, and a
+      # wholly-skipped suite still prints "ok" per package — a green job that
+      # exercised nothing. Assert the variable survived before trusting the
+      # result. (Set-but-unreachable is fine: db.Migrate fails the test loudly.)
+      - name: Assert DATABASE_URL is set
+        run: |
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "::error::DATABASE_URL is unset — the integration suite would skip and still report success."
+            exit 1
+          fi
+
+      - name: go vet
+        run: mise exec -- go vet ./...
+
+      - name: Build
+        run: mise exec -- go build ./...
+
+      # -p 1 is mandatory, not caution: these are integration tests against one
+      # shared database, each truncating the same tables at setup. Without it Go
+      # runs package test binaries concurrently and they clobber each other
+      # (AGENTS.md §4). The tests apply migrations themselves via db.Migrate —
+      # which is also what leaves the schema in place for the sqlc step below.
+      - name: Test
+        run: mise exec -- go test -p 1 ./...
+
+      # sqlcgen/ is generated wholesale; a hand-edit or a stale regeneration is
+      # invisible in review but breaks the next person to run sqlc. Regenerate
+      # and require the tree to be unchanged.
+      #
+      # ORDERING: this must run after Test. sqlc.yaml uses live-DB analysis
+      # (pgvector's vector type and <=> are invisible to the static parser), so
+      # it needs a migrated database — and the test suite's db.Migrate call is
+      # the only thing that migrates it in this job. If Test is ever removed,
+      # reordered, or made conditional, add an explicit migration step here
+      # rather than letting sqlc analyse an empty database.
+      - name: sqlc drift check
+        run: |
+          mise exec -- sqlc generate
+          if [ -n "$(git status --porcelain internal/store/sqlcgen/)" ]; then
+            echo "::error::sqlc drift: internal/store/sqlcgen/ is not in step with internal/store/queries/. Run 'DATABASE_URL=... mise exec -- sqlc generate' and commit the result."
+            git --no-pager diff -- internal/store/sqlcgen/
+            git status --porcelain internal/store/sqlcgen/
+            exit 1
+          fi
+
+  frontend:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: jdx/mise-action@v4
+        with:
+          install: true
+          cache: true
+
+      - name: Install dependencies
+        run: mise exec -- bun install --frozen-lockfile
+
+      - name: Lint
+        run: mise exec -- bun run lint
+
+      # `bun run build` is tsc -b && vite build — the typecheck and the build
+      # in one step, which is also the only place a broken tsconfig project
+      # reference shows up.
+      - name: Typecheck and build
+        run: mise exec -- bun run build
+
+      - name: Test
+        run: mise exec -- bun run test
+
+  # Single aggregate gate. Make THIS the required status check in branch
+  # protection, never `backend`/`frontend` directly: those are conditional, and
+  # a skipped job never satisfies a required check, so a frontend-only PR would
+  # block forever. Conversely a workflow whose jobs all skipped renders green on
+  # its own, so this is also what keeps "nothing ran" from reading as "passed".
+  ci-ok:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    needs: [changes, backend, frontend]
+    if: always()
+    steps:
+      - name: Verify no job failed or was cancelled
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+        run: |
+          echo "changes=$CHANGES_RESULT backend=$BACKEND_RESULT frontend=$FRONTEND_RESULT"
+          for r in "$CHANGES_RESULT" "$BACKEND_RESULT" "$FRONTEND_RESULT"; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "::error::a required job concluded '$r'"; exit 1 ;;
+            esac
+          done
+          if [ "$BACKEND_RESULT" = "skipped" ] && [ "$FRONTEND_RESULT" = "skipped" ]; then
+            echo "::warning::neither half ran — the diff touched no filtered path. Green here means 'nothing to test', not 'tested'."
+          fi

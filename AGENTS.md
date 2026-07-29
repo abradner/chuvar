@@ -40,7 +40,7 @@ need driving it.
 | MCP transport | `modelcontextprotocol/go-sdk` | stdio for v0 |
 | Write path | Postgres-backed staged-diff state machine | Temporal is the intended long-term engine for the bouncer pipeline (see Notion §4) but is deliberately deferred — don't stand up a Temporal cluster for v0 work, see §3.3 |
 | Testing | Go: stdlib `testing` + `testify/require` where assertions get noisy. TS: Vitest + React Testing Library. | |
-| Deployment | Not yet decided | Don't build CI/CD or container publishing until asked — premature for v0 |
+| Deployment | Not yet decided | CI exists (§5); don't build container publishing or a prod deploy until asked |
 
 ## 3. Critical Architectural Rules
 
@@ -125,11 +125,27 @@ Things that cost real time to discover once — don't rediscover them:
 - **The full backend test suite needs `go test -p 1 ./...`, not just `go test ./...`**
   — see §4's note on why (shared-database test isolation, not flakiness).
 
-## 5. Deployment
+## 5. CI and Deployment
 
-Not yet decided — don't build CI/CD, Dockerfiles for prod, or a Helm chart until asked. The
-open-core Community Edition needs to run anywhere Postgres does (including self-hosted Proxmox
-boxes per the pitch), so keep that constraint in mind if/when this section gets filled in.
+**CI exists** (`.github/workflows/ci.yml`): on every PR and on push to `main`, a
+`dorny/paths-filter` job splits the diff into `backend/` and `frontend/` halves so a
+one-sided change only pays for its own jobs. Backend runs `go vet`, `go build`,
+`go test -p 1 ./...` against a `pgvector/pgvector` service container, and an **sqlc drift
+check** (regenerate, then require `internal/store/sqlcgen/` to be unchanged). Frontend runs
+`bun install --frozen-lockfile`, `oxlint`, `bun run build` (tsc + vite) and `vitest`. PR runs
+cancel their own superseded predecessors; runs on `main` do not, since those are what
+`bin/release-tag` checks. The toolchain comes from `mise.toml` via `jdx/mise-action` — add a
+tool there, not in the workflow.
+
+Note that a **skipped job is not a passing job**: a frontend-only PR shows no backend job,
+which means the Go suite never saw that commit.
+
+**Deployment is still not decided** — don't build container publishing, prod Dockerfiles, or a
+Helm chart until asked. The open-core Community Edition needs to run anywhere Postgres does
+(including self-hosted Proxmox boxes per the pitch), so keep that constraint in mind if/when
+this gets filled in. `bin/release-tag` cuts a `v<UTC timestamp>` tag at main's tip after a
+merge train; today that tag only marks a release point, and an image build (when there is one)
+should trigger from it.
 
 ## 6. Coding Standards & Workflow Rules
 
