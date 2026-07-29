@@ -50,7 +50,7 @@ func TestGrants_CreateListRevoke(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	g, err := s.CreateGrant(ctx, "agent-a", []string{"projects.spritz.read", "identity.basic"}, "facts", nil, "human-reviewer")
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"projects.spritz.read", "identity.basic"}, "memory", "facts", nil, "human-reviewer")
 	if err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
@@ -96,7 +96,7 @@ func TestGrants_ExpiredExcludedFromGrantedScopes(t *testing.T) {
 	ctx := context.Background()
 
 	past := -time.Hour
-	if _, err := s.CreateGrant(ctx, "agent-b", []string{"identity.basic"}, "facts", &past, "human-reviewer"); err != nil {
+	if _, err := s.CreateGrant(ctx, "agent-b", []string{"identity.basic"}, "memory", "facts", &past, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
@@ -113,8 +113,64 @@ func TestCreateGrant_InvalidDepthRejected(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	if _, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "bogus", nil, "human-reviewer"); err == nil {
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "bogus", nil, "human-reviewer"); err == nil {
 		t.Fatal("CreateGrant() with invalid depth: want error, got nil")
+	}
+}
+
+func TestCreateGrant_EmptyKindDefaultsToMemory(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "", "facts", nil, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() with empty kind error = %v", err)
+	}
+	if g.Kind != GrantKindMemory {
+		t.Errorf("Kind = %q, want %q (empty kind should default to memory)", g.Kind, GrantKindMemory)
+	}
+}
+
+func TestCreateGrant_InvalidKindRejected(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "bogus-kind", "facts", nil, "human-reviewer"); err == nil {
+		t.Fatal("CreateGrant() with invalid kind: want error, got nil")
+	}
+}
+
+func TestCreateGrant_CapabilityKindRequiresNoDepth(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "capability", "facts", nil, "human-reviewer"); err == nil {
+		t.Fatal("CreateGrant() with kind=capability and a depth set: want error, got nil (there's no equivalent concept for a capability grant)")
+	}
+}
+
+func TestCreateGrant_CapabilityKindWithNoDepthSucceeds(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"git.sign:github.com/abradner/chuvar"}, "capability", "", nil, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() with kind=capability, no depth: error = %v", err)
+	}
+	if g.Kind != GrantKindCapability {
+		t.Errorf("Kind = %q, want %q", g.Kind, GrantKindCapability)
+	}
+	if g.Depth != "" {
+		t.Errorf("Depth = %q, want empty for a capability grant", g.Depth)
+	}
+
+	// Round-trips through ListGrants the same way.
+	grants, err := s.ListGrants(ctx, "agent-a")
+	if err != nil {
+		t.Fatalf("ListGrants() error = %v", err)
+	}
+	if len(grants) != 1 || grants[0].Kind != GrantKindCapability || grants[0].Depth != "" {
+		t.Fatalf("ListGrants() = %+v, want one capability grant with empty depth", grants)
 	}
 }
 
@@ -324,11 +380,11 @@ func TestGrantedScopesToSearchFacts_MultiGrantPipelineWithRevocation(t *testing.
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
-	g1, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "human-reviewer")
+	g1, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "human-reviewer")
 	if err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
-	if _, err := s.CreateGrant(ctx, "agent-a", []string{"projects.spritz.read"}, "facts", nil, "human-reviewer"); err != nil {
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"projects.spritz.read"}, "memory", "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
@@ -692,7 +748,7 @@ func TestCreateGrant_LogsAuditEventAtomically(t *testing.T) {
 	s, pool := testStore(t)
 	ctx := context.Background()
 
-	g, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "human-reviewer")
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "human-reviewer")
 	if err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}

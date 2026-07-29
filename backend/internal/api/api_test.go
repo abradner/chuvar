@@ -253,7 +253,7 @@ func TestRequireTOTP_DenyRevokeNotGated(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	req, err := st.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "")
+	req, err := st.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "")
 	if err != nil {
 		t.Fatalf("RequestGrant() error = %v", err)
 	}
@@ -752,11 +752,11 @@ func TestGrantRequests_ListApproveDeny(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	toApprove, err := st.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "need to greet the user by name")
+	toApprove, err := st.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "need to greet the user by name")
 	if err != nil {
 		t.Fatalf("RequestGrant() error = %v", err)
 	}
-	toDeny, err := st.RequestGrant(ctx, "agent-b", []string{"preferences.food"}, "facts", nil, "")
+	toDeny, err := st.RequestGrant(ctx, "agent-b", []string{"preferences.food"}, "memory", "facts", nil, "")
 	if err != nil {
 		t.Fatalf("RequestGrant() error = %v", err)
 	}
@@ -843,7 +843,7 @@ func TestGrantRequestActions_AlreadyDecidedReturns409(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	req, err := st.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "")
+	req, err := st.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "")
 	if err != nil {
 		t.Fatalf("RequestGrant() error = %v", err)
 	}

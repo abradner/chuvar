@@ -50,7 +50,7 @@ func (q *Queries) DenyGrantRequest(ctx context.Context, arg DenyGrantRequestPara
 }
 
 const getGrantRequest = `-- name: GetGrantRequest :one
-SELECT id, subject, requested_scopes, depth, requested_ttl_seconds, justification, status, created_at, decided_at, decided_by, resulting_grant_id
+SELECT id, subject, requested_scopes, depth, requested_ttl_seconds, justification, status, created_at, decided_at, decided_by, resulting_grant_id, kind
 FROM grant_requests WHERE id = $1
 `
 
@@ -69,20 +69,22 @@ func (q *Queries) GetGrantRequest(ctx context.Context, id string) (GrantRequest,
 		&i.DecidedAt,
 		&i.DecidedBy,
 		&i.ResultingGrantID,
+		&i.Kind,
 	)
 	return i, err
 }
 
 const insertGrantRequest = `-- name: InsertGrantRequest :one
-INSERT INTO grant_requests (subject, requested_scopes, depth, requested_ttl_seconds, justification)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, subject, requested_scopes, depth, requested_ttl_seconds, justification, status, created_at, decided_at, decided_by, resulting_grant_id
+INSERT INTO grant_requests (subject, requested_scopes, kind, depth, requested_ttl_seconds, justification)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, subject, requested_scopes, depth, requested_ttl_seconds, justification, status, created_at, decided_at, decided_by, resulting_grant_id, kind
 `
 
 type InsertGrantRequestParams struct {
 	Subject             string
 	RequestedScopes     []string
-	Depth               string
+	Kind                string
+	Depth               *string
 	RequestedTtlSeconds pgtype.Int4
 	Justification       string
 }
@@ -91,6 +93,7 @@ func (q *Queries) InsertGrantRequest(ctx context.Context, arg InsertGrantRequest
 	row := q.db.QueryRow(ctx, insertGrantRequest,
 		arg.Subject,
 		arg.RequestedScopes,
+		arg.Kind,
 		arg.Depth,
 		arg.RequestedTtlSeconds,
 		arg.Justification,
@@ -108,12 +111,13 @@ func (q *Queries) InsertGrantRequest(ctx context.Context, arg InsertGrantRequest
 		&i.DecidedAt,
 		&i.DecidedBy,
 		&i.ResultingGrantID,
+		&i.Kind,
 	)
 	return i, err
 }
 
 const listGrantRequests = `-- name: ListGrantRequests :many
-SELECT id, subject, requested_scopes, depth, requested_ttl_seconds, justification, status, created_at, decided_at, decided_by, resulting_grant_id
+SELECT id, subject, requested_scopes, depth, requested_ttl_seconds, justification, status, created_at, decided_at, decided_by, resulting_grant_id, kind
 FROM grant_requests WHERE status = $1 ORDER BY created_at ASC
 `
 
@@ -138,6 +142,7 @@ func (q *Queries) ListGrantRequests(ctx context.Context, status string) ([]Grant
 			&i.DecidedAt,
 			&i.DecidedBy,
 			&i.ResultingGrantID,
+			&i.Kind,
 		); err != nil {
 			return nil, err
 		}
@@ -150,15 +155,16 @@ func (q *Queries) ListGrantRequests(ctx context.Context, status string) ([]Grant
 }
 
 const loadGrantRequestForUpdate = `-- name: LoadGrantRequestForUpdate :one
-SELECT subject, requested_scopes, depth, requested_ttl_seconds, status FROM grant_requests WHERE id = $1 FOR UPDATE
+SELECT subject, requested_scopes, depth, requested_ttl_seconds, status, kind FROM grant_requests WHERE id = $1 FOR UPDATE
 `
 
 type LoadGrantRequestForUpdateRow struct {
 	Subject             string
 	RequestedScopes     []string
-	Depth               string
+	Depth               *string
 	RequestedTtlSeconds pgtype.Int4
 	Status              string
+	Kind                string
 }
 
 func (q *Queries) LoadGrantRequestForUpdate(ctx context.Context, id string) (LoadGrantRequestForUpdateRow, error) {
@@ -170,6 +176,7 @@ func (q *Queries) LoadGrantRequestForUpdate(ctx context.Context, id string) (Loa
 		&i.Depth,
 		&i.RequestedTtlSeconds,
 		&i.Status,
+		&i.Kind,
 	)
 	return i, err
 }

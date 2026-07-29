@@ -23,13 +23,6 @@ const maxScopesPerGrant = 50
 // a nonsensical expires_at via time.Now().Add.
 const maxGrantTTLSeconds = 365 * 24 * 3600
 
-// validDepths mirrors the CHECK (depth IN (...)) constraint on the grants table
-// (0001_init.up.sql) — kept in sync manually since there's no shared source of
-// truth between the Go and SQL layers for this closed, small vocabulary. Checking
-// here means a bad depth value gets a clean 400 instead of a raw Postgres
-// constraint-violation error surfacing as a 500.
-var validDepths = map[string]bool{"summary": true, "facts": true, "full": true}
-
 type grantView struct {
 	ID        string   `json:"id"`
 	Subject   string   `json:"subject"`
@@ -110,7 +103,7 @@ func (a *API) createGrant(w http.ResponseWriter, r *http.Request) {
 	if req.Depth == "" {
 		req.Depth = "facts"
 	}
-	if !validDepths[req.Depth] {
+	if !store.ValidDepth(req.Depth) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("depth must be one of summary, facts, full (got %q)", req.Depth))
 		return
 	}
@@ -152,7 +145,10 @@ func (a *API) createGrant(w http.ResponseWriter, r *http.Request) {
 		ttl = &d
 	}
 
-	g, err := a.Store.CreateGrant(r.Context(), req.Subject, req.Scopes, req.Depth, ttl, approvedBy)
+	// kind is hardcoded to memory here — this endpoint doesn't expose a way to
+	// create a capability-kind grant yet (that's the Agent Capability Broker
+	// workstream's own surface to design, not guessed at in this batch).
+	g, err := a.Store.CreateGrant(r.Context(), req.Subject, req.Scopes, string(store.GrantKindMemory), req.Depth, ttl, approvedBy)
 	if err != nil {
 		writeStoreError(w, http.StatusInternalServerError, "createGrant", "could not create grant", err)
 		return

@@ -228,7 +228,7 @@ func TestProposeWrite_TargetOutsideSubjectGrantsRejected(t *testing.T) {
 
 	// agent-b has an active grant, just not one covering identity.medical — this
 	// proves the rejection is scope-specific, not "agent-b has zero grants."
-	if _, err := st.CreateGrant(ctx, "agent-b", []string{"preferences.coffee"}, "facts", nil, "human-reviewer"); err != nil {
+	if _, err := st.CreateGrant(ctx, "agent-b", []string{"preferences.coffee"}, "memory", "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 

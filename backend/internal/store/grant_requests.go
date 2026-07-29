@@ -23,7 +23,8 @@ type GrantRequest struct {
 	ID                  string
 	Subject             string
 	RequestedScopes     []string
-	Depth               string
+	Kind                GrantKind
+	Depth               string // empty for anything other than GrantKindMemory — see Grant.Depth
 	RequestedTTLSeconds *int
 	Justification       string
 	Status              GrantRequestStatus
@@ -53,7 +54,8 @@ func toGrantRequest(row sqlcgen.GrantRequest) GrantRequest {
 		ID:                  row.ID,
 		Subject:             row.Subject,
 		RequestedScopes:     row.RequestedScopes,
-		Depth:               row.Depth,
+		Kind:                GrantKind(row.Kind),
+		Depth:               depthOrEmpty(row.Depth),
 		RequestedTTLSeconds: fromInt4(row.RequestedTtlSeconds),
 		Justification:       row.Justification,
 		Status:              GrantRequestStatus(row.Status),
@@ -68,12 +70,13 @@ func toGrantRequest(row sqlcgen.GrantRequest) GrantRequest {
 // counterpart to CreateGrant, mirroring ProposeDiff's "propose, never write
 // directly" shape (AGENTS.md §3.1): nothing here ever creates a real grant. Only
 // ApproveGrantRequest does that, and only for a pending request a human decided on.
-func (s *Store) RequestGrant(ctx context.Context, subject string, scopes []string, depth string, ttlSeconds *int, justification string) (GrantRequest, error) {
+func (s *Store) RequestGrant(ctx context.Context, subject string, scopes []string, kind, depth string, ttlSeconds *int, justification string) (GrantRequest, error) {
 	if len(scopes) == 0 {
 		return GrantRequest{}, fmt.Errorf("store: grant request must include at least one scope")
 	}
-	if !validDepths[depth] {
-		return GrantRequest{}, fmt.Errorf("store: invalid depth %q (want summary, facts, or full)", depth)
+	validKind, depth, err := validateKindAndDepth(kind, depth)
+	if err != nil {
+		return GrantRequest{}, err
 	}
 	if subject == "" {
 		return GrantRequest{}, fmt.Errorf("store: subject must not be empty")
@@ -91,7 +94,8 @@ func (s *Store) RequestGrant(ctx context.Context, subject string, scopes []strin
 	row, err := s.q.InsertGrantRequest(ctx, sqlcgen.InsertGrantRequestParams{
 		Subject:             subject,
 		RequestedScopes:     scopes,
-		Depth:               depth,
+		Kind:                string(validKind),
+		Depth:               nullableDepth(depth),
 		RequestedTtlSeconds: toInt4(ttlSeconds),
 		Justification:       justification,
 	})
@@ -158,6 +162,7 @@ func (s *Store) ApproveGrantRequest(ctx context.Context, id, decidedBy string) (
 
 	grantRow, err := qtx.InsertGrant(ctx, sqlcgen.InsertGrantParams{
 		Subject:   req.Subject,
+		Kind:      req.Kind,
 		Depth:     req.Depth,
 		ExpiresAt: toTimestamptz(expiresAt),
 	})
@@ -201,7 +206,8 @@ func (s *Store) ApproveGrantRequest(ctx context.Context, id, decidedBy string) (
 		ID:        grantRow.ID,
 		Subject:   grantRow.Subject,
 		Scopes:    req.RequestedScopes,
-		Depth:     grantRow.Depth,
+		Kind:      GrantKind(grantRow.Kind),
+		Depth:     depthOrEmpty(grantRow.Depth),
 		CreatedAt: grantRow.CreatedAt,
 		ExpiresAt: grantRow.ExpiresAt,
 		RevokedAt: grantRow.RevokedAt,
