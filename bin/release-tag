@@ -60,11 +60,11 @@ fi
 # check runs, and a repo with only Actions returns state "pending" from
 # /status forever.
 #
-# There is deliberately no --skip-ci-check here. ci.yml filters per *job*
-# behind an always-running `ci-ok` gate, so every commit on main produces real
-# check-run conclusions — an empty list means something is wrong, not that the
-# commit legitimately triggered nothing. A flag to bypass this could only ever
-# be used to tag an unverified main.
+# There is deliberately no --skip-ci-check here. ci.yml has no workflow-level
+# `paths:` filter — it starts on every push to main and filters per *job* — so
+# every commit produces real check-run conclusions. An empty list means
+# something is wrong, not that the commit legitimately triggered nothing. A
+# flag to bypass this could only ever be used to tag an unverified main.
 if ! command -v gh >/dev/null 2>&1; then
   echo "gh is required to verify CI before tagging." >&2
   exit 1
@@ -84,8 +84,8 @@ if [ -z "$runs" ]; then
 fi
 
 # success/skipped/neutral are all acceptable outcomes; anything else —
-# failure, cancelled, timed_out, or a run still going — is not. (A skipped
-# half is normal: ci-ok is the aggregate gate and concludes either way.)
+# failure, cancelled, timed_out, or a run still going — is not. A skipped half
+# is normal: a one-sided commit runs one job and skips the other.
 if bad=$(echo "$runs" | grep -Ev '^(success|skipped|neutral)\b') && [ -n "$bad" ]; then
   echo "main is not green on $main_tip:" >&2
   echo "$bad" | sed 's/^/  /' >&2

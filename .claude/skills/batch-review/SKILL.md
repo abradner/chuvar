@@ -67,20 +67,21 @@ Worked example: #16–#20 were interstitials, #21 the followup.
 
 **CI** — `.github/workflows/ci.yml`, on every PR and push to main. A
 `dorny/paths-filter` job splits `backend/` from `frontend/`; the halves run
-conditionally; an `if: always()` **`ci-ok`** job aggregates them and is the
-intended required check.
+conditionally.
 
 Two consequences for this workflow:
 
 - **Checks always conclude here.** The filtering is per-*job*, not per-
-  workflow, so every commit produces real check-run conclusions. A phase
-  gate waiting on "a concluded CI run" can never hang, and `bin/release-tag`
-  never faces an empty check list. (Sibling repos that filter at the
-  workflow level need an escape hatch for exactly that; chuvar does not, and
-  adding one would only ever mean tagging an unverified main.)
+  workflow: the workflow itself has no `paths:` filter, so it starts on
+  every commit and the `changes` job always runs. A phase gate waiting on "a
+  concluded CI run" can never hang, and `bin/release-tag` never faces an
+  empty check list. (Sibling repos that filter at the workflow level need an
+  escape hatch for exactly that; chuvar does not, and adding one would only
+  ever mean tagging an unverified main.)
 - **A skipped job is not a passing job.** A one-sided PR shows no job for
-  the other half, so green means "no failures", not "tested". `ci-ok` emits
-  a warning when both halves skip.
+  the other half, so green means "no failures", not "tested" — and nothing
+  announces that. Read *which* jobs ran, not just the colour, before
+  treating a green as coverage.
 
 > **Not yet built — do not read as current behaviour.** Planned: skip CI on
 > main for interstitials, and always run it in full on the followup
@@ -339,11 +340,10 @@ same numbers.)
 
 - **Do not wait on Codex.** With auto-review off it never posts to an
   interstitial; including it burns the fallback every batch.
-- **CI always concludes here**, because `ci.yml` filters per job behind an
-  always-running `ci-ok` gate rather than per workflow. So "every
-  interstitial has a concluded CI run" is always reachable and needs no
-  special case — but read `ci-ok`'s warning line: green with both halves
-  skipped means nothing ran.
+- **CI always concludes here**, because `ci.yml` filters per job rather than
+  per workflow, so the run always starts. "Every interstitial has a
+  concluded CI run" is always reachable and needs no special case — but
+  green with both halves skipped means nothing ran, and nothing says so.
 
 **Followup reactivity.** Watch the followup by subscription + CI from the
 orchestrating session, which holds the batch ledger. Not a toggle-spawned
@@ -474,7 +474,7 @@ gh api repos/{owner}/{repo}/pulls/N/requested_reviewers -X POST \
 | "Generated no new comments" | Real bugs sit in the suppressed-confidence block below it | Open the `<details>` block |
 | "Reviewed N out of M changed files" | A partial pass reading as a complete one | Read the count; close the gap yourself in synthesis |
 | A new test passing first run | It may pass against unfixed code — a harness not matching production | Show it failing first. If it won't fail, the harness is wrong or the bug isn't there (AGENTS.md §6) |
-| A green `ci-ok` | Both halves may have skipped — green means "no failures", not "tested" | Check which jobs actually ran |
+| A green CI run | Both halves may have skipped — green means "no failures", not "tested" | Check which jobs actually ran, not just the colour |
 
 ### Cap the reactive rounds at three
 
