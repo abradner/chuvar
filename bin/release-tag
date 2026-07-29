@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Cut a timestamp release tag at the current tip of main and push it.
+#
+# Today the tag only marks a release point — CI proves the tip correct, but
+# there is no image build yet (deployment undecided, AGENTS.md §5). When one
+# lands it should trigger from v* tags, and every tagged train is a candidate.
+#
+# When to run it:
+#   - after a batch-review merge train completes (SKILL.md Phase 8)
+#   - after a solo impactful commit lands on main
+#
+# Usage:  bin/release-tag [--dry-run]
+#
+# The tag is v<UTC yyyymmddHHMM>. Computed ONCE and reused, so the tag that is
+# created is always the tag that is pushed — building it twice from `date`
+# can straddle a minute boundary and push a ref that doesn't exist.
+set -euo pipefail
+
+DRY_RUN=false
+
+# Explicit allow-list over a loop, not `[ "$1" = --dry-run ]`: an unrecognised
+# argument must be an error, because the failure mode of silently ignoring a
+# typo'd `--dryrun` is a real tag-and-push when a rehearsal was intended. The
+# loop (rather than inspecting $1 alone) means a second flag can't be dropped
+# on the floor either.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true ;;
+    -h|--help)
+      echo "Usage: bin/release-tag [--dry-run]"
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      echo "Usage: bin/release-tag [--dry-run]" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+# --tags as well as main: the collision check below is worthless if the
+# remote's tags were never fetched, and `git fetch origin main` alone does not
+# reliably bring them down. Without this, a tag someone else already published
+# passes the local check, `git tag` succeeds, and the push fails — leaving a
+# local tag behind that blocks the retry.
+git fetch origin main --tags --quiet
+
+main_tip=$(git rev-parse origin/main)
+tag="v$(date -u +%Y%m%d%H%M)"
+
+if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+  echo "Tag $tag already exists — wait a minute or delete it first." >&2
+  exit 1
+fi
+
+# A tag is a claim that this commit is good, so check rather than trusting the
+# operator's memory of a PR run — the merge commit is a new SHA with its own
+# run. Check runs (not the legacy combined status API): GitHub Actions reports
+# check runs, and a repo with only Actions returns state "pending" from
+# /status forever.
+#
+# There is deliberately no --skip-ci-check here. ci.yml has no workflow-level
+# `paths:` filter — it starts on every push to main and filters per *job* — so
+# every commit produces real check-run conclusions. An empty list means
+# something is wrong, not that the commit legitimately triggered nothing. A
+# flag to bypass this could only ever be used to tag an unverified main.
+if ! command -v gh >/dev/null 2>&1; then
+  echo "gh is required to verify CI before tagging." >&2
+  exit 1
+fi
+
+echo "Checking CI on $main_tip …"
+# `gh api --jq` uses gh's built-in jq engine, so standalone jq is NOT a
+# dependency here (it isn't installed on every dev host that has gh).
+runs=$(gh api "repos/{owner}/{repo}/commits/$main_tip/check-runs" \
+         --jq '.check_runs[] | "\(.conclusion // "RUNNING")\t\(.name)"')
+
+if [ -z "$runs" ]; then
+  echo "No check runs found for $main_tip — refusing to tag an unverified" >&2
+  echo "commit. ci.yml runs on every push to main, so an empty list means the" >&2
+  echo "workflow did not start; investigate rather than working around it." >&2
+  exit 1
+fi
+
+# success/skipped/neutral are all acceptable outcomes; anything else —
+# failure, cancelled, timed_out, or a run still going — is not. A skipped half
+# is normal: a one-sided commit runs one job and skips the other.
+if bad=$(echo "$runs" | grep -Ev '^(success|skipped|neutral)\b') && [ -n "$bad" ]; then
+  echo "main is not green on $main_tip:" >&2
+  echo "$bad" | sed 's/^/  /' >&2
+  echo "Refusing to tag." >&2
+  exit 1
+fi
+echo "CI green on $main_tip."
+
+echo "Tagging origin/main ($(git log -1 --oneline "$main_tip"))"
+echo "  tag: $tag"
+
+if $DRY_RUN; then
+  echo "(dry run — nothing created or pushed)"
+  exit 0
+fi
+
+# Everything above — the fetch, the CI query — happened against a snapshot of
+# origin/main. If another merge landed in the meantime, tagging the captured
+# tip would release a commit that is no longer main's head. Re-check
+# immediately before tagging.
+#
+# This NARROWS the window; it does not close it. git offers no
+# compare-and-swap conditioned on another ref, so a merge landing between this
+# check and the push below is still possible — just now measured in
+# milliseconds rather than in however long the CI query took.
+current_tip=$(git ls-remote origin refs/heads/main | cut -f1)
+if [ "$current_tip" != "$main_tip" ]; then
+  echo "origin/main moved while this script was running:" >&2
+  echo "  verified: $main_tip" >&2
+  echo "  now:      $current_tip" >&2
+  echo "Re-run to verify and tag the new tip." >&2
+  exit 1
+fi
+
+git tag -a "$tag" -m "Release $tag" "$main_tip"
+git push origin "$tag"
+
+echo
+echo "Pushed $tag. No build workflow exists yet; when one lands it should"
+echo "trigger from v* tags and this tag marks the release point."
