@@ -139,7 +139,10 @@ describe("GrantsPage", () => {
 
   it("does not create a grant when the TOTP prompt is cancelled", async () => {
     vi.mocked(api.listGrants).mockResolvedValue([]);
-    vi.spyOn(window, "prompt").mockReturnValue(null);
+    // window.prompt is already spied in beforeEach — re-spying here (rather
+    // than adjusting the existing spy's return value) would stack a second
+    // spy on top of it. Found in review.
+    vi.mocked(window.prompt).mockReturnValue(null);
 
     render(<GrantsPage />);
     await waitFor(() => expect(api.listGrants).toHaveBeenCalled());
@@ -191,7 +194,7 @@ describe("GrantsPage", () => {
   it("renews a grant with the entered TTL and TOTP code", async () => {
     vi.mocked(api.listGrants).mockResolvedValue([sampleGrant]);
     vi.mocked(api.renewGrant).mockResolvedValue(sampleGrant);
-    vi.spyOn(window, "prompt").mockReturnValueOnce("30").mockReturnValueOnce("654321");
+    vi.mocked(window.prompt).mockReturnValueOnce("30").mockReturnValueOnce("654321");
 
     render(<GrantsPage />);
     await screen.findByText("identity.basic");
@@ -203,7 +206,7 @@ describe("GrantsPage", () => {
 
   it("does not renew when the TTL prompt is cancelled", async () => {
     vi.mocked(api.listGrants).mockResolvedValue([sampleGrant]);
-    vi.spyOn(window, "prompt").mockReturnValueOnce(null);
+    vi.mocked(window.prompt).mockReturnValueOnce(null);
 
     render(<GrantsPage />);
     await screen.findByText("identity.basic");
@@ -215,7 +218,7 @@ describe("GrantsPage", () => {
 
   it("rejects a non-numeric renewal TTL without calling renewGrant", async () => {
     vi.mocked(api.listGrants).mockResolvedValue([sampleGrant]);
-    vi.spyOn(window, "prompt").mockReturnValueOnce("not-a-number");
+    vi.mocked(window.prompt).mockReturnValueOnce("not-a-number");
 
     render(<GrantsPage />);
     await screen.findByText("identity.basic");

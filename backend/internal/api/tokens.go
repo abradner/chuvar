@@ -107,8 +107,34 @@ func generateToken() (string, error) {
 
 // createToken handles POST /api/tokens. Issues a new device/reviewer token —
 // the plaintext is generated server-side (never client-supplied, so there's no
-// way to request a weak or predictable token) and returned once in the response.
+// way to request a weak or predictable token) and returned once in the
+// response, alongside a fresh TOTP enrollment URI.
+//
+// Gated by TOTP conditionally, not via requireTOTP's unconditional wrap like
+// createGrant/approveGrantRequest/approveStagedDiff/renewGrant: once at least
+// one enrolled device exists (CountEnrolledReviewerTokens > 0), a valid code
+// is required from the caller, same as those routes. Below that count — a
+// fresh install, or every device having been revoked — no code is required,
+// because the bootstrap token this endpoint's first real call authenticates
+// with (cmd/apiserver's bootstrapReviewerToken) is deliberately created with
+// no TOTP secret of its own; an unconditional requireTOTP wrap would make it
+// impossible to ever mint the operator's first enrolled device. Once that
+// first device is enrolled, this same conditional check requires TOTP from
+// then on — including from the bootstrap token itself, which (having no
+// secret) can then never pass it again, correctly retiring it back to
+// break-glass status. Closes the gap where a stolen bearer token alone could
+// mint a fresh token, read its otpauth:// URI from the response, and
+// self-enroll — defeating every other requireTOTP gate. Found in review.
 func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
+	enrolledCount, err := a.Store.CountEnrolledReviewerTokens(r.Context())
+	if err != nil {
+		writeStoreError(w, http.StatusInternalServerError, "createToken", "could not check enrollment status", err)
+		return
+	}
+	if enrolledCount > 0 && !a.verifyTOTPCode(w, r) {
+		return
+	}
+
 	var req createTokenRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("decoding request body: %w", err))

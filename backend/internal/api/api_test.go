@@ -60,6 +60,42 @@ func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 	return srv, st
 }
 
+// testServerWithBootstrapToken is testServer's setup but seeds a single
+// unenrolled token (no TOTP secret) instead — the same shape as
+// cmd/apiserver's real bootstrapReviewerToken, for tests exercising
+// createToken's conditional TOTP gate at the "zero enrolled devices yet"
+// state.
+func testServerWithBootstrapToken(t *testing.T) (*httptest.Server, string) {
+	t.Helper()
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set; skipping api integration tests")
+	}
+	if err := db.Migrate(url); err != nil {
+		t.Fatalf("db.Migrate() error = %v", err)
+	}
+
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests`); err != nil {
+		t.Fatalf("truncating tables: %v", err)
+	}
+
+	st := store.New(pool)
+	const bootstrapToken = "bootstrap-token-do-not-use-in-prod"
+	if _, err := st.CreateReviewerToken(ctx, "bootstrap", bootstrapToken, ""); err != nil {
+		t.Fatalf("seeding bootstrap token: %v", err)
+	}
+	a := New(st, embed.Stub{}, summarize.Stub{}, "http://localhost:5173", 10*time.Second)
+	srv := httptest.NewServer(a.Routes())
+	t.Cleanup(srv.Close)
+	return srv, bootstrapToken
+}
+
 // doJSON sends an authenticated request (the common case for these tests — most
 // of them are testing business logic, not the auth gate itself, which has its own
 // dedicated tests below).
@@ -190,6 +226,37 @@ func TestRequireTOTP_MissingHeaderRejected(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("POST /api/grants with no TOTP header: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestRequireTOTP_WhitespaceOnlyHeaderTreatedAsMissing(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// A whitespace-only header (e.g. an accidental space pasted alongside the
+	// code) must be treated the same as an absent one — errTOTPRequired, not
+	// errTOTPInvalid, which the pre-fix code would return since " " != "".
+	// Found in review.
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/grants", bytes.NewReader(mustJSON(t, createGrantRequest{
+		Subject: "agent-a",
+		Scopes:  []string{"identity.basic"},
+	})))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testAuthToken)
+	req.Header.Set("X-Chuvar-TOTP-Code", "   ")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /api/grants with a whitespace-only TOTP header: status = %d, want 401", resp.StatusCode)
+	}
+	body := decodeInto[errorResponse](t, resp)
+	if body.Error != errTOTPRequired.Error() {
+		t.Errorf("error = %q, want %q (whitespace-only should read as \"required\", not \"invalid\")", body.Error, errTOTPRequired.Error())
 	}
 }
 
@@ -613,6 +680,33 @@ func TestRoutes_CORSReflectsConfiguredOriginOnly(t *testing.T) {
 	}
 }
 
+func TestRoutes_CORSAllowsTOTPHeader(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Without X-Chuvar-TOTP-Code in Access-Control-Allow-Headers, a browser's
+	// preflight for any requireTOTP-gated mutation (createGrant, approve*,
+	// renewGrant) rejects the real request client-side before it reaches the
+	// server — the frontend's TOTP-gated actions would be unreachable
+	// cross-origin. Found in review.
+	req, err := http.NewRequest(http.MethodOptions, srv.URL+"/api/grants", nil)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Origin", "http://localhost:5173")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "content-type,x-chuvar-totp-code")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	got := resp.Header.Get("Access-Control-Allow-Headers")
+	if !strings.Contains(got, "X-Chuvar-TOTP-Code") {
+		t.Errorf("Access-Control-Allow-Headers = %q, want it to include X-Chuvar-TOTP-Code", got)
+	}
+}
+
 func TestRoutes_OPTIONSPreflightDoesNotRequireAuth(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -822,6 +916,60 @@ func TestCreateToken_LifecycleIssueAuthenticateRevoke(t *testing.T) {
 	resp = doJSON(t, http.MethodPost, srv.URL+"/api/tokens/"+created.ID+"/revoke", nil)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("POST /api/tokens/{id}/revoke (already revoked) status = %d, want 409", resp.StatusCode)
+	}
+}
+
+func TestCreateToken_BootstrapTokenCreatesFirstEnrolledDeviceWithoutTOTP(t *testing.T) {
+	srv, bootstrapToken := testServerWithBootstrapToken(t)
+
+	// The bootstrap token has no TOTP secret of its own — this is the one
+	// call requireTOTP-style gating must not block, or the operator could
+	// never mint a first real device via the API at all.
+	resp := doJSONWithAuth(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "first-device"}, bootstrapToken)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /api/tokens from the bootstrap token with zero enrolled devices: status = %d, want 201", resp.StatusCode)
+	}
+}
+
+func TestCreateToken_RequiresTOTPOnceAnEnrolledDeviceExists(t *testing.T) {
+	srv, _ := testServer(t) // testServer seeds one enrolled token already
+
+	// No TOTP header at all: must be rejected once an enrolled device exists,
+	// even though this same call would have succeeded against a fresh
+	// install (see the bootstrap test above).
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/tokens", bytes.NewReader(mustJSON(t, createTokenRequest{Label: "second-device"})))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testAuthToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /api/tokens with no TOTP code once a device is enrolled: status = %d, want 401 (closes the self-enrollment bypass — found in review)", resp.StatusCode)
+	}
+}
+
+func TestCreateToken_BootstrapTokenCannotCreateFurtherTokensOnceEnrolledDeviceExists(t *testing.T) {
+	srv, bootstrapTokenValue := testServerWithBootstrapToken(t)
+
+	// Bootstrap creates the first real device — succeeds, no TOTP required
+	// (mirrors the test above).
+	first := decodeInto[createTokenResponse](t, doJSONWithAuth(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "first-device"}, bootstrapTokenValue))
+	if first.Token == "" {
+		t.Fatal("expected the first device token to be created")
+	}
+
+	// The bootstrap token tries again, now that one enrolled device exists.
+	// It can never supply a valid TOTP code (it has no secret), so this must
+	// be rejected — correctly retiring bootstrap back to break-glass-only
+	// status rather than letting it keep minting tokens indefinitely.
+	resp := doJSONWithAuth(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "second-device-via-bootstrap"}, bootstrapTokenValue)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /api/tokens from the (unenrolled) bootstrap token once a real device is enrolled: status = %d, want 401", resp.StatusCode)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 type Querier interface {
 	ApproveGrantRequest(ctx context.Context, arg ApproveGrantRequestParams) (int64, error)
 	CountActiveReviewerTokens(ctx context.Context) (int64, error)
+	CountEnrolledReviewerTokens(ctx context.Context) (int64, error)
 	DenyGrantRequest(ctx context.Context, arg DenyGrantRequestParams) (int64, error)
 	FactVisibleToScopes(ctx context.Context, arg FactVisibleToScopesParams) (bool, error)
 	// embedding_1/embedding_2 are the same repeated-named-param workaround used

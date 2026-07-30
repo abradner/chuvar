@@ -229,23 +229,41 @@ func (a *API) requireAuth(next http.Handler) http.Handler {
 // access to the reviewer's environment.
 func (a *API) requireTOTP(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		code := r.Header.Get("X-Chuvar-TOTP-Code")
-		if code == "" {
-			writeError(w, http.StatusUnauthorized, errTOTPRequired)
-			return
-		}
-		reviewer := reviewerFromContext(r.Context())
-		ok, err := a.Store.VerifyReviewerTOTP(r.Context(), reviewer.ID, code)
-		if err != nil {
-			writeStoreError(w, http.StatusInternalServerError, "requireTOTP", "could not verify code", err)
-			return
-		}
-		if !ok {
-			writeError(w, http.StatusUnauthorized, errTOTPInvalid)
+		if !a.verifyTOTPCode(w, r) {
 			return
 		}
 		next(w, r)
 	}
+}
+
+// verifyTOTPCode checks the X-Chuvar-TOTP-Code header against the authenticated
+// reviewer's enrolled secret, writing the appropriate error response and
+// returning false on any failure. Factored out of requireTOTP so createToken
+// (tokens.go) can apply the same check conditionally rather than as an
+// unconditional route wrapper — see that function's own doc comment for why.
+func (a *API) verifyTOTPCode(w http.ResponseWriter, r *http.Request) bool {
+	// TrimSpace before the empty check, not after: a whitespace-only header
+	// (e.g. an accidental space pasted alongside the code) is non-empty as
+	// typed, so without this it reaches VerifyReviewerTOTP and comes back
+	// "invalid" instead of the more accurate "required" — a confusing
+	// distinction to debug from the caller's side for no real benefit. Found
+	// in review.
+	code := strings.TrimSpace(r.Header.Get("X-Chuvar-TOTP-Code"))
+	if code == "" {
+		writeError(w, http.StatusUnauthorized, errTOTPRequired)
+		return false
+	}
+	reviewer := reviewerFromContext(r.Context())
+	ok, err := a.Store.VerifyReviewerTOTP(r.Context(), reviewer.ID, code)
+	if err != nil {
+		writeStoreError(w, http.StatusInternalServerError, "verifyTOTPCode", "could not verify code", err)
+		return false
+	}
+	if !ok {
+		writeError(w, http.StatusUnauthorized, errTOTPInvalid)
+		return false
+	}
+	return true
 }
 
 var (
@@ -289,7 +307,12 @@ func (a *API) cors(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", a.AllowedOrigin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			// X-Chuvar-TOTP-Code: without it here, a browser's CORS preflight
+			// for any requireTOTP-gated mutation (createGrant, approve*,
+			// renewGrant) rejects the real request client-side before it ever
+			// reaches the server — the frontend's TOTP-gated actions would be
+			// unreachable cross-origin. Found in review.
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Chuvar-TOTP-Code")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

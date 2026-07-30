@@ -21,3 +21,6 @@ UPDATE reviewer_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NU
 
 -- name: CountActiveReviewerTokens :one
 SELECT count(*) FROM reviewer_tokens WHERE revoked_at IS NULL;
+
+-- name: CountEnrolledReviewerTokens :one
+SELECT count(*) FROM reviewer_tokens WHERE revoked_at IS NULL AND totp_secret IS NOT NULL;

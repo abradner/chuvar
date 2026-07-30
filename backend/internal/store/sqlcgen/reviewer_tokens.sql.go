@@ -21,6 +21,17 @@ func (q *Queries) CountActiveReviewerTokens(ctx context.Context) (int64, error) 
 	return count, err
 }
 
+const countEnrolledReviewerTokens = `-- name: CountEnrolledReviewerTokens :one
+SELECT count(*) FROM reviewer_tokens WHERE revoked_at IS NULL AND totp_secret IS NOT NULL
+`
+
+func (q *Queries) CountEnrolledReviewerTokens(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countEnrolledReviewerTokens)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const getReviewerTOTPSecret = `-- name: GetReviewerTOTPSecret :one
 SELECT totp_secret FROM reviewer_tokens WHERE id = $1
 `

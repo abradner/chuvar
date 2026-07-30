@@ -79,7 +79,10 @@ export function GrantsPage() {
     // surface.
     let totpCode = "";
     if (action === "approve") {
-      totpCode = window.prompt("Enter TOTP code to approve") ?? "";
+      // Trimmed: browsers commonly preserve accidental leading/trailing spaces
+      // when pasting, which would otherwise cause server-side TOTP validation
+      // to fail even though the digits themselves are correct. Found in review.
+      totpCode = window.prompt("Enter TOTP code to approve")?.trim() ?? "";
       if (!totpCode) return;
     }
     setBusyId(id);
@@ -128,7 +131,8 @@ export function GrantsPage() {
       setError("TTL must be a positive whole number of minutes");
       return;
     }
-    const totpCode = window.prompt("Enter TOTP code to renew") ?? "";
+    // Trimmed — see decideRequest's matching comment above.
+    const totpCode = window.prompt("Enter TOTP code to renew")?.trim() ?? "";
     if (!totpCode) return;
 
     setBusyId(id);
@@ -189,7 +193,8 @@ export function GrantsPage() {
     // createGrant is a direct capability grant — the same requireTOTP gate as
     // approving a grant request (it's the other REST path that ever creates a
     // real grant; see the backend's Routes doc comment).
-    const totpCode = window.prompt("Enter TOTP code to create this grant") ?? "";
+    // Trimmed — see decideRequest's matching comment above.
+    const totpCode = window.prompt("Enter TOTP code to create this grant")?.trim() ?? "";
     if (!totpCode) return;
 
     setCreating(true);

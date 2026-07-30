@@ -159,3 +159,17 @@ func (s *Store) CountActiveReviewerTokens(ctx context.Context) (int64, error) {
 	}
 	return n, nil
 }
+
+// CountEnrolledReviewerTokens reports how many non-revoked tokens have a TOTP
+// secret enrolled — used by createToken (internal/api/tokens.go) to decide
+// whether minting a new token requires a TOTP code from the caller. Zero means
+// either a fresh install or that only the TOTP-less bootstrap token exists;
+// either way, the operator has no enrolled device yet to prove possession of,
+// so token creation can't require one without becoming unbootstrappable.
+func (s *Store) CountEnrolledReviewerTokens(ctx context.Context) (int64, error) {
+	n, err := s.q.CountEnrolledReviewerTokens(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("store: count enrolled reviewer tokens: %w", err)
+	}
+	return n, nil
+}

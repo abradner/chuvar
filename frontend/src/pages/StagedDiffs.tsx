@@ -73,7 +73,10 @@ export function StagedDiffsPage() {
     // grant approval — reject isn't, since it only discards a proposal.
     let totpCode = "";
     if (action === "approve") {
-      totpCode = window.prompt("Enter TOTP code to approve") ?? "";
+      // Trimmed: browsers commonly preserve accidental leading/trailing spaces
+      // when pasting, which would otherwise cause server-side TOTP validation
+      // to fail even though the digits themselves are correct. Found in review.
+      totpCode = window.prompt("Enter TOTP code to approve")?.trim() ?? "";
       if (!totpCode) return;
     }
     setBusyId(id);
