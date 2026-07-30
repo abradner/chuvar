@@ -408,6 +408,29 @@ func TestReadWithScopeCheck_SummaryDepthRedactsContent_ViaMCP(t *testing.T) {
 	}
 }
 
+func TestGrantedScopeStrs_DedupesWhenSameScopeAtDifferentDepths(t *testing.T) {
+	// GrantedScopeDepths (its query is DISTINCT on (scope, depth), not scope
+	// alone) can legitimately return the same scope twice when two active
+	// grants cover it at different depths. grantedScopeStrs must not let
+	// that duplicate the scope in the audit log's recorded scopes. Found in
+	// review.
+	granted := []store.GrantedScope{
+		{Scope: "identity.basic", Depth: "summary"},
+		{Scope: "identity.basic", Depth: "full"},
+		{Scope: "preferences.coffee", Depth: "facts"},
+	}
+	got := grantedScopeStrs(granted)
+	want := []string{"identity.basic", "preferences.coffee"}
+	if len(got) != len(want) {
+		t.Fatalf("grantedScopeStrs() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("grantedScopeStrs() = %v, want %v (order preserved, duplicates removed)", got, want)
+		}
+	}
+}
+
 func TestRequestGrant_ViaMCP(t *testing.T) {
 	session, st := testSession(t, "agent-a")
 	ctx := context.Background()

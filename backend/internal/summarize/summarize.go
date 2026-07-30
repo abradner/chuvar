@@ -11,6 +11,7 @@ package summarize
 import (
 	"context"
 	"fmt"
+	"unicode/utf8"
 )
 
 // Summarizer produces a shorter, disclosure-appropriate summary of content
@@ -32,5 +33,7 @@ type Summarizer interface {
 type Stub struct{}
 
 func (Stub) Summarize(_ context.Context, content string) (string, error) {
-	return fmt.Sprintf("[stub summary: %d characters, no real summarizer wired yet]", len(content)), nil
+	// utf8.RuneCountInString, not len(content): len counts bytes, which
+	// over-reports length for any non-ASCII content. Found in review.
+	return fmt.Sprintf("[stub summary: %d characters, no real summarizer wired yet]", utf8.RuneCountInString(content)), nil
 }

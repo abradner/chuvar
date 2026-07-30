@@ -146,13 +146,23 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 	})
 }
 
-// grantedScopeStrs discards the depth half of each pair, for the scope.Missing
-// visibility check and audit logging — both only ever needed which scopes were
-// granted, not at what depth (depth only matters once SearchFacts runs).
+// grantedScopeStrs discards the depth half of each pair and dedupes, for the
+// scope.Missing visibility check and audit logging — both only ever needed
+// which scopes were granted, not at what depth (depth only matters once
+// SearchFacts runs). Deduping matters here specifically because
+// GrantedScopeDepths is DISTINCT on (scope, depth), not scope alone: a
+// subject holding two active grants over the same scope at different depths
+// produces two rows with an identical Scope, which would otherwise duplicate
+// that scope in the audit log's recorded scopes list. Found in review.
 func grantedScopeStrs(granted []store.GrantedScope) []string {
-	out := make([]string, len(granted))
-	for i, g := range granted {
-		out[i] = g.Scope
+	seen := make(map[string]struct{}, len(granted))
+	out := make([]string, 0, len(granted))
+	for _, g := range granted {
+		if _, ok := seen[g.Scope]; ok {
+			continue
+		}
+		seen[g.Scope] = struct{}{}
+		out = append(out, g.Scope)
 	}
 	return out
 }

@@ -93,12 +93,16 @@ type Fact struct {
 }
 
 // GrantedScope pairs a granted scope with the depth of the grant that covers
-// it, for depth-aware reads (SearchFacts). Unlike GrantedScopes' flat
-// deduped []string, this doesn't collapse multiple covering grants into one
-// entry — SearchFacts needs every covering grant's depth to compute an
-// effective depth per fact (facts.go's effectiveDepth), since a subject can
-// hold more than one active grant over the same or overlapping scope at
-// different depths.
+// it, for depth-aware reads (SearchFacts). Unlike GrantedScopes' flat deduped
+// []string, this can return more than one entry per scope: the backing query
+// (GrantedScopeDepths) is DISTINCT on (scope, depth), not scope alone, so two
+// active grants covering the same scope at different depths each produce
+// their own row. SearchFacts needs exactly that — every covering grant's
+// depth, not just one of them — to compute an effective depth per fact (see
+// facts.go's effectiveDepth). What it does NOT do is collapse two grants that
+// happen to share both the same scope and the same depth; those are
+// legitimately indistinguishable for this purpose and the DISTINCT collapses
+// them into one row. Found in review.
 type GrantedScope struct {
 	Scope string
 	Depth string
