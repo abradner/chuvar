@@ -36,6 +36,7 @@ type Fact struct {
 	ValidAt            time.Time
 	InvalidAt          *time.Time
 	ExpiredAt          *time.Time
+	Summary            *string
 }
 
 type FactScope struct {

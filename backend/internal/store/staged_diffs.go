@@ -237,7 +237,17 @@ func (s *Store) RejectDiff(ctx context.Context, diffID, decidedBy string) error 
 // diff committed. v0 collapses "approve" and "commit" into a single human action;
 // the schema keeps `approved` as a distinct status from `committed` so a later
 // version can split them (e.g. batched commits) without a schema change.
-func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedding []float32) (Fact, error) {
+//
+// embedding and summary are both computed by the caller (api.approveStagedDiff)
+// before this call, outside this transaction — real implementations of either are
+// external/non-trivial-latency calls, and CommitDiff holds a row lock on the
+// target fact (below) for its duration; making either call inside that lock's
+// scope would turn an external call's latency into lock-hold time. summary of ""
+// means "no summarizer configured or it returned nothing," stored as NULL, not as
+// an empty-but-present summary — see facts.go's SearchFacts on why that
+// distinction matters (fail closed to no-content, not empty-content, at summary
+// depth).
+func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedding []float32, summary string) (Fact, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Fact{}, fmt.Errorf("store: begin commit tx: %w", err)
@@ -282,8 +292,14 @@ func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedd
 		return Fact{}, err
 	}
 
+	var summaryParam *string
+	if summary != "" {
+		summaryParam = &summary
+	}
+
 	factRow, err := qtx.InsertFact(ctx, sqlcgen.InsertFactParams{
 		Content:            diff.Content,
+		Summary:            summaryParam,
 		Embedding:          embParam,
 		SourceStagedDiffID: diffID,
 	})

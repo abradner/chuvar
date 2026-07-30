@@ -16,6 +16,7 @@ import (
 	"github.com/abradner/chuvar/backend/internal/db"
 	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/store"
+	"github.com/abradner/chuvar/backend/internal/summarize"
 )
 
 // testAuthToken is the plaintext of a reviewer token seeded into the store by
@@ -53,7 +54,7 @@ func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 	if _, err := st.CreateReviewerToken(ctx, "test-reviewer", testAuthToken, testTOTPSecret); err != nil {
 		t.Fatalf("seeding reviewer token: %v", err)
 	}
-	a := New(st, embed.Stub{}, "http://localhost:5173", 10*time.Second)
+	a := New(st, embed.Stub{}, summarize.Stub{}, "http://localhost:5173", 10*time.Second)
 	srv := httptest.NewServer(a.Routes())
 	t.Cleanup(srv.Close)
 	return srv, st
@@ -473,7 +474,7 @@ func TestGetFact_ViaAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
-	fact, err := st.CommitDiff(ctx, d.ID, "human-reviewer", vec)
+	fact, err := st.CommitDiff(ctx, d.ID, "human-reviewer", vec, "")
 	if err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
@@ -556,7 +557,7 @@ func TestNew_WildcardOriginRejected(t *testing.T) {
 			t.Fatal("New() with CORS_ALLOWED_ORIGIN=\"*\": want panic, got none")
 		}
 	}()
-	New(nil, nil, "*", 10*time.Second)
+	New(nil, nil, nil, "*", 10*time.Second)
 }
 
 func TestNew_NullOriginRejected(t *testing.T) {
@@ -565,7 +566,7 @@ func TestNew_NullOriginRejected(t *testing.T) {
 			t.Fatal(`New() with CORS_ALLOWED_ORIGIN="null": want panic, got none`)
 		}
 	}()
-	New(nil, nil, "null", 10*time.Second)
+	New(nil, nil, nil, "null", 10*time.Second)
 }
 
 func TestNew_OriginWithPathRejected(t *testing.T) {
@@ -574,7 +575,7 @@ func TestNew_OriginWithPathRejected(t *testing.T) {
 			t.Fatal("New() with a CORS_ALLOWED_ORIGIN containing a path: want panic, got none")
 		}
 	}()
-	New(nil, nil, "http://localhost:5173/app", 10*time.Second)
+	New(nil, nil, nil, "http://localhost:5173/app", 10*time.Second)
 }
 
 func TestNew_NonPositiveRequestTimeoutRejected(t *testing.T) {
@@ -583,7 +584,7 @@ func TestNew_NonPositiveRequestTimeoutRejected(t *testing.T) {
 			t.Fatal("New() with a zero RequestTimeout: want panic, got none")
 		}
 	}()
-	New(nil, nil, "", 0)
+	New(nil, nil, nil, "", 0)
 }
 
 // slowThenCheckContextEmbedder sleeps past the request timeout, then reports
@@ -630,7 +631,7 @@ func TestWithRequestTimeout_CancelsSlowHandlerContext(t *testing.T) {
 	// RequestTimeout much shorter than the embedder's sleep: without
 	// withRequestTimeout wiring a.RequestTimeout into the handler's context, the
 	// embedder would just sleep out its full duration and report canceled=false.
-	a := New(st, slowThenCheckContextEmbedder{sleep: 200 * time.Millisecond, canceled: canceled}, "", 20*time.Millisecond)
+	a := New(st, slowThenCheckContextEmbedder{sleep: 200 * time.Millisecond, canceled: canceled}, summarize.Stub{}, "", 20*time.Millisecond)
 	srv := httptest.NewServer(a.Routes())
 	t.Cleanup(srv.Close)
 

@@ -91,6 +91,31 @@ func TestGrants_CreateListRevoke(t *testing.T) {
 	}
 }
 
+func TestGrantedScopeDepths_RoundTripsDepthPerScope(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "summary", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"projects.spritz.read"}, "memory", "full", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	depths, err := s.GrantedScopeDepths(ctx, "agent-a")
+	if err != nil {
+		t.Fatalf("GrantedScopeDepths() error = %v", err)
+	}
+	got := map[string]string{}
+	for _, g := range depths {
+		got[g.Scope] = g.Depth
+	}
+	want := map[string]string{"identity.basic": "summary", "projects.spritz.read": "full"}
+	if len(got) != len(want) || got["identity.basic"] != want["identity.basic"] || got["projects.spritz.read"] != want["projects.spritz.read"] {
+		t.Fatalf("GrantedScopeDepths() = %v, want %v", got, want)
+	}
+}
+
 func TestGrants_ExpiredExcludedFromGrantedScopes(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
@@ -190,7 +215,7 @@ func TestStagedDiffs_ProposeCommitAndSupersede(t *testing.T) {
 		t.Fatalf("ProposeDiff() first proposal verdict = %v, want novel", d.DedupeVerdict)
 	}
 
-	fact, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vecA)
+	fact, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vecA, "")
 	if err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
@@ -199,7 +224,7 @@ func TestStagedDiffs_ProposeCommitAndSupersede(t *testing.T) {
 	}
 
 	// Committing an already-committed diff should error.
-	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vecA); err == nil {
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vecA, ""); err == nil {
 		t.Fatal("CommitDiff() on already-committed diff: want error, got nil")
 	}
 
@@ -208,13 +233,13 @@ func TestStagedDiffs_ProposeCommitAndSupersede(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeDiff() (supersede) error = %v", err)
 	}
-	newFact, err := s.CommitDiff(ctx, d2.ID, "human-reviewer", unitVector(1))
+	newFact, err := s.CommitDiff(ctx, d2.ID, "human-reviewer", unitVector(1), "")
 	if err != nil {
 		t.Fatalf("CommitDiff() (supersede) error = %v", err)
 	}
 
 	granted := []string{"preferences.coffee"}
-	results, err := s.SearchFacts(ctx, "coffee", unitVector(1), granted, 10)
+	results, err := s.SearchFacts(ctx, "coffee", unitVector(1), fullDepth(granted), 10)
 	if err != nil {
 		t.Fatalf("SearchFacts() error = %v", err)
 	}
@@ -243,7 +268,7 @@ func TestCommitDiff_ConcurrentSupersessionIsSerialized(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
-	targetFact, err := s.CommitDiff(ctx, original.ID, "human-reviewer", vec)
+	targetFact, err := s.CommitDiff(ctx, original.ID, "human-reviewer", vec, "")
 	if err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
@@ -263,11 +288,11 @@ func TestCommitDiff_ConcurrentSupersessionIsSerialized(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, results[0] = s.CommitDiff(ctx, diffA.ID, "reviewer-a", unitVector(8))
+		_, results[0] = s.CommitDiff(ctx, diffA.ID, "reviewer-a", unitVector(8), "")
 	}()
 	go func() {
 		defer wg.Done()
-		_, results[1] = s.CommitDiff(ctx, diffB.ID, "reviewer-b", unitVector(9))
+		_, results[1] = s.CommitDiff(ctx, diffB.ID, "reviewer-b", unitVector(9), "")
 	}()
 	wg.Wait()
 
@@ -309,11 +334,11 @@ func TestSearchFacts_ScopeWithUnderscoreDoesNotWildcardMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
-	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec); err != nil {
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, ""); err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
-	results, err := s.SearchFacts(ctx, "fact", vec, []string{"projects_alpha"}, 10)
+	results, err := s.SearchFacts(ctx, "fact", vec, fullDepth([]string{"projects_alpha"}), 10)
 	if err != nil {
 		t.Fatalf("SearchFacts() error = %v", err)
 	}
@@ -352,7 +377,7 @@ func TestSearchFacts_FactWithNoScopesExcluded(t *testing.T) {
 		t.Fatalf("inserting scopeless fact: %v", err)
 	}
 
-	results, err := s.SearchFacts(ctx, "fact", unitVector(11), []string{"identity", "projects", "finances"}, 10)
+	results, err := s.SearchFacts(ctx, "fact", unitVector(11), fullDepth([]string{"identity", "projects", "finances"}), 10)
 	if err != nil {
 		t.Fatalf("SearchFacts() error = %v", err)
 	}
@@ -376,7 +401,7 @@ func TestGrantedScopesToSearchFacts_MultiGrantPipelineWithRevocation(t *testing.
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
-	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec); err != nil {
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, ""); err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
@@ -392,7 +417,7 @@ func TestGrantedScopesToSearchFacts_MultiGrantPipelineWithRevocation(t *testing.
 	if err != nil {
 		t.Fatalf("GrantedScopes() error = %v", err)
 	}
-	results, err := s.SearchFacts(ctx, "fact", vec, granted, 10)
+	results, err := s.SearchFacts(ctx, "fact", vec, fullDepth(granted), 10)
 	if err != nil {
 		t.Fatalf("SearchFacts() error = %v", err)
 	}
@@ -410,7 +435,7 @@ func TestGrantedScopesToSearchFacts_MultiGrantPipelineWithRevocation(t *testing.
 	if err != nil {
 		t.Fatalf("GrantedScopes() after revoke error = %v", err)
 	}
-	results, err = s.SearchFacts(ctx, "fact", vec, granted, 10)
+	results, err = s.SearchFacts(ctx, "fact", vec, fullDepth(granted), 10)
 	if err != nil {
 		t.Fatalf("SearchFacts() error = %v", err)
 	}
@@ -453,7 +478,7 @@ func TestStagedDiffs_DedupeExactDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
-	if _, err := s.CommitDiff(ctx, d1.ID, "human-reviewer", vec); err != nil {
+	if _, err := s.CommitDiff(ctx, d1.ID, "human-reviewer", vec, ""); err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
@@ -480,7 +505,7 @@ func TestStagedDiffs_DedupeNearMatchFlaggedAsContradiction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
-	if _, err := s.CommitDiff(ctx, d1.ID, "human-reviewer", base); err != nil {
+	if _, err := s.CommitDiff(ctx, d1.ID, "human-reviewer", base, ""); err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
@@ -502,12 +527,12 @@ func TestSearchFacts_ScopeIntersectionRequiresAllTags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
-	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec); err != nil {
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, ""); err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
 	// Only one of the two required scopes granted: must NOT be returned.
-	partial, err := s.SearchFacts(ctx, "wedding", vec, []string{"relationships.partner"}, 10)
+	partial, err := s.SearchFacts(ctx, "wedding", vec, fullDepth([]string{"relationships.partner"}), 10)
 	if err != nil {
 		t.Fatalf("SearchFacts() (partial grant) error = %v", err)
 	}
@@ -516,7 +541,7 @@ func TestSearchFacts_ScopeIntersectionRequiresAllTags(t *testing.T) {
 	}
 
 	// Both scopes granted: must be returned.
-	full, err := s.SearchFacts(ctx, "wedding", vec, []string{"relationships.partner", "finances.budget"}, 10)
+	full, err := s.SearchFacts(ctx, "wedding", vec, fullDepth([]string{"relationships.partner", "finances.budget"}), 10)
 	if err != nil {
 		t.Fatalf("SearchFacts() (full grant) error = %v", err)
 	}
@@ -525,7 +550,7 @@ func TestSearchFacts_ScopeIntersectionRequiresAllTags(t *testing.T) {
 	}
 
 	// A broader ancestor grant covering both dotted children: must also be returned.
-	ancestor, err := s.SearchFacts(ctx, "wedding", vec, []string{"relationships", "finances"}, 10)
+	ancestor, err := s.SearchFacts(ctx, "wedding", vec, fullDepth([]string{"relationships", "finances"}), 10)
 	if err != nil {
 		t.Fatalf("SearchFacts() (ancestor grant) error = %v", err)
 	}
@@ -543,7 +568,7 @@ func TestSearchFacts_EmptyQueryEmbeddingFallsBackToKeywordOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
-	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec); err != nil {
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, ""); err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
@@ -551,7 +576,7 @@ func TestSearchFacts_EmptyQueryEmbeddingFallsBackToKeywordOnly(t *testing.T) {
 	// error (a bare $4 IS NOT NULL check without the ::vector cast previously failed
 	// at prepare time with "could not determine data type of parameter"), and must
 	// still find the fact via the keyword ranking alone.
-	results, err := s.SearchFacts(ctx, "hiking", nil, []string{"preferences.hiking"}, 10)
+	results, err := s.SearchFacts(ctx, "hiking", nil, fullDepth([]string{"preferences.hiking"}), 10)
 	if err != nil {
 		t.Fatalf("SearchFacts() with no query embedding: unexpected error = %v", err)
 	}
@@ -570,12 +595,219 @@ func TestSearchFacts_NoGrantsReturnsNothing(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	results, err := s.SearchFacts(ctx, "anything", unitVector(5), nil, 10)
+	results, err := s.SearchFacts(ctx, "anything", unitVector(5), fullDepth(nil), 10)
 	if err != nil {
 		t.Fatalf("SearchFacts() error = %v", err)
 	}
 	if len(results) != 0 {
 		t.Fatalf("SearchFacts() with no granted scopes = %+v, want none", results)
+	}
+}
+
+func TestSearchFacts_SummaryDepthRedactsContent(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(30)
+	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a flat white", []string{"preferences.coffee"}, vec, nil, []string{"preferences.coffee"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, "a stub summary of the coffee fact"); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	granted := []GrantedScope{{Scope: "preferences.coffee", Depth: "summary"}}
+	results, err := s.SearchFacts(ctx, "coffee", vec, granted, 10)
+	if err != nil {
+		t.Fatalf("SearchFacts() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchFacts() = %+v, want 1 result", results)
+	}
+	got := results[0]
+	if got.Depth != "summary" {
+		t.Errorf("Depth = %q, want %q", got.Depth, "summary")
+	}
+	if got.Content != "" {
+		t.Errorf("Content = %q, want empty at summary depth", got.Content)
+	}
+	if got.Summary != "a stub summary of the coffee fact" {
+		t.Errorf("Summary = %q, want the committed summary", got.Summary)
+	}
+}
+
+func TestSearchFacts_SummaryDepthWithNoSummaryFailsClosed(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	// Committed with summary = "" (stored as NULL) — simulates a pre-migration
+	// fact or a Summarizer that returned nothing. A summary-depth read of it
+	// must never fall back to Content; that would silently un-enforce the
+	// redaction this depth exists to apply.
+	vec := unitVector(31)
+	d, err := s.ProposeDiff(ctx, "agent-a", "user's least favorite vegetable is celery", []string{"preferences.food"}, vec, nil, []string{"preferences.food"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, ""); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	granted := []GrantedScope{{Scope: "preferences.food", Depth: "summary"}}
+	results, err := s.SearchFacts(ctx, "vegetable", vec, granted, 10)
+	if err != nil {
+		t.Fatalf("SearchFacts() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchFacts() = %+v, want 1 result", results)
+	}
+	got := results[0]
+	if got.Content != "" {
+		t.Errorf("Content = %q, want empty (must never fall back to full content when summary is NULL)", got.Content)
+	}
+	if got.Summary != "" {
+		t.Errorf("Summary = %q, want empty (no summary was ever generated)", got.Summary)
+	}
+}
+
+func TestSearchFacts_FactsAndFullDepthReturnContent(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(32)
+	d, err := s.ProposeDiff(ctx, "agent-a", "user's timezone is Australia/Melbourne", []string{"identity.timezone"}, vec, nil, []string{"identity.timezone"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, "a stub summary"); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	for _, depth := range []string{"facts", "full"} {
+		granted := []GrantedScope{{Scope: "identity.timezone", Depth: depth}}
+		results, err := s.SearchFacts(ctx, "timezone", vec, granted, 10)
+		if err != nil {
+			t.Fatalf("SearchFacts() at depth %q error = %v", depth, err)
+		}
+		if len(results) != 1 {
+			t.Fatalf("SearchFacts() at depth %q = %+v, want 1 result", depth, results)
+		}
+		got := results[0]
+		if got.Depth != depth {
+			t.Errorf("Depth = %q, want %q", got.Depth, depth)
+		}
+		if got.Content != "user's timezone is Australia/Melbourne" {
+			t.Errorf("at depth %q, Content = %q, want the full fact content", depth, got.Content)
+		}
+		if got.Summary != "" {
+			t.Errorf("at depth %q, Summary = %q, want empty (Content and Summary are mutually exclusive)", depth, got.Summary)
+		}
+	}
+}
+
+func TestSearchFacts_EffectiveDepthIntersectsAcrossFactTags(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	// A fact tagged with two scopes, each covered by exactly one grant, at
+	// different depths. The fact is one indivisible blob: the LEAST
+	// permissive per-tag result governs (intersection), so "summary" must
+	// win overall even though the other tag alone was granted at "full".
+	vec := unitVector(33)
+	d, err := s.ProposeDiff(ctx, "agent-a", "planning a wedding in March with partner",
+		[]string{"relationships.partner", "finances.budget"}, vec, nil, []string{"relationships.partner", "finances.budget"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, "wedding planning summary"); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	granted := []GrantedScope{
+		{Scope: "relationships.partner", Depth: "summary"},
+		{Scope: "finances.budget", Depth: "full"},
+	}
+	results, err := s.SearchFacts(ctx, "wedding", vec, granted, 10)
+	if err != nil {
+		t.Fatalf("SearchFacts() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchFacts() = %+v, want 1 result", results)
+	}
+	if got := results[0].Depth; got != "summary" {
+		t.Errorf("Depth = %q, want %q (least permissive across the fact's two tags)", got, "summary")
+	}
+	if results[0].Content != "" {
+		t.Errorf("Content = %q, want empty at the computed summary depth", results[0].Content)
+	}
+}
+
+func TestSearchFacts_EffectiveDepthUnionsAcrossGrantsForOneTag(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	// A single-tag fact, covered by two active grants over that same tag at
+	// different depths — e.g. an old broad grant and a newer narrower one.
+	// Union across grants means the MORE permissive of the two wins: a stale
+	// broad-depth grant already confers read access at all (strictly worse
+	// than conferring it at greater depth), so it's not silently overridden
+	// by a narrower grant existing alongside it — see effectiveDepth's doc
+	// comment.
+	vec := unitVector(34)
+	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a flat white", []string{"preferences.coffee"}, vec, nil, []string{"preferences.coffee"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, "coffee summary"); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	granted := []GrantedScope{
+		{Scope: "preferences.coffee", Depth: "summary"},
+		{Scope: "preferences.coffee", Depth: "full"},
+	}
+	results, err := s.SearchFacts(ctx, "coffee", vec, granted, 10)
+	if err != nil {
+		t.Fatalf("SearchFacts() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("SearchFacts() = %+v, want 1 result", results)
+	}
+	if got := results[0].Depth; got != "full" {
+		t.Errorf("Depth = %q, want %q (most permissive across the two grants covering this tag)", got, "full")
+	}
+	if results[0].Content != "user's favorite coffee is a flat white" {
+		t.Errorf("Content = %q, want the full fact content", results[0].Content)
+	}
+}
+
+func TestGrantedScopes_CapabilityGrantDoesNotAuthorizeMemoryRead(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	// A capability-kind grant (no depth concept, governs something like git
+	// commit signing — see store.GrantKind) must not also authorize memory
+	// reads/writes over the same scope string. Before the kind = 'memory'
+	// filter, GrantedScopes unioned across every grant regardless of kind.
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"git.sign:github.com/abradner/chuvar"}, "capability", "", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() (capability) error = %v", err)
+	}
+
+	granted, err := s.GrantedScopes(ctx, "agent-a")
+	if err != nil {
+		t.Fatalf("GrantedScopes() error = %v", err)
+	}
+	if len(granted) != 0 {
+		t.Fatalf("GrantedScopes() with only a capability-kind grant = %v, want none (capability grants must not authorize memory reads)", granted)
+	}
+
+	depths, err := s.GrantedScopeDepths(ctx, "agent-a")
+	if err != nil {
+		t.Fatalf("GrantedScopeDepths() error = %v", err)
+	}
+	if len(depths) != 0 {
+		t.Fatalf("GrantedScopeDepths() with only a capability-kind grant = %+v, want none", depths)
 	}
 }
 
@@ -588,7 +820,7 @@ func TestGetFact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
-	fact, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec)
+	fact, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, "")
 	if err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
@@ -637,7 +869,7 @@ func TestProposeDiff_DedupeCandidateSearchScopedToProposerGrants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
-	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec); err != nil {
+	if _, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, ""); err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
@@ -667,7 +899,7 @@ func TestProposeDiff_TargetFactOutsideProposerGrantsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
-	fact, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec)
+	fact, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, "")
 	if err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
@@ -710,10 +942,10 @@ func TestCommitDiff_RejectsIfIdenticalContentCommittedSinceStaging(t *testing.T)
 		t.Fatalf("d2 verdict = %v, want novel (neither has committed yet)", d2.DedupeVerdict)
 	}
 
-	if _, err := s.CommitDiff(ctx, d1.ID, "human-reviewer", vec); err != nil {
+	if _, err := s.CommitDiff(ctx, d1.ID, "human-reviewer", vec, ""); err != nil {
 		t.Fatalf("CommitDiff() (d1) error = %v", err)
 	}
-	if _, err := s.CommitDiff(ctx, d2.ID, "human-reviewer", vec); err == nil {
+	if _, err := s.CommitDiff(ctx, d2.ID, "human-reviewer", vec, ""); err == nil {
 		t.Fatal("CommitDiff() (d2) committing identical content after d1 already committed it: want error, got nil")
 	}
 }
@@ -727,7 +959,7 @@ func TestCommitDiff_LogsAuditEventAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
-	fact, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec)
+	fact, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, "")
 	if err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
@@ -788,6 +1020,18 @@ func TestRejectDiff_LogsAuditEventAtomically(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("audit_log rows for diff_rejected = %d, want 1", count)
 	}
+}
+
+// fullDepth wraps a flat scope list as GrantedScope pairs all at "full" depth —
+// the pre-PR-4 behavior every test above this line was written against before
+// depth enforcement existed. Tests that care about depth itself build
+// []GrantedScope directly instead of going through this helper.
+func fullDepth(scopes []string) []GrantedScope {
+	out := make([]GrantedScope, len(scopes))
+	for i, s := range scopes {
+		out[i] = GrantedScope{Scope: s, Depth: "full"}
+	}
+	return out
 }
 
 // unitVector returns a deterministic unit vector distinct per seed, for tests that

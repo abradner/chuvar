@@ -133,13 +133,14 @@ func (q *Queries) HasActiveDuplicateContent(ctx context.Context, arg HasActiveDu
 }
 
 const insertFact = `-- name: InsertFact :one
-INSERT INTO facts (content, embedding, source_staged_diff_id)
-VALUES ($1, $2, $3)
-RETURNING id, content, created_at, valid_at
+INSERT INTO facts (content, summary, embedding, source_staged_diff_id)
+VALUES ($1, $2, $3, $4)
+RETURNING id, content, summary, created_at, valid_at
 `
 
 type InsertFactParams struct {
 	Content            string
+	Summary            *string
 	Embedding          *pgvector.Vector
 	SourceStagedDiffID string
 }
@@ -147,16 +148,23 @@ type InsertFactParams struct {
 type InsertFactRow struct {
 	ID        string
 	Content   string
+	Summary   *string
 	CreatedAt time.Time
 	ValidAt   time.Time
 }
 
 func (q *Queries) InsertFact(ctx context.Context, arg InsertFactParams) (InsertFactRow, error) {
-	row := q.db.QueryRow(ctx, insertFact, arg.Content, arg.Embedding, arg.SourceStagedDiffID)
+	row := q.db.QueryRow(ctx, insertFact,
+		arg.Content,
+		arg.Summary,
+		arg.Embedding,
+		arg.SourceStagedDiffID,
+	)
 	var i InsertFactRow
 	err := row.Scan(
 		&i.ID,
 		&i.Content,
+		&i.Summary,
 		&i.CreatedAt,
 		&i.ValidAt,
 	)

@@ -22,6 +22,14 @@ type Querier interface {
 	GetGrantRequest(ctx context.Context, id string) (GrantRequest, error)
 	GetReviewerTOTPSecret(ctx context.Context, id string) (*string, error)
 	GetStagedDiff(ctx context.Context, id string) (StagedDiff, error)
+	// depth IS NOT NULL is implied by kind = 'memory' (the grants_kind_depth_pairing
+	// CHECK constraint), restated here rather than relied on so this query's own
+	// WHERE clause is self-documenting independent of that constraint existing
+	// elsewhere.
+	GrantedScopeDepths(ctx context.Context, subject string) ([]GrantedScopeDepthsRow, error)
+	// kind = 'memory' excludes capability-only grants (e.g. git.sign:...) from
+	// authorizing memory reads/writes over the same scope string — see
+	// store.GrantedScopes' doc comment.
 	GrantedScopes(ctx context.Context, subject string) ([]string, error)
 	// Two distinct named params bound to the identical exclude-fact-ID value at the
 	// call site (see staged_diffs.go) — sqlc's parser doesn't handle referencing the

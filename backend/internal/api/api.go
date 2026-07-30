@@ -31,6 +31,7 @@ import (
 
 	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/store"
+	"github.com/abradner/chuvar/backend/internal/summarize"
 )
 
 // maxRequestBodyBytes bounds every request body this API accepts. Every body here
@@ -42,8 +43,9 @@ import (
 const maxRequestBodyBytes = 1 << 16 // 64KiB
 
 type API struct {
-	Store    *store.Store
-	Embedder embed.Embedder
+	Store      *store.Store
+	Embedder   embed.Embedder
+	Summarizer summarize.Summarizer
 
 	// AllowedOrigin is the single origin the CORS policy permits (e.g.
 	// "http://localhost:5173" for the Vite dev server). Empty disables CORS
@@ -56,14 +58,14 @@ type API struct {
 	RequestTimeout time.Duration
 }
 
-func New(st *store.Store, emb embed.Embedder, allowedOrigin string, requestTimeout time.Duration) *API {
+func New(st *store.Store, emb embed.Embedder, summ summarize.Summarizer, allowedOrigin string, requestTimeout time.Duration) *API {
 	if requestTimeout <= 0 {
 		panic("api: RequestTimeout must be positive — a zero or negative value disables request cancellation entirely")
 	}
 	if err := validateAllowedOrigin(allowedOrigin); err != nil {
 		panic("api: " + err.Error())
 	}
-	return &API{Store: st, Embedder: emb, AllowedOrigin: allowedOrigin, RequestTimeout: requestTimeout}
+	return &API{Store: st, Embedder: emb, Summarizer: summ, AllowedOrigin: allowedOrigin, RequestTimeout: requestTimeout}
 }
 
 // validateAllowedOrigin rejects anything that isn't either empty (CORS disabled)

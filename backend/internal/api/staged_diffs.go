@@ -76,8 +76,8 @@ func (a *API) getFact(w http.ResponseWriter, r *http.Request) {
 }
 
 // validStatuses mirrors the CHECK constraint on staged_diffs.status — same
-// hand-synced closed vocabulary stance as validDepths in grants.go. Validating
-// here means an unknown status is a clean 400 naming the problem instead of
+// hand-synced closed vocabulary stance as store.ValidDepth. Validating here
+// means an unknown status is a clean 400 naming the problem instead of
 // silently returning an empty list (which reads as "nothing in that state", a
 // materially different answer).
 var validStatuses = map[store.DiffStatus]bool{
@@ -140,7 +140,13 @@ func (a *API) approveStagedDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fact, err := a.Store.CommitDiff(r.Context(), id, reviewer, vec)
+	summary, err := a.Summarizer.Summarize(r.Context(), diff.Content)
+	if err != nil {
+		writeStoreError(w, http.StatusInternalServerError, "approveStagedDiff.Summarize", "could not summarize diff content", err)
+		return
+	}
+
+	fact, err := a.Store.CommitDiff(r.Context(), id, reviewer, vec, summary)
 	if err != nil {
 		writeStoreError(w, http.StatusConflict, "approveStagedDiff.CommitDiff", "could not approve diff — it may no longer be pending", err)
 		return

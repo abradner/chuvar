@@ -14,10 +14,28 @@ FROM grants WHERE subject = $1 ORDER BY created_at DESC;
 SELECT scope FROM grant_scopes WHERE grant_id = $1;
 
 -- name: GrantedScopes :many
+-- kind = 'memory' excludes capability-only grants (e.g. git.sign:...) from
+-- authorizing memory reads/writes over the same scope string — see
+-- store.GrantedScopes' doc comment.
 SELECT DISTINCT gs.scope
 FROM grant_scopes gs
 JOIN grants g ON g.id = gs.grant_id
 WHERE g.subject = $1
+  AND g.kind = 'memory'
+  AND g.revoked_at IS NULL
+  AND (g.expires_at IS NULL OR g.expires_at > now());
+
+-- name: GrantedScopeDepths :many
+-- depth IS NOT NULL is implied by kind = 'memory' (the grants_kind_depth_pairing
+-- CHECK constraint), restated here rather than relied on so this query's own
+-- WHERE clause is self-documenting independent of that constraint existing
+-- elsewhere.
+SELECT DISTINCT gs.scope, g.depth
+FROM grant_scopes gs
+JOIN grants g ON g.id = gs.grant_id
+WHERE g.subject = $1
+  AND g.kind = 'memory'
+  AND g.depth IS NOT NULL
   AND g.revoked_at IS NULL
   AND (g.expires_at IS NULL OR g.expires_at > now());
 

@@ -11,15 +11,59 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const grantedScopeDepths = `-- name: GrantedScopeDepths :many
+SELECT DISTINCT gs.scope, g.depth
+FROM grant_scopes gs
+JOIN grants g ON g.id = gs.grant_id
+WHERE g.subject = $1
+  AND g.kind = 'memory'
+  AND g.depth IS NOT NULL
+  AND g.revoked_at IS NULL
+  AND (g.expires_at IS NULL OR g.expires_at > now())
+`
+
+type GrantedScopeDepthsRow struct {
+	Scope string
+	Depth *string
+}
+
+// depth IS NOT NULL is implied by kind = 'memory' (the grants_kind_depth_pairing
+// CHECK constraint), restated here rather than relied on so this query's own
+// WHERE clause is self-documenting independent of that constraint existing
+// elsewhere.
+func (q *Queries) GrantedScopeDepths(ctx context.Context, subject string) ([]GrantedScopeDepthsRow, error) {
+	rows, err := q.db.Query(ctx, grantedScopeDepths, subject)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GrantedScopeDepthsRow
+	for rows.Next() {
+		var i GrantedScopeDepthsRow
+		if err := rows.Scan(&i.Scope, &i.Depth); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const grantedScopes = `-- name: GrantedScopes :many
 SELECT DISTINCT gs.scope
 FROM grant_scopes gs
 JOIN grants g ON g.id = gs.grant_id
 WHERE g.subject = $1
+  AND g.kind = 'memory'
   AND g.revoked_at IS NULL
   AND (g.expires_at IS NULL OR g.expires_at > now())
 `
 
+// kind = 'memory' excludes capability-only grants (e.g. git.sign:...) from
+// authorizing memory reads/writes over the same scope string — see
+// store.GrantedScopes' doc comment.
 func (q *Queries) GrantedScopes(ctx context.Context, subject string) ([]string, error) {
 	rows, err := q.db.Query(ctx, grantedScopes, subject)
 	if err != nil {

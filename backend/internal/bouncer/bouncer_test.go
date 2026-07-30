@@ -189,7 +189,7 @@ func TestProposeWrite_DuplicateScopesDedupedSoCommitSucceeds(t *testing.T) {
 	// Without deduping in ProposeWrite, this would fail here instead: CommitDiff
 	// inserts one fact_scopes row per proposed scope, and (fact_id, scope) is that
 	// table's primary key.
-	if _, err := st.CommitDiff(ctx, diff.ID, "human-reviewer", nil); err != nil {
+	if _, err := st.CommitDiff(ctx, diff.ID, "human-reviewer", nil, ""); err != nil {
 		t.Fatalf("CommitDiff() error = %v (duplicate scopes not deduped before staging?)", err)
 	}
 }
@@ -221,7 +221,7 @@ func TestProposeWrite_TargetOutsideSubjectGrantsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProposeWrite() (first) error = %v", err)
 	}
-	fact, err := st.CommitDiff(ctx, first.ID, "human-reviewer", nil)
+	fact, err := st.CommitDiff(ctx, first.ID, "human-reviewer", nil, "")
 	if err != nil {
 		t.Fatalf("CommitDiff() (first) error = %v", err)
 	}

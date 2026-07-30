@@ -78,6 +78,7 @@ vector_ranked AS (
 SELECT
     f.id,
     f.content,
+    f.summary,
     f.created_at,
     f.valid_at,
     (SELECT array_agg(fs.scope) FROM fact_scopes fs WHERE fs.fact_id = f.id)::text[] AS scopes,
@@ -105,6 +106,7 @@ type SearchFactsParams struct {
 type SearchFactsRow struct {
 	ID        string
 	Content   string
+	Summary   *string
 	CreatedAt time.Time
 	ValidAt   time.Time
 	Scopes    []string
@@ -132,6 +134,7 @@ func (q *Queries) SearchFacts(ctx context.Context, arg SearchFactsParams) ([]Sea
 		if err := rows.Scan(
 			&i.ID,
 			&i.Content,
+			&i.Summary,
 			&i.CreatedAt,
 			&i.ValidAt,
 			&i.Scopes,
