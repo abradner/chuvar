@@ -9,6 +9,7 @@ package sseclient
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -47,8 +48,22 @@ type GrantRequest struct {
 	CreatedAt           string   `json:"created_at"`
 }
 
+// Grant mirrors internal/api's grantView — used only for grant_expiring
+// today (Stream never emits grant_created/grant_revoked; those exist as
+// audit_log entries, not SSE events — see events.go's package comment).
+type Grant struct {
+	ID        string   `json:"id"`
+	Subject   string   `json:"subject"`
+	Scopes    []string `json:"scopes"`
+	Depth     string   `json:"depth"`
+	Active    bool     `json:"active"`
+	CreatedAt string   `json:"created_at"`
+	ExpiresAt *string  `json:"expires_at,omitempty"`
+	RevokedAt *string  `json:"revoked_at,omitempty"`
+}
+
 // Event is one parsed "event: ...\ndata: ...\n\n" frame, with its payload
-// already unmarshaled into whichever of the two shapes Type implies.
+// already unmarshaled into whichever of the three shapes Type implies.
 // "connection_error" is a caller-synthesized type (see cmd/approver/main.go and
 // cmd/pushbridge/main.go's own reconnect loops), never something the server
 // sends — Stream itself never produces one.
@@ -56,6 +71,7 @@ type Event struct {
 	Type   string
 	Diff   *StagedDiff
 	Req    *GrantRequest
+	Grant  *Grant
 	Detail string // only set for parse_error / unrecognized-event cases
 }
 
@@ -70,12 +86,15 @@ type Client struct {
 	HTTP    *http.Client
 }
 
-func (c *Client) newRequest(ctx context.Context, method, path string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, nil)
+func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, body)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	return req, nil
 }
 
@@ -86,7 +105,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string) (*http.Req
 // backoff, matching AGENTS.md's stance that a network blip isn't code to chase
 // as a bug).
 func (c *Client) Stream(ctx context.Context, out chan<- Event) error {
-	req, err := c.newRequest(ctx, http.MethodGet, "/api/events")
+	req, err := c.newRequest(ctx, http.MethodGet, "/api/events", nil)
 	if err != nil {
 		return err
 	}
@@ -147,6 +166,12 @@ func parseEvent(eventName, data string) Event {
 			return Event{Type: "parse_error", Detail: err.Error()}
 		}
 		return Event{Type: eventName, Req: &r}
+	case "grant_expiring":
+		var g Grant
+		if err := json.Unmarshal([]byte(data), &g); err != nil {
+			return Event{Type: "parse_error", Detail: err.Error()}
+		}
+		return Event{Type: eventName, Grant: &g}
 	case "ready":
 		return Event{Type: "ready"}
 	default:
@@ -163,15 +188,31 @@ func parseEvent(eventName, data string) Event {
 // updated for that action. Found in review.
 const actionTimeout = 10 * time.Second
 
-// postAction issues the POST and, when totpCode is non-empty, attaches it as
-// the device-local second factor requireTOTP checks on mutations that grant or
-// extend authority (see internal/api/api.go). Empty for actions that aren't
-// gated (reject/deny) — the header is simply omitted, not sent empty.
+// postAction issues a bodiless POST and, when totpCode is non-empty, attaches
+// it as the device-local second factor requireTOTP checks on mutations that
+// grant or extend authority (see internal/api/api.go). Empty for actions
+// that aren't gated (reject/deny) — the header is simply omitted, not sent
+// empty.
 func (c *Client) postAction(ctx context.Context, path, totpCode string) error {
+	return c.postActionBody(ctx, path, totpCode, nil)
+}
+
+// postActionBody is postAction plus a JSON-encoded request body, for the one
+// action (RenewGrant) that needs to send more than its path and TOTP code.
+func (c *Client) postActionBody(ctx context.Context, path, totpCode string, body any) error {
 	ctx, cancel := context.WithTimeout(ctx, actionTimeout)
 	defer cancel()
 
-	req, err := c.newRequest(ctx, http.MethodPost, path)
+	var bodyReader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		bodyReader = bytes.NewReader(b)
+	}
+
+	req, err := c.newRequest(ctx, http.MethodPost, path, bodyReader)
 	if err != nil {
 		return err
 	}
@@ -207,4 +248,13 @@ func (c *Client) ApproveGrantRequest(ctx context.Context, id, totpCode string) e
 
 func (c *Client) DenyGrantRequest(ctx context.Context, id string) error {
 	return c.postAction(ctx, "/api/grant-requests/"+id+"/deny", "")
+}
+
+// RenewGrant requires totpCode — see requireTOTP on
+// POST /api/grants/{id}/renew. ttlSeconds is required there too (renewing
+// into "no expiry" isn't allowed — see store.RenewGrant's doc comment).
+func (c *Client) RenewGrant(ctx context.Context, id string, ttlSeconds int, totpCode string) error {
+	return c.postActionBody(ctx, "/api/grants/"+id+"/renew", totpCode, struct {
+		TTLSeconds int `json:"ttl_seconds"`
+	}{TTLSeconds: ttlSeconds})
 }

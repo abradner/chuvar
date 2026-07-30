@@ -421,6 +421,91 @@ func TestRevokeGrant(t *testing.T) {
 	}
 }
 
+func TestRenewGrant(t *testing.T) {
+	srv, _ := testServer(t)
+
+	ttl := 60
+	created := decodeInto[grantView](t, doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
+		Subject:    "agent-a",
+		Scopes:     []string{"identity.basic"},
+		TTLSeconds: &ttl,
+	}))
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants/"+created.ID+"/renew", struct {
+		TTLSeconds int `json:"ttl_seconds"`
+	}{TTLSeconds: 3600})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST renew status = %d, want 200", resp.StatusCode)
+	}
+	renewed := decodeInto[grantView](t, resp)
+	if !renewed.Active {
+		t.Error("renewed grant should still be Active")
+	}
+	if renewed.ExpiresAt == nil || *renewed.ExpiresAt == *created.ExpiresAt {
+		t.Fatalf("renewed grant's ExpiresAt = %v, want it later than the original %v", renewed.ExpiresAt, created.ExpiresAt)
+	}
+}
+
+func TestRenewGrant_NonPositiveTTLRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := decodeInto[grantView](t, doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
+		Subject: "agent-a",
+		Scopes:  []string{"identity.basic"},
+	}))
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants/"+created.ID+"/renew", struct {
+		TTLSeconds int `json:"ttl_seconds"`
+	}{TTLSeconds: 0})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST renew with ttl_seconds=0: status = %d, want 400 (renewing into \"no expiry\" isn't allowed)", resp.StatusCode)
+	}
+}
+
+func TestRenewGrant_RevokedGrantRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := decodeInto[grantView](t, doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
+		Subject: "agent-a",
+		Scopes:  []string{"identity.basic"},
+	}))
+	doJSON(t, http.MethodPost, srv.URL+"/api/grants/"+created.ID+"/revoke", nil)
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/grants/"+created.ID+"/renew", struct {
+		TTLSeconds int `json:"ttl_seconds"`
+	}{TTLSeconds: 3600})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("POST renew on a revoked grant: status = %d, want 409 (a lapsed grant needs a fresh CreateGrant, not a renewal)", resp.StatusCode)
+	}
+}
+
+func TestRenewGrant_RequiresTOTP(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := decodeInto[grantView](t, doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
+		Subject: "agent-a",
+		Scopes:  []string{"identity.basic"},
+	}))
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/grants/"+created.ID+"/renew", bytes.NewReader(mustJSON(t, struct {
+		TTLSeconds int `json:"ttl_seconds"`
+	}{TTLSeconds: 3600})))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testAuthToken)
+	req.Header.Set("X-Chuvar-TOTP-Code", "000000")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST renew with a wrong TOTP code: status = %d, want 401", resp.StatusCode)
+	}
+}
+
 func TestStagedDiffs_ListApproveReject(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()

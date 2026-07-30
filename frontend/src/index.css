@@ -175,6 +175,14 @@ button.secondary {
   color: #a16207;
 }
 
+/* Same amber warning palette as .verdict-duplicate above — a nudge, not an
+   error state (mirrors backend/internal/api/events.go's grantExpiryWarningWindow,
+   see Grants.tsx's isExpiringSoon comment on why the two aren't actually linked). */
+.expiring-soon {
+  color: #a16207;
+  font-weight: 600;
+}
+
 .verdict-contradiction {
   background: var(--danger-bg);
   color: var(--danger);

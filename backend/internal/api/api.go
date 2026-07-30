@@ -117,6 +117,7 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("GET /api/grants", a.listGrants)
 	mux.HandleFunc("POST /api/grants", a.requireTOTP(a.createGrant))
 	mux.HandleFunc("POST /api/grants/{id}/revoke", a.revokeGrant)
+	mux.HandleFunc("POST /api/grants/{id}/renew", a.requireTOTP(a.renewGrant))
 	mux.HandleFunc("GET /api/grant-requests", a.listGrantRequests)
 	mux.HandleFunc("POST /api/grant-requests/{id}/approve", a.requireTOTP(a.approveGrantRequest))
 	mux.HandleFunc("POST /api/grant-requests/{id}/deny", a.denyGrantRequest)

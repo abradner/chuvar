@@ -137,6 +137,18 @@ export const api = {
 
   revokeGrant: (id: string) => request<void>(`/api/grants/${id}/revoke`, { method: "POST" }),
 
+  // renewGrant requires totpCode (same gate as createGrant/approveGrantRequest/
+  // approveStagedDiff) and ttlSeconds — unlike createGrant's optional TTL,
+  // renewing into "no expiry" isn't allowed (backend/internal/store's
+  // RenewGrant doc comment: it would defeat the TTL-bounded security property
+  // renewal exists to preserve).
+  renewGrant: (id: string, ttlSeconds: number, totpCode: string) =>
+    request<Grant>(`/api/grants/${id}/renew`, {
+      method: "POST",
+      body: JSON.stringify({ ttl_seconds: ttlSeconds }),
+      totpCode,
+    }),
+
   getFact: (id: string, signal?: AbortSignal) => request<Fact>(`/api/facts/${id}`, { signal }),
 
   listGrantRequests: (status = "pending", signal?: AbortSignal) =>

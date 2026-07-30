@@ -26,6 +26,16 @@ func TestParseEvent_GrantRequest(t *testing.T) {
 	}
 }
 
+func TestParseEvent_GrantExpiring(t *testing.T) {
+	ev := parseEvent("grant_expiring", `{"id":"g1","subject":"agent-a","active":true,"expires_at":"2026-08-01T00:00:00Z"}`)
+	if ev.Type != "grant_expiring" {
+		t.Fatalf("Type = %q, want grant_expiring", ev.Type)
+	}
+	if ev.Grant == nil || ev.Grant.ID != "g1" || ev.Grant.ExpiresAt == nil || *ev.Grant.ExpiresAt != "2026-08-01T00:00:00Z" {
+		t.Fatalf("Grant = %+v, want a parsed Grant with id=g1 and the expires_at echoed back", ev.Grant)
+	}
+}
+
 func TestParseEvent_MalformedJSONReportsParseError(t *testing.T) {
 	ev := parseEvent("staged_diff_added", `{not valid json`)
 	if ev.Type != "parse_error" {

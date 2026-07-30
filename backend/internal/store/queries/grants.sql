@@ -41,3 +41,24 @@ WHERE g.subject = $1
 
 -- name: RevokeGrant :execrows
 UPDATE grants SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL;
+
+-- name: RenewGrant :one
+-- Only a currently-active grant (not revoked, not already past its expiry) can
+-- be renewed — zero rows affected (surfaced by sqlc as pgx.ErrNoRows for a
+-- :one query) covers "doesn't exist," "already revoked," and "already
+-- expired" alike; store.RenewGrant turns that into one clear error.
+UPDATE grants SET expires_at = $2
+WHERE id = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())
+RETURNING id, subject, depth, created_at, expires_at, revoked_at, kind;
+
+-- name: ListGrantsNearingExpiry :many
+-- Subject-agnostic by design, like ListStagedDiffs/ListGrantRequests — v0 is a
+-- single-operator system (AGENTS.md), so the expiry-warning SSE stream isn't
+-- scoped per subject either.
+SELECT id, subject, depth, created_at, expires_at, revoked_at, kind
+FROM grants
+WHERE revoked_at IS NULL
+  AND expires_at IS NOT NULL
+  AND expires_at > now()
+  AND expires_at <= $1
+ORDER BY expires_at ASC;

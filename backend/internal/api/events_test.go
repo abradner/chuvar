@@ -175,6 +175,68 @@ func TestStreamEvents_AnnouncesNewGrantRequestAndItsResolution(t *testing.T) {
 	}
 }
 
+func TestStreamEvents_AnnouncesGrantExpiring(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	orig := eventPollInterval
+	eventPollInterval = 20 * time.Millisecond
+	t.Cleanup(func() { eventPollInterval = orig })
+
+	// Shortened the same way eventPollInterval is above — a fast test doesn't
+	// want to wait for the real 24h default window to matter.
+	origWindow := grantExpiryWarningWindow
+	grantExpiryWarningWindow = time.Hour
+	t.Cleanup(func() { grantExpiryWarningWindow = origWindow })
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/events", nil)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testAuthToken)
+	resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // closed via t.Cleanup below
+	if err != nil {
+		t.Fatalf("GET /api/events: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	sse := newSSEReader(resp)
+
+	sse.readSSE(t, 1, 2*time.Second) // "ready"
+
+	// Within the (shortened) warning window: must be announced.
+	soonTTL := 30 * time.Minute
+	soon, err := st.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", &soonTTL, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() (soon) error = %v", err)
+	}
+	// Well outside the window: must NOT be announced.
+	laterTTL := 7 * 24 * time.Hour
+	if _, err := st.CreateGrant(ctx, "agent-b", []string{"identity.basic"}, "memory", "facts", &laterTTL, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() (later) error = %v", err)
+	}
+	// No expiry at all: must NOT be announced (nothing to warn about).
+	if _, err := st.CreateGrant(ctx, "agent-c", []string{"identity.basic"}, "memory", "facts", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() (no expiry) error = %v", err)
+	}
+
+	expiring := sse.readSSE(t, 1, 2*time.Second)
+	if expiring[0].Event != "grant_expiring" {
+		t.Fatalf("event = %q, want %q", expiring[0].Event, "grant_expiring")
+	}
+	if !strings.Contains(expiring[0].Data, soon.ID) {
+		t.Errorf("grant_expiring data = %q, want it to contain the soon-to-expire grant's ID %q", expiring[0].Data, soon.ID)
+	}
+
+	// Poll again and confirm nothing further arrives: the far-out and
+	// no-expiry grants must never fire, and the already-warned grant must not
+	// re-fire on a later poll within the same connection (warnedGrants).
+	select {
+	case ev := <-sse.events:
+		t.Fatalf("unexpected further event after the one grant_expiring: %+v", ev)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestStreamEvents_RequiresAuth(t *testing.T) {
 	srv, _ := testServer(t)
 

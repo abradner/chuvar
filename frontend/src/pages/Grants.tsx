@@ -114,6 +114,46 @@ export function GrantsPage() {
     }
   };
 
+  // renewGrant requires a TTL, unlike createGrant's optional one (the backend
+  // rejects a missing/non-positive ttl_seconds — see api/client.ts's comment),
+  // so this prompts for minutes the same way createGrant's form field does,
+  // then TOTP the same way decideRequest's approve path does. Two sequential
+  // window.prompt()s, same deliberately-minimal stopgap UI as the rest of this
+  // page — not the eventual WebAuthn surface.
+  const renew = async (id: string) => {
+    const minutesInput = window.prompt("Renew for how many minutes?");
+    if (!minutesInput) return;
+    const minutes = Number(minutesInput);
+    if (!Number.isInteger(minutes) || minutes <= 0) {
+      setError("TTL must be a positive whole number of minutes");
+      return;
+    }
+    const totpCode = window.prompt("Enter TOTP code to renew") ?? "";
+    if (!totpCode) return;
+
+    setBusyId(id);
+    setError(null);
+    try {
+      await api.renewGrant(id, minutes * 60, totpCode);
+      setRefreshKey((k) => k + 1);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // Mirrors the backend's grantExpiryWarningWindow (internal/api/events.go) —
+  // no shared source of truth between the two, so this is a best-effort visual
+  // hint kept conceptually in sync by convention, not a value either side reads
+  // from the other. Purely cosmetic (a "renew soon" nudge); the backend's own
+  // SSE grant_expiring event is what pushbridge/approver actually act on, and
+  // this page doesn't consume SSE at all (events.go's own doc comment on why:
+  // EventSource can't set an Authorization header without a polyfill).
+  const expiringWarningWindowMs = 24 * 60 * 60 * 1000;
+  const isExpiringSoon = (g: Grant) =>
+    g.active && g.expires_at != null && new Date(g.expires_at).getTime() - Date.now() <= expiringWarningWindowMs;
+
   const createGrant = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -212,11 +252,17 @@ export function GrantsPage() {
             <p className="grant-meta">
               depth: {g.depth} · {g.active ? "active" : g.revoked_at ? "revoked" : "expired"}
               {g.expires_at && ` · expires ${new Date(g.expires_at).toLocaleString()}`}
+              {isExpiringSoon(g) && <span className="expiring-soon"> · expiring soon</span>}
             </p>
             {g.active && (
-              <button disabled={busyId === g.id} onClick={() => revoke(g.id)} className="secondary">
-                Revoke
-              </button>
+              <div className="actions">
+                <button disabled={busyId === g.id} onClick={() => renew(g.id)}>
+                  Renew
+                </button>
+                <button disabled={busyId === g.id} onClick={() => revoke(g.id)} className="secondary">
+                  Revoke
+                </button>
+              </div>
             )}
           </li>
         ))}

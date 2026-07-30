@@ -91,6 +91,134 @@ func TestGrants_CreateListRevoke(t *testing.T) {
 	}
 }
 
+func TestRenewGrant_ExtendsExpiry(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	shortTTL := time.Minute
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", &shortTTL, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	renewed, err := s.RenewGrant(ctx, g.ID, time.Hour, "human-reviewer")
+	if err != nil {
+		t.Fatalf("RenewGrant() error = %v", err)
+	}
+	if renewed.ExpiresAt == nil || !renewed.ExpiresAt.After(*g.ExpiresAt) {
+		t.Fatalf("RenewGrant() ExpiresAt = %v, want later than the original %v", renewed.ExpiresAt, g.ExpiresAt)
+	}
+	if !renewed.Active(time.Now()) {
+		t.Error("renewed grant should be Active")
+	}
+}
+
+func TestRenewGrant_RevokedGrantRejected(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+	if err := s.RevokeGrant(ctx, g.ID, "human-reviewer"); err != nil {
+		t.Fatalf("RevokeGrant() error = %v", err)
+	}
+
+	if _, err := s.RenewGrant(ctx, g.ID, time.Hour, "human-reviewer"); err == nil {
+		t.Fatal("RenewGrant() on a revoked grant: want error, got nil")
+	}
+}
+
+func TestRenewGrant_AlreadyExpiredGrantRejected(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	past := -time.Hour
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", &past, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	// A lapsed grant needs a fresh CreateGrant decision, not a renewal — see
+	// RenewGrant's doc comment.
+	if _, err := s.RenewGrant(ctx, g.ID, time.Hour, "human-reviewer"); err == nil {
+		t.Fatal("RenewGrant() on an already-expired grant: want error, got nil")
+	}
+}
+
+func TestRenewGrant_NonPositiveTTLRejected(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	if _, err := s.RenewGrant(ctx, g.ID, 0, "human-reviewer"); err == nil {
+		t.Fatal("RenewGrant() with ttl=0: want error, got nil (renewing into \"no expiry\" isn't allowed)")
+	}
+}
+
+func TestRenewGrant_LogsAuditEventAtomically(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+	if _, err := s.RenewGrant(ctx, g.ID, time.Hour, "human-reviewer"); err != nil {
+		t.Fatalf("RenewGrant() error = %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_log WHERE event_type = 'grant_renewed' AND grant_id = $1 AND subject = 'human-reviewer'`,
+		g.ID,
+	).Scan(&count); err != nil {
+		t.Fatalf("querying audit_log: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("audit_log rows for grant_renewed = %d, want 1", count)
+	}
+}
+
+func TestListGrantsNearingExpiry(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	soonTTL := 30 * time.Minute
+	soon, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", &soonTTL, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() (soon) error = %v", err)
+	}
+	laterTTL := 7 * 24 * time.Hour
+	if _, err := s.CreateGrant(ctx, "agent-b", []string{"identity.basic"}, "memory", "facts", &laterTTL, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() (later) error = %v", err)
+	}
+	if _, err := s.CreateGrant(ctx, "agent-c", []string{"identity.basic"}, "memory", "facts", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() (no expiry) error = %v", err)
+	}
+	revokedTTL := 30 * time.Minute
+	revoked, err := s.CreateGrant(ctx, "agent-d", []string{"identity.basic"}, "memory", "facts", &revokedTTL, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() (revoked) error = %v", err)
+	}
+	if err := s.RevokeGrant(ctx, revoked.ID, "human-reviewer"); err != nil {
+		t.Fatalf("RevokeGrant() error = %v", err)
+	}
+
+	expiring, err := s.ListGrantsNearingExpiry(ctx, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListGrantsNearingExpiry() error = %v", err)
+	}
+	if len(expiring) != 1 || expiring[0].ID != soon.ID {
+		t.Fatalf("ListGrantsNearingExpiry() = %+v, want exactly the soon-to-expire grant %s (not the far-out, no-expiry, or revoked ones)", expiring, soon.ID)
+	}
+}
+
 func TestGrantedScopeDepths_RoundTripsDepthPerScope(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
