@@ -99,10 +99,13 @@ func depthOrEmpty(depth *string) string {
 
 // CreateGrant records a new time-boxed grant. ttl of nil means no expiry. actor is
 // who's creating the grant — required, logged to audit_log in the same transaction
-// as the insert (see logAudit's doc comment). decided_by/approved_by/revoked_by
-// are derived from the authenticated reviewer token (internal/api's requireAuth),
-// never read from the request body — actor here is that already-authenticated
-// identity, not client-supplied.
+// as the insert (see logAudit's doc comment). This store method itself only
+// requires actor to be non-empty; it does not authenticate it. The guarantee that
+// decided_by/approved_by/revoked_by is the authenticated reviewer token's identity
+// (internal/api's requireAuth), never client-supplied, holds for the REST API call
+// path specifically — internal/api/grants.go passes reviewerFromContext(...).Label,
+// not a request-body field. Other callers of this store method (tests, any future
+// non-HTTP caller) can pass any string. Found in review.
 func (s *Store) CreateGrant(ctx context.Context, subject string, scopes []string, kind, depth string, ttl *time.Duration, actor string) (Grant, error) {
 	if len(scopes) == 0 {
 		return Grant{}, fmt.Errorf("store: grant must include at least one scope")
