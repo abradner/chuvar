@@ -121,13 +121,17 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 
 	seenDiffs := map[string]struct{}{}
 	seenRequests := map[string]struct{}{}
-	// warnedGrants has no "resolved" counterpart to clear it, unlike
-	// seenDiffs/seenRequests above — a grant doesn't "un-expire." Once warned
-	// on this connection, a grant stays warned even if it's later renewed
-	// (pushing it back out of the window) and then approaches expiry again;
-	// a reconnect (this map's whole lifetime) is what resets it, same
-	// per-connection-only dedup limitation seenDiffs/seenRequests already
-	// have on reconnect-redelivery.
+	// warnedGrants is keyed by (grant ID, expires_at) together, not grant ID
+	// alone — a renewal changes expires_at on the same row, so the new
+	// key naturally lets a renewed grant that later re-approaches expiry
+	// warn again, without needing a reconnect to reset anything. It still
+	// has no "resolved" counterpart to actively clear an entry (a grant
+	// doesn't "un-expire"), so a revoked or long-since-renewed grant's old
+	// key just sits unused in the map for the life of the connection —
+	// harmless, bounded by how many distinct (grant, expiry) pairs one
+	// connection ever sees. Found in review (originally keyed by grant ID
+	// only, which meant a renewal could never re-trigger a warning on the
+	// same connection).
 	warnedGrants := map[string]struct{}{}
 
 	poll := func() bool {
@@ -222,10 +226,11 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 			return false
 		}
 		for _, g := range expiring {
-			if _, ok := warnedGrants[g.ID]; ok {
+			key := warnedGrantKey(g)
+			if _, ok := warnedGrants[key]; ok {
 				continue
 			}
-			warnedGrants[g.ID] = struct{}{}
+			warnedGrants[key] = struct{}{}
 			if !send("grant_expiring", toGrantView(g)) {
 				return false
 			}
@@ -252,4 +257,13 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// warnedGrantKey is warnedGrants' map key: grant ID plus expiry together, so
+// a renewal (which changes ExpiresAt on the same row) gets a fresh key and
+// can warn again — see warnedGrants' own doc comment above. ExpiresAt is
+// never nil for anything ListGrantsNearingExpiry returns (its query filters
+// expires_at IS NOT NULL).
+func warnedGrantKey(g store.Grant) string {
+	return fmt.Sprintf("%s@%s", g.ID, g.ExpiresAt.Format(time.RFC3339Nano))
 }

@@ -53,7 +53,15 @@ type Querier interface {
 	// Subject-agnostic by design, like ListStagedDiffs/ListGrantRequests — v0 is a
 	// single-operator system (AGENTS.md), so the expiry-warning SSE stream isn't
 	// scoped per subject either.
-	ListGrantsNearingExpiry(ctx context.Context, expiresAt pgtype.Timestamptz) ([]Grant, error)
+	//
+	// Scopes come back via an array_agg subquery (same shape as GetFact/
+	// SearchFacts' fact_scopes aggregation in facts.sql) rather than a separate
+	// ListGrantScopes call per row: this query runs from the /api/events poll
+	// loop, potentially every eventPollInterval per connected SSE client, so an
+	// N+1 pattern here scales with (expiring grants) x (connected clients) x
+	// (polls/sec) — worth avoiding at the query level rather than in a hot loop.
+	// Found in review.
+	ListGrantsNearingExpiry(ctx context.Context, expiresAt pgtype.Timestamptz) ([]ListGrantsNearingExpiryRow, error)
 	ListReviewerTokens(ctx context.Context) ([]ListReviewerTokensRow, error)
 	ListStagedDiffs(ctx context.Context, status string) ([]StagedDiff, error)
 	LoadGrantRequestForUpdate(ctx context.Context, id string) (LoadGrantRequestForUpdateRow, error)

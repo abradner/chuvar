@@ -333,22 +333,24 @@ func (s *Store) ListGrantsNearingExpiry(ctx context.Context, before time.Time) (
 		return nil, fmt.Errorf("store: list grants nearing expiry: %w", err)
 	}
 
-	var grants []Grant
-	for _, r := range rows {
-		scopes, err := s.q.ListGrantScopes(ctx, r.ID)
-		if err != nil {
-			return nil, fmt.Errorf("store: list grant scopes: %w", err)
-		}
-		grants = append(grants, Grant{
+	// Scopes come back from the query itself (an array_agg subquery, mirroring
+	// GetFact/SearchFacts) rather than a per-grant ListGrantScopes call — this
+	// is called from the /api/events poll loop, potentially every
+	// eventPollInterval per connected SSE client, so avoiding an N+1 here
+	// matters more than it would for e.g. ListGrants' on-demand, per-request
+	// call. Found in review.
+	grants := make([]Grant, len(rows))
+	for i, r := range rows {
+		grants[i] = Grant{
 			ID:        r.ID,
 			Subject:   r.Subject,
-			Scopes:    scopes,
+			Scopes:    r.Scopes,
 			Kind:      GrantKind(r.Kind),
 			Depth:     depthOrEmpty(r.Depth),
 			CreatedAt: r.CreatedAt,
 			ExpiresAt: r.ExpiresAt,
 			RevokedAt: r.RevokedAt,
-		})
+		}
 	}
 	return grants, nil
 }

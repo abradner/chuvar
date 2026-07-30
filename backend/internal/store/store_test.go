@@ -217,6 +217,12 @@ func TestListGrantsNearingExpiry(t *testing.T) {
 	if len(expiring) != 1 || expiring[0].ID != soon.ID {
 		t.Fatalf("ListGrantsNearingExpiry() = %+v, want exactly the soon-to-expire grant %s (not the far-out, no-expiry, or revoked ones)", expiring, soon.ID)
 	}
+	// Scopes come from the query's array_agg subquery, not a separate
+	// ListGrantScopes call — assert they actually round-trip, not just that
+	// the field exists.
+	if len(expiring[0].Scopes) != 1 || expiring[0].Scopes[0] != "identity.basic" {
+		t.Fatalf("ListGrantsNearingExpiry() Scopes = %v, want [identity.basic]", expiring[0].Scopes)
+	}
 }
 
 func TestGrantedScopeDepths_RoundTripsDepthPerScope(t *testing.T) {

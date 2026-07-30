@@ -55,10 +55,19 @@ RETURNING id, subject, depth, created_at, expires_at, revoked_at, kind;
 -- Subject-agnostic by design, like ListStagedDiffs/ListGrantRequests — v0 is a
 -- single-operator system (AGENTS.md), so the expiry-warning SSE stream isn't
 -- scoped per subject either.
-SELECT id, subject, depth, created_at, expires_at, revoked_at, kind
-FROM grants
-WHERE revoked_at IS NULL
-  AND expires_at IS NOT NULL
-  AND expires_at > now()
-  AND expires_at <= $1
-ORDER BY expires_at ASC;
+--
+-- Scopes come back via an array_agg subquery (same shape as GetFact/
+-- SearchFacts' fact_scopes aggregation in facts.sql) rather than a separate
+-- ListGrantScopes call per row: this query runs from the /api/events poll
+-- loop, potentially every eventPollInterval per connected SSE client, so an
+-- N+1 pattern here scales with (expiring grants) x (connected clients) x
+-- (polls/sec) — worth avoiding at the query level rather than in a hot loop.
+-- Found in review.
+SELECT g.id, g.subject, g.depth, g.created_at, g.expires_at, g.revoked_at, g.kind,
+       (SELECT array_agg(gs.scope) FROM grant_scopes gs WHERE gs.grant_id = g.id)::text[] AS scopes
+FROM grants g
+WHERE g.revoked_at IS NULL
+  AND g.expires_at IS NOT NULL
+  AND g.expires_at > now()
+  AND g.expires_at <= $1
+ORDER BY g.expires_at ASC;
