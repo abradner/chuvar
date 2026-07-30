@@ -12,15 +12,16 @@ import (
 )
 
 type AuditLog struct {
-	ID           string
-	EventType    string
-	Subject      string
-	FactID       *string
-	GrantID      *string
-	StagedDiffID *string
-	Scopes       []string
-	Detail       []byte
-	CreatedAt    time.Time
+	ID             string
+	EventType      string
+	Subject        string
+	FactID         *string
+	GrantID        *string
+	StagedDiffID   *string
+	Scopes         []string
+	Detail         []byte
+	CreatedAt      time.Time
+	GrantRequestID *string
 }
 
 type Fact struct {

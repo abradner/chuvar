@@ -9,14 +9,15 @@ import (
 )
 
 type AuditEvent struct {
-	ID           string
-	EventType    string
-	Subject      string
-	FactID       *string
-	GrantID      *string
-	StagedDiffID *string
-	Scopes       []string
-	CreatedAt    time.Time
+	ID             string
+	EventType      string
+	Subject        string
+	FactID         *string
+	GrantID        *string
+	StagedDiffID   *string
+	GrantRequestID *string
+	Scopes         []string
+	CreatedAt      time.Time
 }
 
 // LogAudit appends an entry to the audit log. Append-only: this package has no
@@ -31,11 +32,18 @@ type AuditEvent struct {
 // logAudit inside its own transaction instead (via q.WithTx), so the audit row and
 // the mutation it describes commit or roll back as one unit — seeing the mutation
 // without a corresponding audit row (or vice versa) should never be possible.
-func (s *Store) LogAudit(ctx context.Context, eventType, subject string, factID, grantID, stagedDiffID *string, scopes []string) error {
-	return logAudit(ctx, s.q, eventType, subject, factID, grantID, stagedDiffID, scopes)
+func (s *Store) LogAudit(ctx context.Context, eventType, subject string, factID, grantID, stagedDiffID, grantRequestID *string, scopes []string) error {
+	return logAudit(ctx, s.q, eventType, subject, factID, grantID, stagedDiffID, grantRequestID, scopes)
 }
 
-func logAudit(ctx context.Context, q *sqlcgen.Queries, eventType, subject string, factID, grantID, stagedDiffID *string, scopes []string) error {
+// logAudit's grantRequestID makes a grant_request_denied row attributable to
+// which request was denied — before this column existed, a denial audit row
+// carried event_type and the actor and nothing else, so multiple denials by
+// the same reviewer were indistinguishable without cross-referencing the
+// mutable grant_requests table by timestamp (flagged in review on #21).
+// grant_request_approved rows already linked forward via grantID (the newly
+// created grant); this adds the matching backward link for both outcomes.
+func logAudit(ctx context.Context, q *sqlcgen.Queries, eventType, subject string, factID, grantID, stagedDiffID, grantRequestID *string, scopes []string) error {
 	// scopes is NOT NULL DEFAULT '{}' — that default only applies when the column
 	// is omitted from the INSERT, not when an explicit NULL is bound, and pgx
 	// sends a nil Go slice as SQL NULL rather than an empty array literal. Callers
@@ -46,12 +54,13 @@ func logAudit(ctx context.Context, q *sqlcgen.Queries, eventType, subject string
 		scopes = []string{}
 	}
 	err := q.InsertAuditLog(ctx, sqlcgen.InsertAuditLogParams{
-		EventType:    eventType,
-		Subject:      subject,
-		FactID:       factID,
-		GrantID:      grantID,
-		StagedDiffID: stagedDiffID,
-		Scopes:       scopes,
+		EventType:      eventType,
+		Subject:        subject,
+		FactID:         factID,
+		GrantID:        grantID,
+		StagedDiffID:   stagedDiffID,
+		GrantRequestID: grantRequestID,
+		Scopes:         scopes,
 	})
 	if err != nil {
 		return fmt.Errorf("store: log audit event %q: %w", eventType, err)

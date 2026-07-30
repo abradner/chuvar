@@ -82,7 +82,7 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 
 		if missing := scope.Missing(requested, granted); len(missing) > 0 {
 			missingStrs := fromScopes(missing)
-			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, missingStrs); err != nil {
+			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, nil, missingStrs); err != nil {
 				return nil, readOutput{}, toolError("read_with_scope_check", err)
 			}
 			return nil, readOutput{Status: "insufficient_scope", MissingScopes: missingStrs}, nil
@@ -120,7 +120,7 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 		}
 		if missing := scope.Missing(requested, toScopes(grantedStrs)); len(missing) > 0 {
 			missingStrs := fromScopes(missing)
-			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, missingStrs); err != nil {
+			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, nil, missingStrs); err != nil {
 				return nil, readOutput{}, toolError("read_with_scope_check", err)
 			}
 			return nil, readOutput{Status: "insufficient_scope", MissingScopes: missingStrs}, nil
@@ -135,7 +135,7 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 		for _, f := range facts {
 			out.Facts = append(out.Facts, factView{ID: f.ID, Content: f.Content, Scopes: f.Scopes})
 		}
-		if err := st.LogAudit(ctx, "read", subject, nil, nil, nil, grantedStrs); err != nil {
+		if err := st.LogAudit(ctx, "read", subject, nil, nil, nil, nil, grantedStrs); err != nil {
 			return nil, readOutput{}, toolError("read_with_scope_check", err)
 		}
 		return nil, out, nil
