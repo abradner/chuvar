@@ -973,6 +973,63 @@ func TestCreateToken_BootstrapTokenCannotCreateFurtherTokensOnceEnrolledDeviceEx
 	}
 }
 
+// TestCreateToken_RevokingEveryEnrolledDeviceDoesNotReopenTheGate is the
+// regression test for the escalation the first version of this gate allowed:
+// it counted only *active* enrolled tokens, so revocation — bearer-only by
+// design, since it "only reduces authority" — could drop that count to zero
+// and reopen enrollment to whoever held the stolen bearer token. Counting
+// ever-enrolled tokens (revoked included) makes the signal monotonic. Found
+// in review of the fix itself, not of the original PR.
+func TestCreateToken_RevokingEveryEnrolledDeviceDoesNotReopenTheGate(t *testing.T) {
+	srv, bootstrapTokenValue := testServerWithBootstrapToken(t)
+
+	// Bootstrap mints the operator's first (and only) enrolled device.
+	enrolled := decodeInto[createTokenResponse](t, doJSONWithAuth(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "operator-phone"}, bootstrapTokenValue))
+	if enrolled.Token == "" {
+		t.Fatal("expected the first device token to be created")
+	}
+
+	// The attack: holding only the bootstrap bearer token, revoke the enrolled
+	// device. Revocation itself is expected to succeed — it is deliberately
+	// not TOTP-gated, and gating it would break the legitimate "revoke a lost
+	// device from a working one" flow.
+	resp := doJSONWithAuth(t, http.MethodPost, srv.URL+"/api/tokens/"+enrolled.ID+"/revoke", nil, bootstrapTokenValue)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST revoke status = %d, want 204", resp.StatusCode)
+	}
+
+	// Zero *active* enrolled devices now exist. The gate must stay shut
+	// anyway: the enrolled row is retained, so the ever-enrolled count is
+	// still 1 and minting still demands a code the attacker cannot produce.
+	resp = doJSONWithAuth(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "attacker-device"}, bootstrapTokenValue)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /api/tokens after revoking every enrolled device: status = %d, want 401 (revocation must not reopen enrollment)", resp.StatusCode)
+	}
+}
+
+// TestCreateToken_EnrolledCallerCanStillMintAfterRevokingAnotherDevice guards
+// the flip side of the test above: making the gate monotonic must not break
+// the legitimate lost-device flow, where the operator revokes the lost device
+// from a working one and mints its replacement.
+func TestCreateToken_EnrolledCallerCanStillMintAfterRevokingAnotherDevice(t *testing.T) {
+	srv, _ := testServer(t) // seeds one enrolled token (testAuthToken)
+
+	// Mint a second device from the first, then revoke it as if it were lost.
+	lost := decodeInto[createTokenResponse](t, doJSON(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "lost-laptop"}))
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/tokens/"+lost.ID+"/revoke", nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST revoke status = %d, want 204", resp.StatusCode)
+	}
+
+	// The still-enrolled operator device mints the replacement — doJSON
+	// attaches a valid TOTP code for testAuthToken, so this exercises the
+	// gate being satisfied rather than bypassed.
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "replacement-laptop"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /api/tokens from an enrolled device after revoking another: status = %d, want 201", resp.StatusCode)
+	}
+}
+
 func TestCreateToken_MissingLabelRejected(t *testing.T) {
 	srv, _ := testServer(t)
 

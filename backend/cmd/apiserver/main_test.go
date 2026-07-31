@@ -30,6 +30,25 @@ func testStore(t *testing.T) *store.Store {
 	return store.New(pool)
 }
 
+func TestWarnIfNoEnrolledDevice_SucceedsInBothStates(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+
+	// Zero enrolled: warns (logged, not asserted here) but must not fail boot —
+	// refusing to start would break every pre-TOTP-migration deployment on
+	// upgrade, turning a security gap into an outage.
+	if err := warnIfNoEnrolledDevice(ctx, st); err != nil {
+		t.Fatalf("warnIfNoEnrolledDevice() with no enrolled device: error = %v, want nil (warn, don't fail boot)", err)
+	}
+
+	if _, err := st.CreateReviewerToken(ctx, "device-a", "plaintext-a", "JBSWY3DPEHPK3PXP"); err != nil {
+		t.Fatalf("CreateReviewerToken() error = %v", err)
+	}
+	if err := warnIfNoEnrolledDevice(ctx, st); err != nil {
+		t.Fatalf("warnIfNoEnrolledDevice() with an enrolled device: error = %v, want nil", err)
+	}
+}
+
 func TestBootstrapReviewerToken_CreatesFirstTokenWhenNoneExist(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()

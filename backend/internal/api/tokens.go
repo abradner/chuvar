@@ -111,27 +111,47 @@ func generateToken() (string, error) {
 // response, alongside a fresh TOTP enrollment URI.
 //
 // Gated by TOTP conditionally, not via requireTOTP's unconditional wrap like
-// createGrant/approveGrantRequest/approveStagedDiff/renewGrant: once at least
-// one enrolled device exists (CountEnrolledReviewerTokens > 0), a valid code
-// is required from the caller, same as those routes. Below that count — a
-// fresh install, or every device having been revoked — no code is required,
-// because the bootstrap token this endpoint's first real call authenticates
-// with (cmd/apiserver's bootstrapReviewerToken) is deliberately created with
-// no TOTP secret of its own; an unconditional requireTOTP wrap would make it
-// impossible to ever mint the operator's first enrolled device. Once that
-// first device is enrolled, this same conditional check requires TOTP from
-// then on — including from the bootstrap token itself, which (having no
-// secret) can then never pass it again, correctly retiring it back to
-// break-glass status. Closes the gap where a stolen bearer token alone could
-// mint a fresh token, read its otpauth:// URI from the response, and
-// self-enroll — defeating every other requireTOTP gate. Found in review.
+// createGrant/approveGrantRequest/approveStagedDiff/renewGrant: once any
+// device has ever been enrolled (CountEverEnrolledReviewerTokens > 0), a valid
+// code is required from the caller, same as those routes. Below that — a fresh
+// install, or a deployment still carrying only pre-TOTP-migration tokens — no
+// code is required, because the bootstrap token this endpoint's first real
+// call authenticates with (cmd/apiserver's bootstrapReviewerToken) is
+// deliberately created with no TOTP secret of its own; an unconditional
+// requireTOTP wrap would make it impossible to ever mint the operator's first
+// enrolled device. Once that first device is enrolled the gate is permanently
+// closed — including against the bootstrap token itself, which (having no
+// secret) can never pass it again, correctly retiring it to break-glass
+// status. Closes the gap where a stolen bearer token alone could mint a fresh
+// token, read its otpauth:// URI from the response, and self-enroll,
+// defeating every other requireTOTP gate. Found in review.
+//
+// The count deliberately includes revoked tokens. An active-only count made
+// this gate re-openable by the very credential it defends against: revocation
+// is bearer-only (it "only reduces authority" — revokeToken's doc comment), so
+// a stolen bearer token could revoke every enrolled device, drop the count to
+// zero, and self-enroll a replacement through the reopened gate. Counting
+// ever-enrolled instead makes the signal monotonic — revoked rows are retained,
+// never deleted, so nothing reachable over this API can lower it — which also
+// restores revokeToken's "only reduces authority" property, since revocation
+// no longer widens what any other endpoint permits. Found in review of the
+// first version of this fix.
+//
+// The tradeoff: losing every enrolled device is not self-service recoverable
+// over the API. Minting a replacement needs a code the operator no longer has,
+// and REVIEWER_BOOTSTRAP_TOKEN can't help — a fresh bootstrap token still
+// faces a nonzero ever-enrolled count. That is deliberate: an API-reachable
+// recovery path is indistinguishable from the attack above. Recovery is a
+// direct database action (clear totp_secret on a token row, or delete the
+// enrolled rows), which suits this deployment's single operator with DB
+// access; see docs/operations.md.
 func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
-	enrolledCount, err := a.Store.CountEnrolledReviewerTokens(r.Context())
+	everEnrolled, err := a.Store.CountEverEnrolledReviewerTokens(r.Context())
 	if err != nil {
 		writeStoreError(w, http.StatusInternalServerError, "createToken", "could not check enrollment status", err)
 		return
 	}
-	if enrolledCount > 0 && !a.verifyTOTPCode(w, r) {
+	if everEnrolled > 0 && !a.verifyTOTPCode(w, r) {
 		return
 	}
 
@@ -177,6 +197,14 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 // any other active token — deliberately unrestricted for the same "one operator,
 // multiple devices, no role model yet" reason as every other route (package
 // comment); the operator is expected not to hand device tokens to anyone else.
+//
+// Left bearer-only (no requireTOTP) on the stance that revocation only ever
+// reduces authority. That stance is a real invariant, not just a convention:
+// createToken's enrollment gate is keyed on a count this endpoint must not be
+// able to lower, which is why that count includes revoked tokens. Before
+// widening what revocation can do — hard-deleting rows, clearing totp_secret,
+// anything that shrinks the ever-enrolled population — re-check createToken's
+// doc comment first; the two are coupled.
 func (a *API) revokeToken(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := a.Store.RevokeReviewerToken(r.Context(), id); err != nil {

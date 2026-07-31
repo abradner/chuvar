@@ -21,12 +21,19 @@ func (q *Queries) CountActiveReviewerTokens(ctx context.Context) (int64, error) 
 	return count, err
 }
 
-const countEnrolledReviewerTokens = `-- name: CountEnrolledReviewerTokens :one
-SELECT count(*) FROM reviewer_tokens WHERE revoked_at IS NULL AND totp_secret IS NOT NULL
+const countEverEnrolledReviewerTokens = `-- name: CountEverEnrolledReviewerTokens :one
+SELECT count(*) FROM reviewer_tokens WHERE totp_secret IS NOT NULL
 `
 
-func (q *Queries) CountEnrolledReviewerTokens(ctx context.Context) (int64, error) {
-	row := q.db.QueryRow(ctx, countEnrolledReviewerTokens)
+// Deliberately NOT filtered on revoked_at: this counts whether a TOTP device
+// has *ever* been enrolled, which is a monotonic, attacker-unlowerable signal.
+// Counting only active tokens made revocation (bearer-only by design, since it
+// "only reduces authority") into an escalation lever: revoke every enrolled
+// device, drop the count to zero, then mint a fresh token and self-enroll
+// through the now-open gate. Revoked rows are never deleted, so this count
+// only ever grows. See createToken (internal/api/tokens.go).
+func (q *Queries) CountEverEnrolledReviewerTokens(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countEverEnrolledReviewerTokens)
 	var count int64
 	err := row.Scan(&count)
 	return count, err

@@ -54,3 +54,60 @@ docker compose up -d         # Postgres + pgvector, local dev only
 cd backend && go run ./cmd/mcpserver   # MCP server (needs MCP_SUBJECT set)
 cd frontend && bun install && bun run dev   # approval UI
 ```
+
+## Enrolling the first device
+
+Mutations that grant or extend authority — approving a grant request, creating
+a grant directly, approving a staged diff, renewing a grant — require a
+device-local TOTP code on top of the bearer token. A bearer token is readable
+by anything with shell access to the environment holding it; the second factor
+is what a compromised agent session cannot produce.
+
+**Do this immediately after first start, and immediately after upgrading a
+deployment that predates the `reviewer_totp` migration.** That migration adds
+`totp_secret` as a nullable column with no backfill, so an upgraded deployment
+starts with *zero* enrolled devices — and while zero devices are enrolled,
+`POST /api/tokens` accepts a bearer token alone. Anything holding that token
+can mint a new one and enrol it, which defeats every gate above. The API cannot
+close that gap on its own: with no enrolled device, there is nothing to check a
+code against. `apiserver` logs a `SECURITY` warning on every start until this is
+done.
+
+```sh
+curl -X POST http://127.0.0.1:8080/api/tokens \
+  -H "Authorization: Bearer $CHUVAR_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"alex-phone"}'
+```
+
+The response carries the new token plaintext (shown once) and a
+`totp_enroll_uri` — scan it into an authenticator app. From then on the
+enrolment gate is permanently closed: minting any further token requires a code
+from an already-enrolled device.
+
+There is no UI for this yet; it is a deliberate one-time operator action.
+
+### If every enrolled device is lost
+
+Recovery is a direct database action, not an API call:
+
+```sh
+docker compose exec postgres psql -U chuvar -d chuvar \
+  -c "UPDATE reviewer_tokens SET totp_secret = NULL;"
+```
+
+Note the absence of a `WHERE` clause — it is deliberate. The gate counts every
+row that has *ever* carried a secret, revoked rows included, so leaving
+`revoked_at IS NULL` in place would clear only the active devices and leave the
+count nonzero, keeping the gate shut. Clearing all of them returns the
+deployment to the "no device has ever enrolled" state; active bearer tokens keep
+working, and the next `POST /api/tokens` is ungated so you can enrol a fresh
+device. Re-enrol immediately — the warning above applies again until you do.
+
+This is intentionally not self-service over the API. Any API-reachable reset
+would be indistinguishable from the attack it exists to prevent — an attacker
+holding a stolen bearer token driving the same reset. `REVIEWER_BOOTSTRAP_TOKEN`
+does not help here either: a fresh bootstrap token still faces a nonzero
+ever-enrolled count and cannot mint. The recovery path assumes the operator has
+database access, which suits this deployment shape (single operator, own
+hardware) and would need revisiting for anything multi-tenant.

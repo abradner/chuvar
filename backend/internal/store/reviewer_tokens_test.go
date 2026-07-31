@@ -123,6 +123,61 @@ func TestReviewerTokens_CountActive(t *testing.T) {
 	}
 }
 
+// TestReviewerTokens_CountEverEnrolledIsMonotonic pins the property
+// createToken's enrollment gate depends on: the count must not be lowerable
+// through anything reachable over the API. Revocation in particular must not
+// lower it — an active-only count let a stolen bearer token revoke every
+// enrolled device and reopen enrollment (see createToken's doc comment).
+func TestReviewerTokens_CountEverEnrolledIsMonotonic(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	n, err := s.CountEverEnrolledReviewerTokens(ctx)
+	if err != nil {
+		t.Fatalf("CountEverEnrolledReviewerTokens() error = %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("CountEverEnrolledReviewerTokens() on empty table = %d, want 0", n)
+	}
+
+	// An unenrolled token (the bootstrap token's shape) must not count.
+	if _, err := s.CreateReviewerToken(ctx, "bootstrap", "plaintext-bootstrap", ""); err != nil {
+		t.Fatalf("CreateReviewerToken() error = %v", err)
+	}
+	n, err = s.CountEverEnrolledReviewerTokens(ctx)
+	if err != nil {
+		t.Fatalf("CountEverEnrolledReviewerTokens() error = %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("CountEverEnrolledReviewerTokens() with only an unenrolled token = %d, want 0", n)
+	}
+
+	enrolled, err := s.CreateReviewerToken(ctx, "device-a", "plaintext-a", "JBSWY3DPEHPK3PXP")
+	if err != nil {
+		t.Fatalf("CreateReviewerToken() error = %v", err)
+	}
+	n, err = s.CountEverEnrolledReviewerTokens(ctx)
+	if err != nil {
+		t.Fatalf("CountEverEnrolledReviewerTokens() error = %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("CountEverEnrolledReviewerTokens() = %d, want 1", n)
+	}
+
+	// The load-bearing assertion: revoking the enrolled token must NOT drop
+	// the count back to zero, even though CountActiveReviewerTokens does.
+	if err := s.RevokeReviewerToken(ctx, enrolled.ID); err != nil {
+		t.Fatalf("RevokeReviewerToken() error = %v", err)
+	}
+	n, err = s.CountEverEnrolledReviewerTokens(ctx)
+	if err != nil {
+		t.Fatalf("CountEverEnrolledReviewerTokens() error = %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("CountEverEnrolledReviewerTokens() after revoking the only enrolled token = %d, want 1 (revocation must not lower this)", n)
+	}
+}
+
 func TestCreateReviewerToken_EmptyLabelRejected(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
