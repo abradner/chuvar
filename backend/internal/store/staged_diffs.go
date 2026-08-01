@@ -134,7 +134,10 @@ func (s *Store) factVisibleToScopes(ctx context.Context, id string, grantedScope
 // design question, not a filter: dedupe legitimately needs to compare against
 // facts the proposer cannot read, so narrowing the search to full-depth-granted
 // facts would silently degrade dedupe into letting duplicates through. Tracked as
-// its own issue rather than guessed at — see GitHub issue #30.
+// its own ticket rather than guessed at: Notion, "Known gap: propose_write's
+// dedupe verdict is a content-confirmation oracle that bypasses grant depth"
+// (project: Enforcement Boundary & Known Gaps). Notion is this project's
+// issue tracker — GitHub issues are not used.
 func (s *Store) findDedupeCandidate(ctx context.Context, content string, embedding []float32, grantedScopes []string) (DedupeVerdict, string, error) {
 	if len(embedding) == 0 || len(grantedScopes) == 0 {
 		return DedupeNovel, "", nil
