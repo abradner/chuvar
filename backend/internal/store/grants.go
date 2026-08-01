@@ -294,7 +294,11 @@ func (s *Store) RenewGrant(ctx context.Context, grantID string, ttl time.Duratio
 	newExpiry := time.Now().Add(ttl)
 	row, err := qtx.RenewGrant(ctx, sqlcgen.RenewGrantParams{ID: grantID, ExpiresAt: toTimestamptz(&newExpiry)})
 	if err != nil {
-		return Grant{}, fmt.Errorf("store: grant %s not found, revoked, or already expired: %w", grantID, err)
+		// The query also declines non-memory kinds, so that case lands here too
+		// — named explicitly rather than left to read as "not found", which
+		// would send someone hunting for a missing row that is right there.
+		return Grant{}, fmt.Errorf("store: grant %s not found, revoked, already expired, "+
+			"or not a memory grant (capability grants are not renewable — see queries/grants.sql): %w", grantID, err)
 	}
 
 	scopes, err := qtx.ListGrantScopes(ctx, grantID)

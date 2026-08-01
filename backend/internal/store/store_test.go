@@ -148,6 +148,43 @@ func TestRenewGrant_RevokedGrantRejected(t *testing.T) {
 	}
 }
 
+// A capability grant must not be renewable through the memory-grant path. No
+// surface can create one yet (both API and MCP hardcode kind='memory'), so this
+// inserts one directly — the only way to exercise a latch closed ahead of the
+// door it guards. When brokerd gains a real creation path, this test keeps
+// renewal from silently inheriting memory semantics on the way through.
+func TestRenewGrant_CapabilityGrantRejected(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+
+	// depth must be NULL for kind='capability' — the grants_kind_depth_pairing
+	// CHECK enforces the pairing, so this insert also asserts that constraint
+	// still says what it did when it was written.
+	var id string
+	err := pool.QueryRow(ctx,
+		`INSERT INTO grants (subject, kind, depth, expires_at)
+		 VALUES ($1, 'capability', NULL, now() + interval '1 hour') RETURNING id`,
+		"agent-capability",
+	).Scan(&id)
+	if err != nil {
+		t.Fatalf("seeding a capability grant: %v", err)
+	}
+
+	if _, err := s.RenewGrant(ctx, id, time.Hour, "human-reviewer"); err == nil {
+		t.Fatal("RenewGrant() renewed a capability grant: want error, got nil")
+	}
+
+	// And the memory path is unaffected — the filter must not be so broad it
+	// breaks the case renewal was actually built for.
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+	if _, err := s.RenewGrant(ctx, g.ID, time.Hour, "human-reviewer"); err != nil {
+		t.Fatalf("RenewGrant() on a memory grant error = %v", err)
+	}
+}
+
 func TestRenewGrant_AlreadyExpiredGrantRejected(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()

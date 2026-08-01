@@ -88,6 +88,17 @@ type Querier interface {
 	// be renewed — zero rows affected (surfaced by sqlc as pgx.ErrNoRows for a
 	// :one query) covers "doesn't exist," "already revoked," and "already
 	// expired" alike; store.RenewGrant turns that into one clear error.
+	//
+	// kind = 'memory' is deliberate, not incidental. Renewal was built for memory
+	// grants, and extending a *capability* grant is a materially different act:
+	// capability renewal has to answer what happens to key material held for the
+	// grant's duration, whether the custody backend must be reachable to renew,
+	// and whether a renewal is a fresh authorization decision rather than a date
+	// change. None of that is designed yet. Until the broker answers it, a
+	// capability grant is renewed by not being renewable — deliberately, rather
+	// than inheriting memory's semantics by omission. Nothing can create one
+	// today (both API and MCP hardcode kind='memory'), so this filter is a latch
+	// closed before the door exists, not a live fix.
 	RenewGrant(ctx context.Context, arg RenewGrantParams) (Grant, error)
 	RevokeGrant(ctx context.Context, id string) (int64, error)
 	RevokeReviewerToken(ctx context.Context, id string) (int64, error)
