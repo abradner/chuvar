@@ -5,10 +5,28 @@ package store
 
 import "time"
 
+// GrantKind discriminates what a grant governs. Introduced so grants/
+// grant_requests/audit_log — one consent primitive (subject, scopes, TTL,
+// revocation, audit) — can be reused for the Agent Capability Broker
+// workstream's capabilities (git commit signing first) without a second,
+// parallel schema. depth is meaningful only for KindMemory; see the
+// grant_kind migration's doc comment for the DB-level invariant.
+type GrantKind string
+
+const (
+	GrantKindMemory     GrantKind = "memory"
+	GrantKindCapability GrantKind = "capability"
+)
+
 type Grant struct {
-	ID        string
-	Subject   string
-	Scopes    []string
+	ID      string
+	Subject string
+	Scopes  []string
+	Kind    GrantKind
+	// Depth is empty for anything other than KindMemory — there is no
+	// equivalent concept for a capability grant. Kept as a plain string
+	// (empty-string sentinel) rather than *string to match how "" already
+	// meant "unset" at the API/mcptools boundary before this type existed.
 	Depth     string
 	CreatedAt time.Time
 	ExpiresAt *time.Time

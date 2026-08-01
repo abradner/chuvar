@@ -152,7 +152,7 @@ func TestStreamEvents_AnnouncesNewGrantRequestAndItsResolution(t *testing.T) {
 
 	sse.readSSE(t, 1, 2*time.Second) // "ready"
 
-	greq, err := st.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "")
+	greq, err := st.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "")
 	if err != nil {
 		t.Fatalf("RequestGrant() error = %v", err)
 	}

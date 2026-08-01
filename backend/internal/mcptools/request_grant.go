@@ -16,10 +16,6 @@ import (
 // needs to pad out.
 const maxJustificationLength = 2048
 
-// validRequestDepths mirrors the CHECK constraint on grant_requests.depth — same
-// hand-synced closed-vocabulary stance as store.validDepths.
-var validRequestDepths = map[string]bool{"summary": true, "facts": true, "full": true}
-
 type requestGrantArgs struct {
 	RequestedScopes []string `json:"requested_scopes" jsonschema:"scopes you're asking to be granted"`
 	Depth           string   `json:"depth,omitempty" jsonschema:"summary, facts, or full; defaults to facts"`
@@ -65,7 +61,7 @@ func registerRequestGrant(s *mcp.Server, subject string, st *store.Store) {
 		if depth == "" {
 			depth = "facts"
 		}
-		if !validRequestDepths[depth] {
+		if !store.ValidDepth(depth) {
 			return nil, requestGrantOutput{}, fmt.Errorf("request_grant: depth must be one of summary, facts, full (got %q)", depth)
 		}
 
@@ -85,7 +81,10 @@ func registerRequestGrant(s *mcp.Server, subject string, st *store.Store) {
 			ttl = &args.TTLSeconds
 		}
 
-		req, err := st.RequestGrant(ctx, subject, args.RequestedScopes, depth, ttl, args.Justification)
+		// kind is hardcoded to memory — agents can't request a capability-kind
+		// grant through this tool (no such flow exists yet; see store.CreateGrant's
+		// doc comment on the equivalent REST path).
+		req, err := st.RequestGrant(ctx, subject, args.RequestedScopes, string(store.GrantKindMemory), depth, ttl, args.Justification)
 		if err != nil {
 			return nil, requestGrantOutput{}, toolError("request_grant", err)
 		}

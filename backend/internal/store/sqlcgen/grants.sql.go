@@ -41,19 +41,25 @@ func (q *Queries) GrantedScopes(ctx context.Context, subject string) ([]string, 
 }
 
 const insertGrant = `-- name: InsertGrant :one
-INSERT INTO grants (subject, depth, expires_at)
-VALUES ($1, $2, $3)
-RETURNING id, subject, depth, created_at, expires_at, revoked_at
+INSERT INTO grants (subject, kind, depth, expires_at)
+VALUES ($1, $2, $3, $4)
+RETURNING id, subject, depth, created_at, expires_at, revoked_at, kind
 `
 
 type InsertGrantParams struct {
 	Subject   string
-	Depth     string
+	Kind      string
+	Depth     *string
 	ExpiresAt pgtype.Timestamptz
 }
 
 func (q *Queries) InsertGrant(ctx context.Context, arg InsertGrantParams) (Grant, error) {
-	row := q.db.QueryRow(ctx, insertGrant, arg.Subject, arg.Depth, arg.ExpiresAt)
+	row := q.db.QueryRow(ctx, insertGrant,
+		arg.Subject,
+		arg.Kind,
+		arg.Depth,
+		arg.ExpiresAt,
+	)
 	var i Grant
 	err := row.Scan(
 		&i.ID,
@@ -62,6 +68,7 @@ func (q *Queries) InsertGrant(ctx context.Context, arg InsertGrantParams) (Grant
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.RevokedAt,
+		&i.Kind,
 	)
 	return i, err
 }
@@ -105,7 +112,7 @@ func (q *Queries) ListGrantScopes(ctx context.Context, grantID string) ([]string
 }
 
 const listGrants = `-- name: ListGrants :many
-SELECT id, subject, depth, created_at, expires_at, revoked_at
+SELECT id, subject, depth, created_at, expires_at, revoked_at, kind
 FROM grants WHERE subject = $1 ORDER BY created_at DESC
 `
 
@@ -125,6 +132,7 @@ func (q *Queries) ListGrants(ctx context.Context, subject string) ([]Grant, erro
 			&i.CreatedAt,
 			&i.ExpiresAt,
 			&i.RevokedAt,
+			&i.Kind,
 		); err != nil {
 			return nil, err
 		}

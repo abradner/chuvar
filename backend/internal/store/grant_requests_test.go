@@ -10,7 +10,7 @@ func TestGrantRequests_RequestApproveCreatesRealGrant(t *testing.T) {
 	ctx := context.Background()
 
 	ttl := 3600
-	req, err := s.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", &ttl, "need this to answer a question")
+	req, err := s.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", &ttl, "need this to answer a question")
 	if err != nil {
 		t.Fatalf("RequestGrant() error = %v", err)
 	}
@@ -61,11 +61,32 @@ func TestGrantRequests_RequestApproveCreatesRealGrant(t *testing.T) {
 	}
 }
 
+func TestGrantRequests_ApproveCapabilityKindCarriesNoDepth(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	req, err := s.RequestGrant(ctx, "agent-a", []string{"git.sign:github.com/abradner/chuvar"}, "capability", "", nil, "")
+	if err != nil {
+		t.Fatalf("RequestGrant() with kind=capability error = %v", err)
+	}
+	if req.Kind != GrantKindCapability || req.Depth != "" {
+		t.Fatalf("RequestGrant() = %+v, want kind=capability with empty depth", req)
+	}
+
+	grant, err := s.ApproveGrantRequest(ctx, req.ID, "human-reviewer")
+	if err != nil {
+		t.Fatalf("ApproveGrantRequest() error = %v", err)
+	}
+	if grant.Kind != GrantKindCapability || grant.Depth != "" {
+		t.Fatalf("approved grant = %+v, want kind=capability with empty depth (kind flows request -> grant unchanged)", grant)
+	}
+}
+
 func TestGrantRequests_Deny(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	req, err := s.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "")
+	req, err := s.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "")
 	if err != nil {
 		t.Fatalf("RequestGrant() error = %v", err)
 	}
@@ -104,11 +125,11 @@ func TestGrantRequests_ListByStatus(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	pending, err := s.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "")
+	pending, err := s.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "")
 	if err != nil {
 		t.Fatalf("RequestGrant() error = %v", err)
 	}
-	toApprove, err := s.RequestGrant(ctx, "agent-b", []string{"preferences.food"}, "facts", nil, "")
+	toApprove, err := s.RequestGrant(ctx, "agent-b", []string{"preferences.food"}, "memory", "facts", nil, "")
 	if err != nil {
 		t.Fatalf("RequestGrant() error = %v", err)
 	}
@@ -137,7 +158,7 @@ func TestRequestGrant_InvalidDepthRejected(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	if _, err := s.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "bogus", nil, ""); err == nil {
+	if _, err := s.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "bogus", nil, ""); err == nil {
 		t.Fatal("RequestGrant() with an invalid depth succeeded, want an error")
 	}
 }
@@ -146,7 +167,7 @@ func TestRequestGrant_EmptyScopesRejected(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	if _, err := s.RequestGrant(ctx, "agent-a", nil, "facts", nil, ""); err == nil {
+	if _, err := s.RequestGrant(ctx, "agent-a", nil, "memory", "facts", nil, ""); err == nil {
 		t.Fatal("RequestGrant() with no scopes succeeded, want an error")
 	}
 }
@@ -159,7 +180,7 @@ func TestRequestGrant_DuplicateScopesDedupedSoApprovalSucceeds(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	req, err := s.RequestGrant(ctx, "agent-a", []string{"identity.basic", "identity.basic"}, "facts", nil, "")
+	req, err := s.RequestGrant(ctx, "agent-a", []string{"identity.basic", "identity.basic"}, "memory", "facts", nil, "")
 	if err != nil {
 		t.Fatalf("RequestGrant() error = %v", err)
 	}

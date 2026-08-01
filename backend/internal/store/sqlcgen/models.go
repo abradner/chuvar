@@ -45,17 +45,18 @@ type FactScope struct {
 type Grant struct {
 	ID        string
 	Subject   string
-	Depth     string
+	Depth     *string
 	CreatedAt time.Time
 	ExpiresAt *time.Time
 	RevokedAt *time.Time
+	Kind      string
 }
 
 type GrantRequest struct {
 	ID                  string
 	Subject             string
 	RequestedScopes     []string
-	Depth               string
+	Depth               *string
 	RequestedTtlSeconds pgtype.Int4
 	Justification       string
 	Status              string
@@ -63,6 +64,7 @@ type GrantRequest struct {
 	DecidedAt           *time.Time
 	DecidedBy           *string
 	ResultingGrantID    *string
+	Kind                string
 }
 
 type GrantScope struct {

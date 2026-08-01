@@ -1,13 +1,13 @@
 -- name: InsertGrant :one
-INSERT INTO grants (subject, depth, expires_at)
-VALUES ($1, $2, $3)
-RETURNING id, subject, depth, created_at, expires_at, revoked_at;
+INSERT INTO grants (subject, kind, depth, expires_at)
+VALUES ($1, $2, $3, $4)
+RETURNING id, subject, depth, created_at, expires_at, revoked_at, kind;
 
 -- name: InsertGrantScope :exec
 INSERT INTO grant_scopes (grant_id, scope) VALUES ($1, $2);
 
 -- name: ListGrants :many
-SELECT id, subject, depth, created_at, expires_at, revoked_at
+SELECT id, subject, depth, created_at, expires_at, revoked_at, kind
 FROM grants WHERE subject = $1 ORDER BY created_at DESC;
 
 -- name: ListGrantScopes :many

@@ -8,27 +8,88 @@ import (
 	"github.com/abradner/chuvar/backend/internal/store/sqlcgen"
 )
 
-// validDepths mirrors the CHECK constraint on grants.depth in the schema — kept in
-// sync by hand, not queried from the DB, since it changes about as often as the
-// migration itself. Validating here means a bad value comes back as a clear "store:
-// invalid depth" error instead of a raw Postgres check-constraint violation leaking
-// out of this package.
-var validDepths = map[string]bool{"summary": true, "facts": true, "full": true}
+// ValidDepth mirrors the CHECK constraint on grants.depth/grant_requests.depth in
+// the schema — kept in sync by hand, not queried from the DB, since it changes
+// about as often as the migration itself. The single copy every layer that
+// accepts external input (this package, internal/api, internal/mcptools) now
+// calls, replacing three independently hand-synced maps that carried the
+// identical drift risk. Checking here means a bad value comes back as a clear
+// validation error instead of a raw Postgres check-constraint violation leaking
+// out.
+func ValidDepth(depth string) bool {
+	switch depth {
+	case "summary", "facts", "full":
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidKind mirrors the CHECK constraint on grants.kind/grant_requests.kind.
+func ValidKind(kind string) bool {
+	switch GrantKind(kind) {
+	case GrantKindMemory, GrantKindCapability:
+		return true
+	default:
+		return false
+	}
+}
+
+// validateKindAndDepth enforces the same pairing invariant as the DB's
+// grants_kind_depth_pairing / grant_requests_kind_depth_pairing CHECK
+// constraints, at the Go boundary rather than as a raw constraint-violation
+// error: kind defaults to memory when omitted (every caller before this type
+// existed only ever created memory grants), a memory kind requires a valid
+// depth, and any other kind must not carry one — there's no equivalent concept
+// for a capability grant yet.
+func validateKindAndDepth(kind, depth string) (GrantKind, string, error) {
+	if kind == "" {
+		kind = string(GrantKindMemory)
+	}
+	if !ValidKind(kind) {
+		return "", "", fmt.Errorf("store: invalid kind %q (want memory or capability)", kind)
+	}
+	if GrantKind(kind) == GrantKindMemory {
+		if !ValidDepth(depth) {
+			return "", "", fmt.Errorf("store: invalid depth %q (want summary, facts, or full)", depth)
+		}
+	} else if depth != "" {
+		return "", "", fmt.Errorf("store: depth must not be set for kind %q", kind)
+	}
+	return GrantKind(kind), depth, nil
+}
+
+// nullableDepth converts the empty-string "no depth" sentinel to NULL for
+// storage — depth is empty exactly when kind isn't memory (validateKindAndDepth
+// already enforced that pairing).
+func nullableDepth(depth string) *string {
+	if depth == "" {
+		return nil
+	}
+	return &depth
+}
+
+// depthOrEmpty is nullableDepth's inverse, reading a row back out.
+func depthOrEmpty(depth *string) string {
+	if depth == nil {
+		return ""
+	}
+	return *depth
+}
 
 // CreateGrant records a new time-boxed grant. ttl of nil means no expiry. actor is
 // who's creating the grant — required, logged to audit_log in the same transaction
-// as the insert (see logAudit's doc comment). Under the current shared-bearer-token
-// REST auth (internal/api's package comment), actor is self-reported by the
-// caller, not cryptographically authenticated identity — the audit trail is honest
-// about who *claimed* to approve something, not a guarantee against a token holder
-// misattributing it. Closing that gap needs real per-reviewer auth, a product
-// decision this project hasn't made yet (same caveat as decided_by on diffs).
-func (s *Store) CreateGrant(ctx context.Context, subject string, scopes []string, depth string, ttl *time.Duration, actor string) (Grant, error) {
+// as the insert (see logAudit's doc comment). decided_by/approved_by/revoked_by
+// are derived from the authenticated reviewer token (internal/api's requireAuth),
+// never read from the request body — actor here is that already-authenticated
+// identity, not client-supplied.
+func (s *Store) CreateGrant(ctx context.Context, subject string, scopes []string, kind, depth string, ttl *time.Duration, actor string) (Grant, error) {
 	if len(scopes) == 0 {
 		return Grant{}, fmt.Errorf("store: grant must include at least one scope")
 	}
-	if !validDepths[depth] {
-		return Grant{}, fmt.Errorf("store: invalid depth %q (want summary, facts, or full)", depth)
+	validKind, depth, err := validateKindAndDepth(kind, depth)
+	if err != nil {
+		return Grant{}, err
 	}
 	if actor == "" {
 		return Grant{}, fmt.Errorf("store: actor must not be empty")
@@ -49,7 +110,8 @@ func (s *Store) CreateGrant(ctx context.Context, subject string, scopes []string
 
 	row, err := qtx.InsertGrant(ctx, sqlcgen.InsertGrantParams{
 		Subject:   subject,
-		Depth:     depth,
+		Kind:      string(validKind),
+		Depth:     nullableDepth(depth),
 		ExpiresAt: toTimestamptz(expiresAt),
 	})
 	if err != nil {
@@ -74,7 +136,8 @@ func (s *Store) CreateGrant(ctx context.Context, subject string, scopes []string
 		ID:        row.ID,
 		Subject:   row.Subject,
 		Scopes:    scopes,
-		Depth:     row.Depth,
+		Kind:      GrantKind(row.Kind),
+		Depth:     depthOrEmpty(row.Depth),
 		CreatedAt: row.CreatedAt,
 		ExpiresAt: row.ExpiresAt,
 		RevokedAt: row.RevokedAt,
@@ -98,7 +161,8 @@ func (s *Store) ListGrants(ctx context.Context, subject string) ([]Grant, error)
 			ID:        r.ID,
 			Subject:   r.Subject,
 			Scopes:    scopes,
-			Depth:     r.Depth,
+			Kind:      GrantKind(r.Kind),
+			Depth:     depthOrEmpty(r.Depth),
 			CreatedAt: r.CreatedAt,
 			ExpiresAt: r.ExpiresAt,
 			RevokedAt: r.RevokedAt,

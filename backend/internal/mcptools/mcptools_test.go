@@ -85,7 +85,7 @@ func TestListGrants_ViaMCP(t *testing.T) {
 	session, st := testSession(t, "agent-a")
 	ctx := context.Background()
 
-	if _, err := st.CreateGrant(ctx, "agent-a", []string{"identity.basic", "preferences.coffee"}, "facts", nil, "human-reviewer"); err != nil {
+	if _, err := st.CreateGrant(ctx, "agent-a", []string{"identity.basic", "preferences.coffee"}, "memory", "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
@@ -129,10 +129,10 @@ func TestSubjectIsBoundNotClientSupplied(t *testing.T) {
 	}
 	st := store.New(pool)
 
-	if _, err := st.CreateGrant(ctx, "alice", []string{"identity.sensitive"}, "facts", nil, "human-reviewer"); err != nil {
+	if _, err := st.CreateGrant(ctx, "alice", []string{"identity.sensitive"}, "memory", "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
-	if _, err := st.CreateGrant(ctx, "bob", []string{"preferences.coffee"}, "facts", nil, "human-reviewer"); err != nil {
+	if _, err := st.CreateGrant(ctx, "bob", []string{"preferences.coffee"}, "memory", "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
@@ -277,7 +277,7 @@ func TestReadWithScopeCheck_RevokedMidEmbedIsRejected(t *testing.T) {
 	}
 
 	st := store.New(pool)
-	g, err := st.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "test-setup")
+	g, err := st.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "test-setup")
 	if err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
@@ -330,7 +330,7 @@ func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 	// separate, human-triggered action (AGENTS.md §3.1), not exposed as an MCP
 	// tool in v0. Commit it directly via the store, standing in for that human
 	// approval step.
-	if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.coffee"}, "facts", nil, "human-reviewer"); err != nil {
+	if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.coffee"}, "memory", "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 	beforeCommit := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
