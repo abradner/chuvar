@@ -25,6 +25,26 @@ func ValidDepth(depth string) bool {
 	}
 }
 
+// depthRank orders depths by permissiveness, for computing an effective depth
+// across multiple covering grants (facts.go's effectiveDepth) — not derivable
+// by sorting the strings themselves, since "facts" < "full" < "summary"
+// alphabetically is not the permissiveness order. Panics on an invalid depth:
+// every caller is expected to have already passed depth through ValidDepth
+// (at write time) or to be reading it back from a column the DB CHECK
+// constraint already restricts to these three values.
+func depthRank(depth string) int {
+	switch depth {
+	case "summary":
+		return 0
+	case "facts":
+		return 1
+	case "full":
+		return 2
+	default:
+		panic(fmt.Sprintf("store: depthRank: invalid depth %q", depth))
+	}
+}
+
 // ValidKind mirrors the CHECK constraint on grants.kind/grant_requests.kind.
 func ValidKind(kind string) bool {
 	switch GrantKind(kind) {
@@ -172,14 +192,38 @@ func (s *Store) ListGrants(ctx context.Context, subject string) ([]Grant, error)
 }
 
 // GrantedScopes returns the union of scopes granted to subject across all currently
-// active (non-revoked, unexpired) grants. This is what read-with-scope-check checks
-// requested scopes against.
+// active (non-revoked, unexpired) memory-kind grants. This is what read-with-scope-
+// check checks requested scopes against, and what the bouncer's dedupe/target-fact
+// visibility checks gate on. kind = memory is enforced in the query itself: before
+// that filter existed, a capability-only grant (e.g. git.sign:...) silently also
+// authorized memory reads/writes over the same scope string — a confused-deputy gap
+// introduced when the kind discriminator landed, closed here rather than left for
+// GrantedScopeDepths (below) to be the only place that gets it right.
 func (s *Store) GrantedScopes(ctx context.Context, subject string) ([]string, error) {
 	scopes, err := s.q.GrantedScopes(ctx, subject)
 	if err != nil {
 		return nil, fmt.Errorf("store: granted scopes: %w", err)
 	}
 	return scopes, nil
+}
+
+// GrantedScopeDepths returns each of subject's currently active memory-kind scope
+// grants paired with that grant's depth, for depth-aware reads (SearchFacts).
+// Unlike GrantedScopes this doesn't collapse to a deduped flat list: a subject can
+// hold more than one active grant covering the same or overlapping scope at
+// different depths (e.g. a broad long-lived grant and a narrower recent one), and
+// the caller needs every covering grant's depth to compute an effective depth per
+// fact — see facts.go's effectiveDepth for the composition rule.
+func (s *Store) GrantedScopeDepths(ctx context.Context, subject string) ([]GrantedScope, error) {
+	rows, err := s.q.GrantedScopeDepths(ctx, subject)
+	if err != nil {
+		return nil, fmt.Errorf("store: granted scope depths: %w", err)
+	}
+	out := make([]GrantedScope, len(rows))
+	for i, r := range rows {
+		out[i] = GrantedScope{Scope: r.Scope, Depth: depthOrEmpty(r.Depth)}
+	}
+	return out, nil
 }
 
 // RevokeGrant marks a grant revoked. Idempotent calls (revoking an already-revoked

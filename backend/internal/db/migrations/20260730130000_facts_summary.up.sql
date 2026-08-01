@@ -1,0 +1,14 @@
+-- summary is nullable with no backfill: pre-migration facts have no summary,
+-- and a summary-depth read of such a fact must return an empty Summary and no
+-- Content — never silently fall back to full content, which would un-enforce
+-- the very thing this migration exists for (Notion: "Known gap: grant depth
+-- (summary/facts/full) is stored and validated but not enforced"; see
+-- mcptools.factView's doc comment for the enforcement itself).
+--
+-- Populated at commit time (api.approveStagedDiff, alongside the existing
+-- Embedder.Embed call, both immediately before store.CommitDiff) by
+-- internal/summarize.Summarizer — not at propose time: unlike embedding,
+-- nothing at propose time consumes a summary, so summarizing every staged
+-- diff (including ones later rejected) would be pure waste, and there is no
+-- staged_diffs.summary column to hold it in the meantime.
+ALTER TABLE facts ADD COLUMN summary TEXT;

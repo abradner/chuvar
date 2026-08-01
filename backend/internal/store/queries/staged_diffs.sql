@@ -62,9 +62,9 @@ SELECT EXISTS (
 ) AS has_duplicate;
 
 -- name: InsertFact :one
-INSERT INTO facts (content, embedding, source_staged_diff_id)
-VALUES ($1, $2, $3)
-RETURNING id, content, created_at, valid_at;
+INSERT INTO facts (content, summary, embedding, source_staged_diff_id)
+VALUES ($1, $2, $3, $4)
+RETURNING id, content, summary, created_at, valid_at;
 
 -- name: InsertFactScope :exec
 INSERT INTO fact_scopes (fact_id, scope) VALUES ($1, $2);

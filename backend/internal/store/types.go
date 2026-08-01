@@ -77,9 +77,29 @@ type StagedDiff struct {
 }
 
 type Fact struct {
-	ID        string
+	ID string
+	// Content and Summary are mutually exclusive projections of the fact,
+	// selected by Depth: SearchFacts sets exactly one of them, matching the
+	// depth of the grant(s) that authorized this read (see facts.go's
+	// effectiveDepth). GetFact (the reviewer-facing, unfiltered lookup) sets
+	// Content only and leaves Depth empty — there's no grant/depth concept on
+	// that path.
 	Content   string
+	Summary   string
+	Depth     string
 	Scopes    []string
 	CreatedAt time.Time
 	ValidAt   time.Time
+}
+
+// GrantedScope pairs a granted scope with the depth of the grant that covers
+// it, for depth-aware reads (SearchFacts). Unlike GrantedScopes' flat
+// deduped []string, this doesn't collapse multiple covering grants into one
+// entry — SearchFacts needs every covering grant's depth to compute an
+// effective depth per fact (facts.go's effectiveDepth), since a subject can
+// hold more than one active grant over the same or overlapping scope at
+// different depths.
+type GrantedScope struct {
+	Scope string
+	Depth string
 }

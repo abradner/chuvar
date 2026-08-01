@@ -349,7 +349,7 @@ func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Embed() error = %v", err)
 	}
-	if _, err := st.CommitDiff(ctx, proposed.DiffID, "human-reviewer", commitVec); err != nil {
+	if _, err := st.CommitDiff(ctx, proposed.DiffID, "human-reviewer", commitVec, ""); err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
@@ -362,6 +362,49 @@ func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 	}
 	if len(afterCommit.Facts) != 1 {
 		t.Fatalf("read after commit facts = %+v, want 1", afterCommit.Facts)
+	}
+}
+
+func TestReadWithScopeCheck_SummaryDepthRedactsContent_ViaMCP(t *testing.T) {
+	session, st := testSession(t, "agent-a")
+	ctx := context.Background()
+
+	proposed := callTool[proposeWriteOutput](t, session, "propose_write", proposeWriteArgs{
+		Content:        "user's favorite coffee order is a flat white",
+		ProposedScopes: []string{"preferences.coffee"},
+	})
+
+	if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.coffee"}, "memory", "summary", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	commitVec, err := embed.Stub{}.Embed(ctx, "user's favorite coffee order is a flat white")
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	if _, err := st.CommitDiff(ctx, proposed.DiffID, "human-reviewer", commitVec, "a stub summary of the coffee fact"); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	out := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
+		Query:           "coffee",
+		RequestedScopes: []string{"preferences.coffee"},
+	})
+	if out.Status != "ok" {
+		t.Fatalf("read status = %q, want ok", out.Status)
+	}
+	if len(out.Facts) != 1 {
+		t.Fatalf("read facts = %+v, want 1", out.Facts)
+	}
+	got := out.Facts[0]
+	if got.Depth != "summary" {
+		t.Errorf("Depth = %q, want %q", got.Depth, "summary")
+	}
+	if got.Content != "" {
+		t.Errorf("Content = %q, want empty at summary depth (via the actual MCP wire format, not just the Go struct)", got.Content)
+	}
+	if got.Summary != "a stub summary of the coffee fact" {
+		t.Errorf("Summary = %q, want the committed summary", got.Summary)
 	}
 }
 

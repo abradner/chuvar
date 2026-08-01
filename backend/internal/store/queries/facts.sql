@@ -41,6 +41,7 @@ vector_ranked AS (
 SELECT
     f.id,
     f.content,
+    f.summary,
     f.created_at,
     f.valid_at,
     (SELECT array_agg(fs.scope) FROM fact_scopes fs WHERE fs.fact_id = f.id)::text[] AS scopes,

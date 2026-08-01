@@ -1,0 +1,1 @@
+ALTER TABLE facts DROP COLUMN summary;

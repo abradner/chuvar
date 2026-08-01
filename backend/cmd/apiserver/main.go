@@ -15,6 +15,7 @@ import (
 	"github.com/abradner/chuvar/backend/internal/db"
 	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/store"
+	"github.com/abradner/chuvar/backend/internal/summarize"
 )
 
 func main() {
@@ -54,7 +55,9 @@ func run() error {
 		allowedOrigin = "http://localhost:5173"
 	}
 
-	a := api.New(st, embed.Stub{}, allowedOrigin, cfg.RequestTimeout)
+	// TODO: swap for a real Summarizer once the Research track lands one, same as
+	// embed.Stub below.
+	a := api.New(st, embed.Stub{}, summarize.Stub{}, allowedOrigin, cfg.RequestTimeout)
 
 	// Read/Write/IdleTimeout and ReadHeaderTimeout all come from cfg.RequestTimeout
 	// rather than being left at the zero-value http.Server default (no timeout at

@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/abradner/chuvar/backend/internal/scope"
 	"github.com/abradner/chuvar/backend/internal/store/sqlcgen"
 )
 
@@ -56,23 +57,34 @@ func (s *Store) GetFact(ctx context.Context, id string) (Fact, error) {
 
 // SearchFacts runs the hybrid retrieval query: keyword (tsvector) and semantic
 // (pgvector cosine) rankings fused via Reciprocal Rank Fusion, over only the facts
-// whose scope tags are ALL covered by grantedScopes. The scope filter runs in the
-// candidate_facts CTE, before either ranking happens — ungranted facts never enter
-// the ranked candidate set. This is the security property described in AGENTS.md
-// §3.2 and validated against prior art in the Notion mining writeup (§7): filtering
-// after ranking (as a pluggable-external-vector-store path would do) is exactly the
-// anti-pattern this design avoids.
+// whose scope tags are ALL covered by some scope in granted. The scope filter runs
+// in the candidate_facts CTE, before either ranking happens — ungranted facts never
+// enter the ranked candidate set. This is the security property described in
+// AGENTS.md §3.2 and validated against prior art in the Notion mining writeup (§7):
+// filtering after ranking (as a pluggable-external-vector-store path would do) is
+// exactly the anti-pattern this design avoids.
 //
-// An empty grantedScopes returns no results — no grant means no access, not "search
+// Each returned Fact's Depth and Content/Summary are set by effectiveDepth,
+// computed from granted's per-scope depths against that fact's own scope tags —
+// this is a disclosure projection over rows that already passed the scope filter
+// above, not a second visibility filter, so it doesn't reintroduce the
+// filter-after-ranking anti-pattern §3.2 warns against: every fact in candidate_facts
+// is still returned, just with Content redacted to Summary at "summary" depth.
+//
+// An empty granted returns no results — no grant means no access, not "search
 // everything and filter later."
-func (s *Store) SearchFacts(ctx context.Context, queryText string, queryEmbedding []float32, grantedScopes []string, limit int) ([]Fact, error) {
-	if len(grantedScopes) == 0 {
+func (s *Store) SearchFacts(ctx context.Context, queryText string, queryEmbedding []float32, granted []GrantedScope, limit int) ([]Fact, error) {
+	if len(granted) == 0 {
 		return nil, nil
 	}
 	if limit <= 0 {
 		limit = 20
 	}
 
+	grantedScopes := make([]string, len(granted))
+	for i, g := range granted {
+		grantedScopes[i] = g.Scope
+	}
 	prefixes := scopePrefixes(grantedScopes)
 
 	embParam, err := toVectorParam(queryEmbedding)
@@ -97,7 +109,79 @@ func (s *Store) SearchFacts(ctx context.Context, queryText string, queryEmbeddin
 
 	var facts []Fact
 	for _, r := range rows {
-		facts = append(facts, Fact{ID: r.ID, Content: r.Content, Scopes: r.Scopes, CreatedAt: r.CreatedAt, ValidAt: r.ValidAt})
+		depth := effectiveDepth(r.Scopes, granted)
+		f := Fact{ID: r.ID, Scopes: r.Scopes, CreatedAt: r.CreatedAt, ValidAt: r.ValidAt, Depth: depth}
+		if depth == "summary" {
+			// Fail closed on NULL (pre-migration or not-yet-summarized facts):
+			// Summary stays "" rather than falling back to Content, which would
+			// silently un-enforce the redaction this depth exists to apply.
+			if r.Summary != nil {
+				f.Summary = *r.Summary
+			}
+		} else {
+			f.Content = r.Content
+		}
+		facts = append(facts, f)
 	}
 	return facts, nil
+}
+
+// effectiveDepth computes the depth a fact should be read at, given the fact's own
+// scope tags and the caller's granted (scope, depth) pairs. Composition mirrors the
+// two rules internal/scope already encodes rather than inventing a third: grants
+// union across a subject's scopes (scope.AnyCovers — a scope is granted if ANY
+// active grant covers it, per GrantedScopes' own doc comment), while a fact's tags
+// compose as an intersection (scope.Satisfied — every tag must be covered). So for
+// each of the fact's tags, take the MOST permissive depth among grants covering
+// that tag (a tag can be covered by more than one active grant — union); then take
+// the LEAST permissive of those per-tag results across the fact's tags
+// (intersection), since a fact is one indivisible blob: a broadly-granted
+// unrelated tag must not pull full content out of a fact that also carries a tag
+// only granted at summary depth.
+//
+// Union-across-grants for a single tag (rather than most-recent-wins) matches how
+// scope visibility itself already behaves: a stale broad-depth grant already
+// confers read access at all, which is strictly worse than conferring it at
+// greater depth, and the system's designed remedy for a stale grant is
+// revocation/TTL (both audited), not a silent precedence rule a reviewer can't
+// see. The caller surfaces the result as Fact.Depth so this is observable per
+// fact, not silent.
+//
+// factScopes with a tag no covering grant is found for shouldn't happen — SQL's
+// candidate_facts CTE already guarantees every tag is covered by some granted
+// scope before a fact reaches here — but fails closed to "summary" rather than
+// assuming "full" if it ever does.
+func effectiveDepth(factScopes []string, granted []GrantedScope) string {
+	best := -1
+	for _, tag := range factScopes {
+		tagRank := -1
+		for _, g := range granted {
+			if scope.Scope(g.Scope).Covers(scope.Scope(tag)) {
+				if r := depthRank(g.Depth); r > tagRank {
+					tagRank = r
+				}
+			}
+		}
+		if tagRank == -1 {
+			return "summary"
+		}
+		if best == -1 || tagRank < best {
+			best = tagRank
+		}
+	}
+	if best == -1 {
+		return "summary"
+	}
+	return depthName(best)
+}
+
+func depthName(rank int) string {
+	switch rank {
+	case 0:
+		return "summary"
+	case 1:
+		return "facts"
+	default:
+		return "full"
+	}
 }
