@@ -1,6 +1,10 @@
 package main
 
-import "github.com/abradner/chuvar/backend/internal/sseclient"
+import (
+	"fmt"
+
+	"github.com/abradner/chuvar/backend/internal/sseclient"
+)
 
 // appEvent is what flows through this program's single event channel — every
 // sseclient.Event the server sends, plus a few locally-synthesized Types
@@ -12,11 +16,12 @@ type appEvent struct {
 	Type   string
 	Diff   *sseclient.StagedDiff
 	Req    *sseclient.GrantRequest
+	Grant  *sseclient.Grant
 	Detail string
 }
 
 func fromServerEvent(ev sseclient.Event) appEvent {
-	return appEvent{Type: ev.Type, Diff: ev.Diff, Req: ev.Req, Detail: ev.Detail}
+	return appEvent{Type: ev.Type, Diff: ev.Diff, Req: ev.Req, Grant: ev.Grant, Detail: ev.Detail}
 }
 
 // item is one entry in the review queue — either a staged diff or a grant
@@ -128,6 +133,20 @@ func (m *model) apply(ev appEvent) {
 		m.upsert(item{kind: kindRequest, req: ev.Req})
 	case "grant_request_resolved":
 		m.remove(ev.Req.ID)
+	case "grant_expiring":
+		// Not an approval-queue item — there's nothing to approve/reject about
+		// a grant nearing expiry, unlike a diff or grant request (item's own
+		// doc comment: exactly two kinds, permanently). Surfaced on the status
+		// line instead, same as action results and connection state. A burst
+		// of several grants expiring close together only leaves the most
+		// recent one visible here — the same single-line limitation every
+		// other status update already has; renewing is done via the web UI or
+		// API either way, not from this TUI.
+		expiry := "unknown"
+		if ev.Grant.ExpiresAt != nil {
+			expiry = *ev.Grant.ExpiresAt
+		}
+		m.status = fmt.Sprintf("grant %s for %s expires %s — renew via web UI or API", ev.Grant.ID, ev.Grant.Subject, expiry)
 	case "ready":
 		m.status = "connected"
 	case "connection_error":

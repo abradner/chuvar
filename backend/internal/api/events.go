@@ -33,6 +33,15 @@ import (
 // different cadence in production.
 var eventPollInterval = 2 * time.Second
 
+// grantExpiryWarningWindow is how far ahead of a grant's expiry
+// grant_expiring starts firing for it. A var for the same test-shortening
+// reason as eventPollInterval. A single fixed window rather than one scaled
+// to each grant's own original TTL (e.g. "20% of TTL remaining"): grants here
+// span wildly different TTLs (a short-lived capability grant vs. a long-lived
+// memory grant), and a fixed, predictable window is easier for a reviewer to
+// reason about than one that silently varies per grant.
+var grantExpiryWarningWindow = 24 * time.Hour
+
 // streamEvents handles GET /api/events. Sends an "added" event for each staged
 // diff / grant request that's newly pending, and a "resolved" event (carrying its
 // final status) for each that's no longer pending — all relative to what this
@@ -112,6 +121,14 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 
 	seenDiffs := map[string]struct{}{}
 	seenRequests := map[string]struct{}{}
+	// warnedGrants has no "resolved" counterpart to clear it, unlike
+	// seenDiffs/seenRequests above — a grant doesn't "un-expire." Once warned
+	// on this connection, a grant stays warned even if it's later renewed
+	// (pushing it back out of the window) and then approaches expiry again;
+	// a reconnect (this map's whole lifetime) is what resets it, same
+	// per-connection-only dedup limitation seenDiffs/seenRequests already
+	// have on reconnect-redelivery.
+	warnedGrants := map[string]struct{}{}
 
 	poll := func() bool {
 		// Every Store call below shares one bounded child context, not the
@@ -198,6 +215,21 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		seenRequests = currentRequests
+
+		expiring, err := a.Store.ListGrantsNearingExpiry(pollCtx, time.Now().Add(grantExpiryWarningWindow))
+		if err != nil {
+			logPollError("api: streamEvents: listing grants nearing expiry", err)
+			return false
+		}
+		for _, g := range expiring {
+			if _, ok := warnedGrants[g.ID]; ok {
+				continue
+			}
+			warnedGrants[g.ID] = struct{}{}
+			if !send("grant_expiring", toGrantView(g)) {
+				return false
+			}
+		}
 		return true
 	}
 

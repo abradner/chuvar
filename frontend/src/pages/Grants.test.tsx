@@ -13,6 +13,7 @@ vi.mock("../api/client", async () => {
       listGrants: vi.fn(),
       createGrant: vi.fn(),
       revokeGrant: vi.fn(),
+      renewGrant: vi.fn(),
       listGrantRequests: vi.fn(),
       approveGrantRequest: vi.fn(),
       denyGrantRequest: vi.fn(),
@@ -185,6 +186,63 @@ describe("GrantsPage", () => {
     });
     // revoked_by is no longer a client-supplied argument — derived server-side.
     expect(api.revokeGrant).toHaveBeenCalledWith("grant-1");
+  });
+
+  it("renews a grant with the entered TTL and TOTP code", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([sampleGrant]);
+    vi.mocked(api.renewGrant).mockResolvedValue(sampleGrant);
+    vi.spyOn(window, "prompt").mockReturnValueOnce("30").mockReturnValueOnce("654321");
+
+    render(<GrantsPage />);
+    await screen.findByText("identity.basic");
+
+    await userEvent.click(screen.getByRole("button", { name: "Renew" }));
+
+    await waitFor(() => expect(api.renewGrant).toHaveBeenCalledWith("grant-1", 1800, "654321"));
+  });
+
+  it("does not renew when the TTL prompt is cancelled", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([sampleGrant]);
+    vi.spyOn(window, "prompt").mockReturnValueOnce(null);
+
+    render(<GrantsPage />);
+    await screen.findByText("identity.basic");
+
+    await userEvent.click(screen.getByRole("button", { name: "Renew" }));
+
+    expect(api.renewGrant).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-numeric renewal TTL without calling renewGrant", async () => {
+    vi.mocked(api.listGrants).mockResolvedValue([sampleGrant]);
+    vi.spyOn(window, "prompt").mockReturnValueOnce("not-a-number");
+
+    render(<GrantsPage />);
+    await screen.findByText("identity.basic");
+
+    await userEvent.click(screen.getByRole("button", { name: "Renew" }));
+
+    expect(await screen.findByText(/TTL must be a positive whole number/)).toBeInTheDocument();
+    expect(api.renewGrant).not.toHaveBeenCalled();
+  });
+
+  it("flags a grant expiring within the warning window", async () => {
+    const soon = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1h out
+    vi.mocked(api.listGrants).mockResolvedValue([{ ...sampleGrant, expires_at: soon }]);
+
+    render(<GrantsPage />);
+
+    expect(await screen.findByText(/expiring soon/)).toBeInTheDocument();
+  });
+
+  it("does not flag a grant expiring well outside the warning window", async () => {
+    const later = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7d out
+    vi.mocked(api.listGrants).mockResolvedValue([{ ...sampleGrant, expires_at: later }]);
+
+    render(<GrantsPage />);
+    await screen.findByText("identity.basic");
+
+    expect(screen.queryByText(/expiring soon/)).not.toBeInTheDocument();
   });
 
   it("shows pending grant requests from any subject and removes one after approving it", async () => {

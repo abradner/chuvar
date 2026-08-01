@@ -260,3 +260,92 @@ func (s *Store) RevokeGrant(ctx context.Context, grantID, actor string) error {
 	}
 	return nil
 }
+
+// RenewGrant extends grantID's expiry to time.Now().Add(ttl), symmetric to
+// RevokeGrant. ttl is required — unlike CreateGrant's optional ttl, renewing
+// into "no expiry" would defeat the whole TTL-bounded security property
+// renewal exists to preserve (renewal cost is what determines viable TTL
+// length; see the batch's own framing of this as a security property, not a
+// convenience). Only a currently-active grant (not revoked, not already past
+// its expiry) can be renewed: renewal is meant to be a lightweight
+// continuation of an already-live authorization, not a way to reinstate one
+// that already lapsed unnoticed — a lapsed grant needs a fresh CreateGrant
+// decision instead. actor is who's renewing it — required, logged to
+// audit_log atomically with the renewal; see CreateGrant's doc comment for
+// the same self-reported-identity caveat.
+func (s *Store) RenewGrant(ctx context.Context, grantID string, ttl time.Duration, actor string) (Grant, error) {
+	if actor == "" {
+		return Grant{}, fmt.Errorf("store: actor must not be empty")
+	}
+	if ttl <= 0 {
+		return Grant{}, fmt.Errorf("store: ttl must be positive")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Grant{}, fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op if already committed
+	qtx := s.q.WithTx(tx)
+
+	newExpiry := time.Now().Add(ttl)
+	row, err := qtx.RenewGrant(ctx, sqlcgen.RenewGrantParams{ID: grantID, ExpiresAt: toTimestamptz(&newExpiry)})
+	if err != nil {
+		return Grant{}, fmt.Errorf("store: grant %s not found, revoked, or already expired: %w", grantID, err)
+	}
+
+	scopes, err := qtx.ListGrantScopes(ctx, grantID)
+	if err != nil {
+		return Grant{}, fmt.Errorf("store: list grant scopes: %w", err)
+	}
+
+	if err := logAudit(ctx, qtx, "grant_renewed", actor, nil, &grantID, nil, nil, scopes); err != nil {
+		return Grant{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Grant{}, fmt.Errorf("store: commit grant renewal: %w", err)
+	}
+
+	return Grant{
+		ID:        row.ID,
+		Subject:   row.Subject,
+		Scopes:    scopes,
+		Kind:      GrantKind(row.Kind),
+		Depth:     depthOrEmpty(row.Depth),
+		CreatedAt: row.CreatedAt,
+		ExpiresAt: row.ExpiresAt,
+		RevokedAt: row.RevokedAt,
+	}, nil
+}
+
+// ListGrantsNearingExpiry returns every currently-active grant (not revoked,
+// not already expired) whose expiry falls at or before before — the backing
+// query for the SSE stream's grant_expiring event (internal/api/events.go).
+// Subject-agnostic like ListStagedDiffs/ListGrantRequests, matching v0's
+// single-operator scope.
+func (s *Store) ListGrantsNearingExpiry(ctx context.Context, before time.Time) ([]Grant, error) {
+	rows, err := s.q.ListGrantsNearingExpiry(ctx, toTimestamptz(&before))
+	if err != nil {
+		return nil, fmt.Errorf("store: list grants nearing expiry: %w", err)
+	}
+
+	var grants []Grant
+	for _, r := range rows {
+		scopes, err := s.q.ListGrantScopes(ctx, r.ID)
+		if err != nil {
+			return nil, fmt.Errorf("store: list grant scopes: %w", err)
+		}
+		grants = append(grants, Grant{
+			ID:        r.ID,
+			Subject:   r.Subject,
+			Scopes:    scopes,
+			Kind:      GrantKind(r.Kind),
+			Depth:     depthOrEmpty(r.Depth),
+			CreatedAt: r.CreatedAt,
+			ExpiresAt: r.ExpiresAt,
+			RevokedAt: r.RevokedAt,
+		})
+	}
+	return grants, nil
+}

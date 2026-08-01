@@ -26,6 +26,23 @@ func TestModel_ApplyAddThenResolve(t *testing.T) {
 	}
 }
 
+func TestModel_ApplyGrantExpiringSetsStatusNotAQueueItem(t *testing.T) {
+	m := newModel()
+	expiresAt := "2026-08-01T00:00:00Z"
+
+	m.apply(appEvent{Type: "grant_expiring", Grant: &sseclient.Grant{ID: "g1", Subject: "agent-a", ExpiresAt: &expiresAt}})
+
+	// Not an approval-queue item (item's own doc comment: exactly two kinds,
+	// permanently) — there's nothing to approve/reject about a grant nearing
+	// expiry.
+	if len(m.order) != 0 {
+		t.Fatalf("order = %v, want no queue items from grant_expiring", m.order)
+	}
+	if m.status == "" {
+		t.Fatal("status should report the expiring grant, got empty")
+	}
+}
+
 func TestModel_UpsertDoesNotDuplicate(t *testing.T) {
 	m := newModel()
 	it := item{kind: kindDiff, diff: &sseclient.StagedDiff{ID: "d1", Content: "first"}}

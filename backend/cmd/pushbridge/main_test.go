@@ -52,6 +52,47 @@ func TestHandleEvent_NotifiesOnAddedNotResolved(t *testing.T) {
 	}
 }
 
+func TestHandleEvent_GrantExpiringNotifiesAndBypassesDedup(t *testing.T) {
+	var calls int32
+	var lastTitle string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		lastTitle = r.Header.Get("Title")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	n := &ntfyNotifier{baseURL: srv.URL, topic: "t", http: srv.Client()}
+	ctx := context.Background()
+	notified := map[string]struct{}{}
+
+	expiresAt := "2026-08-01T00:00:00Z"
+	ev := sseclient.Event{
+		Type:  "grant_expiring",
+		Grant: &sseclient.Grant{ID: "g1", Subject: "agent-a", Scopes: []string{"identity.basic"}, ExpiresAt: &expiresAt},
+	}
+
+	handleEvent(ctx, n, "http://localhost:5173", notified, ev)
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("calls after first grant_expiring = %d, want 1", calls)
+	}
+	if lastTitle != "Grant expiring soon: agent-a" {
+		t.Errorf("title = %q", lastTitle)
+	}
+
+	// grant_expiring deliberately bypasses the notified dedup map (see
+	// handleEvent's own comment): a grant's ID is permanent and this event has
+	// no "resolved" counterpart to ever clear an entry, so a second delivery
+	// of the same grant ID (e.g. a reconnect re-announcing it) must still
+	// notify rather than being silently suppressed forever.
+	handleEvent(ctx, n, "http://localhost:5173", notified, ev)
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("calls after second grant_expiring for the same grant = %d, want 2 (no permanent suppression)", calls)
+	}
+	if len(notified) != 0 {
+		t.Errorf("notified = %v, want grant_expiring to never populate the dedup map", notified)
+	}
+}
+
 func TestHandleEvent_GrantRequestAddedIncludesJustification(t *testing.T) {
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

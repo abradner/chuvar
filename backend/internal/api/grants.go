@@ -167,3 +167,40 @@ func (a *API) revokeGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+type renewGrantRequest struct {
+	TTLSeconds int `json:"ttl_seconds"`
+}
+
+// renewGrant handles POST /api/grants/{id}/renew, gated by requireTOTP —
+// same self-escalation-prevention rationale as createGrant/
+// approveGrantRequest/approveStagedDiff (requireTOTP's doc comment).
+// ttl_seconds is required, unlike createGrant's optional one: see
+// store.RenewGrant's doc comment for why renewing into "no expiry" isn't
+// allowed. renewed_by is the authenticated reviewer, not a request body
+// field, same as every other mutation in this package.
+func (a *API) renewGrant(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	renewedBy := reviewerFromContext(r.Context()).Label
+
+	var req renewGrantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("decoding request body: %w", err))
+		return
+	}
+	if req.TTLSeconds <= 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("ttl_seconds must be positive (got %d)", req.TTLSeconds))
+		return
+	}
+	if req.TTLSeconds > maxGrantTTLSeconds {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("ttl_seconds exceeds max of %d (got %d)", maxGrantTTLSeconds, req.TTLSeconds))
+		return
+	}
+
+	g, err := a.Store.RenewGrant(r.Context(), id, time.Duration(req.TTLSeconds)*time.Second, renewedBy)
+	if err != nil {
+		writeStoreError(w, http.StatusConflict, "renewGrant", "could not renew grant — it may not exist, be revoked, or already be expired", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toGrantView(g))
+}

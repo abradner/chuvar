@@ -7,6 +7,8 @@ package sqlcgen
 import (
 	"context"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Querier interface {
@@ -47,6 +49,10 @@ type Querier interface {
 	ListGrantRequests(ctx context.Context, status string) ([]GrantRequest, error)
 	ListGrantScopes(ctx context.Context, grantID string) ([]string, error)
 	ListGrants(ctx context.Context, subject string) ([]Grant, error)
+	// Subject-agnostic by design, like ListStagedDiffs/ListGrantRequests — v0 is a
+	// single-operator system (AGENTS.md), so the expiry-warning SSE stream isn't
+	// scoped per subject either.
+	ListGrantsNearingExpiry(ctx context.Context, expiresAt pgtype.Timestamptz) ([]Grant, error)
 	ListReviewerTokens(ctx context.Context) ([]ListReviewerTokensRow, error)
 	ListStagedDiffs(ctx context.Context, status string) ([]StagedDiff, error)
 	LoadGrantRequestForUpdate(ctx context.Context, id string) (LoadGrantRequestForUpdateRow, error)
@@ -55,6 +61,11 @@ type Querier interface {
 	LookupActiveReviewerToken(ctx context.Context, tokenHash []byte) (LookupActiveReviewerTokenRow, error)
 	MarkDiffCommitted(ctx context.Context, arg MarkDiffCommittedParams) error
 	RejectDiff(ctx context.Context, arg RejectDiffParams) (int64, error)
+	// Only a currently-active grant (not revoked, not already past its expiry) can
+	// be renewed — zero rows affected (surfaced by sqlc as pgx.ErrNoRows for a
+	// :one query) covers "doesn't exist," "already revoked," and "already
+	// expired" alike; store.RenewGrant turns that into one clear error.
+	RenewGrant(ctx context.Context, arg RenewGrantParams) (Grant, error)
 	RevokeGrant(ctx context.Context, id string) (int64, error)
 	RevokeReviewerToken(ctx context.Context, id string) (int64, error)
 	SearchFacts(ctx context.Context, arg SearchFactsParams) ([]SearchFactsRow, error)

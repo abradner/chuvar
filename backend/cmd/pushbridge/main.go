@@ -172,6 +172,30 @@ func handleEvent(ctx context.Context, n *ntfyNotifier, webBaseURL string, notifi
 	case "grant_request_resolved":
 		delete(notified, ev.Req.ID)
 		return
+	case "grant_expiring":
+		// Bypasses the shared notified map entirely rather than participating
+		// in the generic id/notified flow below: unlike a diff or grant
+		// request, grant_expiring has no "resolved" counterpart to ever clear
+		// an entry from notified — a grant's ID is permanent (renewal updates
+		// expires_at on the same row, it doesn't create a new grant), so
+		// adding it to notified would permanently suppress every notification
+		// after the first, including a legitimate second warning if the
+		// grant is renewed and later approaches expiry again. The tradeoff:
+		// a reconnect re-notifies for a still-expiring grant (the server's
+		// own per-connection dedup in events.go only prevents duplicates
+		// within one connection) — a minor, occasional nuisance, and a far
+		// smaller cost than silently going quiet on a real future expiry.
+		g := ev.Grant
+		expiry := "unknown"
+		if g.ExpiresAt != nil {
+			expiry = *g.ExpiresAt
+		}
+		title := "Grant expiring soon: " + g.Subject
+		message := fmt.Sprintf("scopes: %v, expires %s", g.Scopes, expiry)
+		if err := n.notify(ctx, title, message, webBaseURL); err != nil {
+			slog.Error("pushbridge: sending notification", "error", err)
+		}
+		return
 	default:
 		return
 	}

@@ -188,6 +188,77 @@ func (q *Queries) ListGrants(ctx context.Context, subject string) ([]Grant, erro
 	return items, nil
 }
 
+const listGrantsNearingExpiry = `-- name: ListGrantsNearingExpiry :many
+SELECT id, subject, depth, created_at, expires_at, revoked_at, kind
+FROM grants
+WHERE revoked_at IS NULL
+  AND expires_at IS NOT NULL
+  AND expires_at > now()
+  AND expires_at <= $1
+ORDER BY expires_at ASC
+`
+
+// Subject-agnostic by design, like ListStagedDiffs/ListGrantRequests — v0 is a
+// single-operator system (AGENTS.md), so the expiry-warning SSE stream isn't
+// scoped per subject either.
+func (q *Queries) ListGrantsNearingExpiry(ctx context.Context, expiresAt pgtype.Timestamptz) ([]Grant, error) {
+	rows, err := q.db.Query(ctx, listGrantsNearingExpiry, expiresAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Grant
+	for rows.Next() {
+		var i Grant
+		if err := rows.Scan(
+			&i.ID,
+			&i.Subject,
+			&i.Depth,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.RevokedAt,
+			&i.Kind,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const renewGrant = `-- name: RenewGrant :one
+UPDATE grants SET expires_at = $2
+WHERE id = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())
+RETURNING id, subject, depth, created_at, expires_at, revoked_at, kind
+`
+
+type RenewGrantParams struct {
+	ID        string
+	ExpiresAt pgtype.Timestamptz
+}
+
+// Only a currently-active grant (not revoked, not already past its expiry) can
+// be renewed — zero rows affected (surfaced by sqlc as pgx.ErrNoRows for a
+// :one query) covers "doesn't exist," "already revoked," and "already
+// expired" alike; store.RenewGrant turns that into one clear error.
+func (q *Queries) RenewGrant(ctx context.Context, arg RenewGrantParams) (Grant, error) {
+	row := q.db.QueryRow(ctx, renewGrant, arg.ID, arg.ExpiresAt)
+	var i Grant
+	err := row.Scan(
+		&i.ID,
+		&i.Subject,
+		&i.Depth,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.Kind,
+	)
+	return i, err
+}
+
 const revokeGrant = `-- name: RevokeGrant :execrows
 UPDATE grants SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL
 `
