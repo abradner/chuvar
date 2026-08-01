@@ -20,6 +20,12 @@ a human approves time-boxed, revocable, audited **grants**. Agents never write m
 every proposed fact is staged as a diff and requires human approval before it commits. Exposed as
 an MCP server with a companion approval UI.
 
+The purpose in one line: **just enough, for just long enough** — chuvar lends what is yours (the
+facts you know, and — via the Agent Capability Broker workstream — the authority you hold) under
+grants that are scoped, timed, revocable, audited, and attributable. Borrowed, never owned. The
+twelve short-form principles that follow from this live in `CLAUDE.md`; this file is their
+operational form.
+
 **License: Apache-2.0** (decided Jul 2026) — the whole repo, unrestricted, forever; see the
 README's "License and how this project makes money" section for the reasoning (Temporal/Supabase-
 style: the product is opinionated enough that hosted convenience sells on its own, without needing
@@ -44,6 +50,26 @@ need driving it.
 
 ## 3. Critical Architectural Rules
 
+### 3.0 The Trust Boundary (decided 2026-08-01)
+The enforcement boundary is the **process boundary of chuvar's services, rooted in a
+human-present custody unlock** — not the API alone, and not an OS-user split. The API is the sole
+legitimate control surface; the database is *inside* the boundary, so reaching it directly from
+agent context is by definition an attack, not a supported path. Full statement and rationale:
+the Agent Capability Broker page's decision log (2026-08-01 entries) in Notion.
+
+Two rules fall out of it, operationally:
+
+- **Zero ambient authority.** No root of trust (DB credentials, key material, reviewer factors)
+  may be reachable from agent context through a legitimate, discoverable interface — an env var,
+  a checked-in secret, an open port. The distinction that matters is *ambient reach* (must be
+  zero) vs *attack-shaped actions* (`docker exec` into the DB container, reading `pgdata` bytes —
+  detected and tripwired, not prevented, on a single-user box). Known debt, being paid: today
+  `mcpserver` requires `DATABASE_URL` and runs migrations on boot inside the agent's own process
+  tree (tickets E2/E3). That is debt, **not precedent** — never add a new root of trust to an
+  agent-reachable environment.
+- **Tripwires are fail-closed.** When attack-shaped access is detected, the response is an
+  outage — zeroize data-keys, seal, halt, require human re-unlock — never just a log line.
+
 ### 3.1 No Direct Writes, Ever
 The MCP server exposes no deterministic write endpoint. `propose-write` stages a diff in
 `staged_diffs`; only a human approval (via the REST API used by the frontend, or a direct DB
@@ -59,7 +85,10 @@ vanilla Postgres. When writing retrieval queries: **scope-filter in the `WHERE` 
 ranking**, never after. This is a security property (ungranted facts must never enter the
 candidate set), not just a performance detail — a competitor's rewrite (CaviraOSS/OpenMemory,
 see Notion) regressed exactly this property when delegating to an external vector store as a
-cautionary tale.
+cautionary tale. The invariant is *scope-filter before ranking wherever ranking happens* — it is
+not a property of SQL. If/when the retrieval engine moves into service memory (the sealed-vault
+direction, §3.5), the invariant moves with it: filter the candidate set by granted scopes before
+scoring, same rule, new layer.
 
 ### 3.3 Bouncer Pipeline Is Stubbed for v0 — Interface, Not Hardcoded
 `ingest → classify → dedupe → stage → approve → commit` is real code today, running as a plain
@@ -74,6 +103,21 @@ the user first — both are explicit two-way doors, deliberately left open per c
 Whether default scopes need to be granular out of the box vs. user-defined is an open question
 (Notion §6). Scopes are stored as plain `TEXT` (dotted strings), not a fixed enum/lookup table.
 Don't add a hardcoded scope registry or CHECK constraint that bakes in a specific taxonomy.
+
+### 3.5 Sealed at Rest Is Committed
+Decided 2026-08-01 (rationale: broker page decision log): fact content, embeddings, and staged
+diffs become **ciphertext at rest**; the consent plane (grants, scopes, audit) stays plaintext
+because it must remain SQL-enforceable. The design ticket (E7) gates the real embedder — the
+current `embed.Stub{}` state means no plaintext-vector debt exists yet, and none may be created.
+Operationally, starting now:
+
+- **Never add a new plaintext-content or plaintext-secret surface** (a new column, table, export,
+  or log line carrying fact content or secrets in the clear).
+- **Secrets crypto is app-layer in Go, never pgcrypto** — key material must not transit SQL,
+  logs, or `pg_stat_activity`.
+- Honest limits: cheap memory hygiene is always taken (enclaved keys, `mlock`, non-dumpable
+  processes), but chuvar is **not a hardened store** and doesn't claim to be — FIPS-style
+  certification is an explicit non-goal. Don't write claims the mechanism doesn't back.
 
 ## 4. Development Essentials
 
@@ -158,6 +202,11 @@ should trigger from it.
 - For anything genuinely ambiguous or not yet decided by the user, prefer the reversible option
   and leave a clear marker (comment, or a note in the relevant Notion task) rather than picking
   silently and moving on. Two-way doors over one-way doors when direction is unclear.
+- **Ground decisions in the real system** — check the actual schema, hardware, and code before
+  arguing from theory. Recent example: the sealed-vault decision (2026-08-01) turned on two
+  checked facts (`content_tsv` is a generated column; flat vector scan timings on the actual
+  deployment host), both of which overturned the on-paper plan. A feasibility argument that
+  hasn't touched the schema is a guess.
 - Use proper file-reading/editing tools rather than `cat`/`sed` for inspecting or modifying files.
 - Keep the Notion Tasks Tracker roughly in sync with real progress (status transitions) as you
   complete tickets — it's the team's actual view of what's done.
@@ -207,7 +256,24 @@ during the build, than as a single pass at the end. Before considering a commit 
   proven anything.
 - **Closed-vocabulary fields backed by a DB CHECK constraint** (status enums, depth,
   etc.) must be validated at the boundary that accepts external input, not left to
-  surface as a raw driver error when the constraint fires.
+  surface as a raw driver error when the constraint fires. Apply the **deletion
+  test** to keep this from becoming two half-controls: the CHECK constraint is the
+  enforcement and exists exactly once; the boundary validation is legibility, and
+  deleting it must change politeness (a friendly 400 vs an ugly 500), never
+  possibility. If deleting either check would make a new state *possible*, you have
+  enforcement in two shapes, and the two will drift.
+- **Security claims name their adversary — and must hold.** A comment or doc making
+  a security claim states which adversary it defends against; if the claim depends
+  on unshipped work, it says so in-place ("stated, not enforced"), and a stopgap
+  records the bar it doesn't meet. Cautionary example: the TOTP migration shipped
+  claiming "a factor shell access alone cannot produce" while the secret sat
+  plaintext one loopback connection away — an aspirational security comment is a
+  bug, not documentation.
+- **Actor identity derives from the authenticated credential, never the request
+  body.** `decided_by`/`approved_by`/`revoked_by`/`renewed_by` (and any successor
+  field) come from the authenticated reviewer/agent token on every mutation path.
+  Preserve this on each new path you add — it's the difference between an audit log
+  and a guest book.
 - Before pushing or handing off a batch of commits meant to become standalone PRs,
   run `.claude/skills/independent-commit-review` — one fresh-eyes subagent per
   commit, no prior context, adversarial framing. Don't review your own work and call
