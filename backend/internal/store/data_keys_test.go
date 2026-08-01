@@ -5,6 +5,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestLoadOrCreateDataKey_CreatesThenReuses(t *testing.T) {
@@ -13,29 +15,20 @@ func TestLoadOrCreateDataKey_CreatesThenReuses(t *testing.T) {
 	master := testSecretKey(t)
 
 	first, err := s.LoadOrCreateDataKey(ctx, master, DataKeyPurposeSecrets)
-	if err != nil {
-		t.Fatalf("LoadOrCreateDataKey() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Sealing with the first handle and opening with the second proves the key
 	// was persisted and recovered, not regenerated — a fresh key would open
 	// nothing and every enrolled secret would be lost on restart.
 	sealed, err := first.Seal([]byte("payload"))
-	if err != nil {
-		t.Fatalf("Seal() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	second, err := s.LoadOrCreateDataKey(ctx, master, DataKeyPurposeSecrets)
-	if err != nil {
-		t.Fatalf("second LoadOrCreateDataKey() error = %v", err)
-	}
+	require.NoError(t, err)
+
 	got, err := second.Open(sealed)
-	if err != nil {
-		t.Fatalf("reloaded DEK could not open data sealed by the first: %v", err)
-	}
-	if string(got) != "payload" {
-		t.Fatalf("Open() = %q, want %q", got, "payload")
-	}
+	require.NoError(t, err, "reloaded DEK could not open data sealed by the first")
+	require.Equal(t, []byte("payload"), got)
 }
 
 func TestLoadOrCreateDataKey_SeparatePurposesGetSeparateKeys(t *testing.T) {
@@ -44,49 +37,37 @@ func TestLoadOrCreateDataKey_SeparatePurposesGetSeparateKeys(t *testing.T) {
 	master := testSecretKey(t)
 
 	secrets, err := s.LoadOrCreateDataKey(ctx, master, DataKeyPurposeSecrets)
-	if err != nil {
-		t.Fatalf("LoadOrCreateDataKey(secrets) error = %v", err)
-	}
+	require.NoError(t, err)
 	// The sealed-vault pass (E7) adds its own purpose; the two must not share a
 	// key, or they could never be rotated or unlocked independently.
 	vault, err := s.LoadOrCreateDataKey(ctx, master, "vault")
-	if err != nil {
-		t.Fatalf("LoadOrCreateDataKey(vault) error = %v", err)
-	}
+	require.NoError(t, err)
 
 	sealed, err := secrets.Seal([]byte("payload"))
-	if err != nil {
-		t.Fatalf("Seal() error = %v", err)
-	}
-	if _, err := vault.Open(sealed); err == nil {
-		t.Fatal("the vault DEK opened a value sealed by the secrets DEK; purposes share a key")
-	}
+	require.NoError(t, err)
+
+	_, err = vault.Open(sealed)
+	require.Error(t, err, "the vault DEK opened a value sealed by the secrets DEK")
 }
 
 func TestLoadOrCreateDataKey_WrongMasterKeyIsDiagnosable(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	if _, err := s.LoadOrCreateDataKey(ctx, testSecretKey(t), DataKeyPurposeSecrets); err != nil {
-		t.Fatalf("LoadOrCreateDataKey() error = %v", err)
-	}
-
 	_, err := s.LoadOrCreateDataKey(ctx, testSecretKey(t), DataKeyPurposeSecrets)
-	if err == nil {
-		t.Fatal("a different master key unwrapped the stored DEK")
-	}
+	require.NoError(t, err)
+
+	_, err = s.LoadOrCreateDataKey(ctx, testSecretKey(t), DataKeyPurposeSecrets)
+	require.Error(t, err, "a different master key unwrapped the stored DEK")
 	// "message authentication failed" alone sends an operator hunting for
 	// corruption; the actionable cause is almost always a replaced key file.
-	if !strings.Contains(err.Error(), "key file was replaced") {
-		t.Fatalf("error = %v, want it to name the likely cause", err)
-	}
+	require.ErrorContains(t, err, "key file was replaced")
 }
 
 func TestLoadOrCreateDataKey_RequiresMasterKey(t *testing.T) {
 	s, _ := testStore(t)
-	if _, err := s.LoadOrCreateDataKey(context.Background(), nil, DataKeyPurposeSecrets); err == nil {
-		t.Fatal("LoadOrCreateDataKey(nil master) succeeded, want error")
-	}
+	_, err := s.LoadOrCreateDataKey(context.Background(), nil, DataKeyPurposeSecrets)
+	require.Error(t, err)
 }
 
 // Master-key rotation must rewrap the DEK and leave sealed data readable. This
@@ -98,55 +79,37 @@ func TestRewrapDataKey_RotatesWithoutReEncrypting(t *testing.T) {
 	oldMaster := testSecretKey(t)
 
 	dek, err := s.LoadOrCreateDataKey(ctx, oldMaster, DataKeyPurposeSecrets)
-	if err != nil {
-		t.Fatalf("LoadOrCreateDataKey() error = %v", err)
-	}
+	require.NoError(t, err)
 	sealed, err := dek.Seal([]byte("enrolled secret"))
-	if err != nil {
-		t.Fatalf("Seal() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	newMaster := testSecretKey(t)
-	if err := s.RewrapDataKey(ctx, oldMaster, newMaster, DataKeyPurposeSecrets); err != nil {
-		t.Fatalf("RewrapDataKey() error = %v", err)
-	}
+	require.NoError(t, s.RewrapDataKey(ctx, oldMaster, newMaster, DataKeyPurposeSecrets))
 
 	after, err := s.LoadOrCreateDataKey(ctx, newMaster, DataKeyPurposeSecrets)
-	if err != nil {
-		t.Fatalf("LoadOrCreateDataKey() after rotation error = %v", err)
-	}
+	require.NoError(t, err)
 	got, err := after.Open(sealed)
-	if err != nil {
-		t.Fatalf("data sealed before rotation did not survive it: %v", err)
-	}
-	if string(got) != "enrolled secret" {
-		t.Fatalf("Open() = %q, want %q", got, "enrolled secret")
-	}
+	require.NoError(t, err, "data sealed before rotation did not survive it")
+	require.Equal(t, []byte("enrolled secret"), got)
 
-	if _, err := s.LoadOrCreateDataKey(ctx, oldMaster, DataKeyPurposeSecrets); err == nil {
-		t.Fatal("the retired master key still unwraps the DEK after rotation")
-	}
+	_, err = s.LoadOrCreateDataKey(ctx, oldMaster, DataKeyPurposeSecrets)
+	require.Error(t, err, "the retired master key still unwraps the DEK after rotation")
 }
 
 func TestRewrapDataKey_RejectsWrongOldMaster(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
-	if _, err := s.LoadOrCreateDataKey(ctx, testSecretKey(t), DataKeyPurposeSecrets); err != nil {
-		t.Fatalf("LoadOrCreateDataKey() error = %v", err)
-	}
+	_, err := s.LoadOrCreateDataKey(ctx, testSecretKey(t), DataKeyPurposeSecrets)
+	require.NoError(t, err)
 
-	err := s.RewrapDataKey(ctx, testSecretKey(t), testSecretKey(t), DataKeyPurposeSecrets)
-	if err == nil {
-		t.Fatal("RewrapDataKey() accepted a master key that cannot open the DEK")
-	}
+	err = s.RewrapDataKey(ctx, testSecretKey(t), testSecretKey(t), DataKeyPurposeSecrets)
+	require.Error(t, err, "RewrapDataKey accepted a master key that cannot open the DEK")
 }
 
 func TestRewrapDataKey_ErrorsWhenNoKeyExists(t *testing.T) {
 	s, _ := testStore(t)
 	err := s.RewrapDataKey(context.Background(), testSecretKey(t), testSecretKey(t), "never-created")
-	if err == nil || !strings.Contains(err.Error(), "no \"never-created\" key exists") {
-		t.Fatalf("RewrapDataKey() error = %v, want a missing-key complaint", err)
-	}
+	require.ErrorContains(t, err, `no "never-created" key exists`)
 }
 
 // The point of the whole exercise: a caller holding DATABASE_URL and nothing
@@ -158,24 +121,18 @@ func TestTOTPSecretIsCiphertextInTheDatabase(t *testing.T) {
 
 	const secret = "JBSWY3DPEHPK3PXP"
 	tok, err := s.CreateReviewerToken(ctx, "sealed-device", "plaintext-token", secret)
-	if err != nil {
-		t.Fatalf("CreateReviewerToken() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	var stored []byte
-	if err := pool.QueryRow(ctx, `SELECT totp_secret_enc FROM reviewer_tokens WHERE id = $1`, tok.ID).Scan(&stored); err != nil {
-		t.Fatalf("reading totp_secret_enc: %v", err)
-	}
-	if len(stored) == 0 {
-		t.Fatal("totp_secret_enc is empty; the secret was not stored at all")
-	}
-	if bytes.Contains(stored, []byte(secret)) {
-		t.Fatal("the base32 secret appears verbatim in the database column")
-	}
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT totp_secret_enc FROM reviewer_tokens WHERE id = $1`, tok.ID).Scan(&stored))
+
+	require.NotEmpty(t, stored, "totp_secret_enc is empty; the secret was not stored at all")
+	require.False(t, bytes.Contains(stored, []byte(secret)),
+		"the base32 secret appears verbatim in the database column")
 	// Guard the encoding too: base64/hex of the secret would also be a leak.
-	if strings.Contains(strings.ToUpper(string(stored)), secret) {
-		t.Fatal("the secret is recoverable from the stored bytes as text")
-	}
+	require.NotContains(t, strings.ToUpper(string(stored)), secret,
+		"the secret is recoverable from the stored bytes as text")
 }
 
 // A Store without a sealing key must refuse rather than fall back to plaintext.
@@ -188,47 +145,34 @@ func TestUnsealedStoreRefusesSecretWork(t *testing.T) {
 
 	t.Run("enroll", func(t *testing.T) {
 		_, err := unsealed.CreateReviewerToken(ctx, "device", "token-a", "JBSWY3DPEHPK3PXP")
-		if err == nil {
-			t.Fatal("CreateReviewerToken() with a secret succeeded on an unsealed Store")
-		}
-		if !strings.Contains(err.Error(), "in the clear") {
-			t.Fatalf("error = %v, want it to say why it refused", err)
-		}
+		require.Error(t, err, "CreateReviewerToken with a secret succeeded on an unsealed Store")
+		require.ErrorContains(t, err, "in the clear")
 	})
 
 	// A token with no secret is unaffected: nothing needs sealing, so requiring
 	// a key here would break bootstrap on a fresh install.
 	t.Run("enroll without a secret is allowed", func(t *testing.T) {
-		if _, err := unsealed.CreateReviewerToken(ctx, "device", "token-b", ""); err != nil {
-			t.Fatalf("CreateReviewerToken() without a secret error = %v", err)
-		}
+		_, err := unsealed.CreateReviewerToken(ctx, "device", "token-b", "")
+		require.NoError(t, err)
 	})
 
 	t.Run("verify", func(t *testing.T) {
 		tok, err := sealed.CreateReviewerToken(ctx, "enrolled", "token-c", "JBSWY3DPEHPK3PXP")
-		if err != nil {
-			t.Fatalf("CreateReviewerToken() error = %v", err)
-		}
+		require.NoError(t, err)
+
 		_, err = unsealed.VerifyReviewerTOTP(ctx, tok.ID, "000000")
-		if err == nil {
-			t.Fatal("VerifyReviewerTOTP() succeeded on an unsealed Store")
-		}
+		require.Error(t, err, "VerifyReviewerTOTP succeeded on an unsealed Store")
 	})
 
 	// An unenrolled token still returns (false, nil): that's a failed gate, not
 	// a misconfiguration, and must stay distinguishable from the case above.
 	t.Run("verify unenrolled needs no key", func(t *testing.T) {
 		tok, err := unsealed.CreateReviewerToken(ctx, "unenrolled", "token-d", "")
-		if err != nil {
-			t.Fatalf("CreateReviewerToken() error = %v", err)
-		}
+		require.NoError(t, err)
+
 		ok, err := unsealed.VerifyReviewerTOTP(ctx, tok.ID, "000000")
-		if err != nil {
-			t.Fatalf("VerifyReviewerTOTP() error = %v, want a clean false", err)
-		}
-		if ok {
-			t.Fatal("VerifyReviewerTOTP() accepted a code for an unenrolled token")
-		}
+		require.NoError(t, err, "an unenrolled token should fail the gate cleanly, not error")
+		require.False(t, ok)
 	})
 }
 
@@ -240,19 +184,11 @@ func TestVerifyReviewerTOTP_WrongSealingKeyIsAnError(t *testing.T) {
 	ctx := context.Background()
 
 	tok, err := s.CreateReviewerToken(ctx, "device", "token", "JBSWY3DPEHPK3PXP")
-	if err != nil {
-		t.Fatalf("CreateReviewerToken() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	other := NewSealed(pool, testSecretKey(t))
 	ok, err := other.VerifyReviewerTOTP(ctx, tok.ID, "000000")
-	if err == nil {
-		t.Fatal("VerifyReviewerTOTP() with the wrong sealing key returned no error")
-	}
-	if ok {
-		t.Fatal("VerifyReviewerTOTP() returned true under the wrong key")
-	}
-	if !strings.Contains(err.Error(), "does not match") {
-		t.Fatalf("error = %v, want it to name the key mismatch", err)
-	}
+	require.Error(t, err, "VerifyReviewerTOTP with the wrong sealing key returned no error")
+	require.False(t, ok)
+	require.ErrorContains(t, err, "does not match")
 }

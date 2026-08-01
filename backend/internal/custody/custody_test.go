@@ -4,23 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func newTestKey(t *testing.T) *Key {
 	t.Helper()
 	raw, err := GenerateKey()
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	require.NoError(t, err)
 	k, err := NewKey(raw)
-	if err != nil {
-		t.Fatalf("NewKey() error = %v", err)
-	}
+	require.NoError(t, err)
 	return k
 }
 
@@ -35,9 +31,8 @@ func TestNewKeyRejectsWrongLength(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := NewKey(make([]byte, tt.n)); !errors.Is(err, ErrKeyLen) {
-				t.Fatalf("NewKey(%d bytes) error = %v, want ErrKeyLen", tt.n, err)
-			}
+			_, err := NewKey(make([]byte, tt.n))
+			require.ErrorIs(t, err, ErrKeyLen)
 		})
 	}
 }
@@ -55,22 +50,16 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			blob, err := k.Seal(tt.pt)
-			if err != nil {
-				t.Fatalf("Seal() error = %v", err)
-			}
-			if bytes.Equal(blob, tt.pt) {
-				t.Fatal("Seal() returned the plaintext unchanged")
-			}
+			require.NoError(t, err)
+			require.NotEqual(t, tt.pt, blob, "Seal returned the plaintext unchanged")
+
 			got, err := k.Open(blob)
-			if err != nil {
-				t.Fatalf("Open() error = %v", err)
-			}
-			// bytes.Equal, not reflect.DeepEqual: GCM returns nil rather than an
-			// empty slice for empty plaintext, and that distinction is not one
-			// this package promises to preserve.
-			if !bytes.Equal(got, tt.pt) {
-				t.Fatalf("Open(Seal(%q)) = %q, want round trip", tt.pt, got)
-			}
+			require.NoError(t, err)
+			// bytes.Equal rather than require.Equal: GCM returns nil, not an
+			// empty slice, for empty plaintext, and require.Equal distinguishes
+			// the two. This package promises the contents round-trip, not the
+			// nil-ness of the header.
+			require.True(t, bytes.Equal(tt.pt, got), "Open(Seal(%q)) = %q", tt.pt, got)
 		})
 	}
 }
@@ -83,145 +72,102 @@ func TestSealIsNonDeterministic(t *testing.T) {
 	pt := []byte("JBSWY3DPEHPK3PXP")
 
 	first, err := k.Seal(pt)
-	if err != nil {
-		t.Fatalf("Seal() error = %v", err)
-	}
+	require.NoError(t, err)
 	second, err := k.Seal(pt)
-	if err != nil {
-		t.Fatalf("Seal() error = %v", err)
-	}
-	if bytes.Equal(first, second) {
-		t.Fatal("sealing the same plaintext twice produced identical blobs; nonce is being reused")
-	}
+	require.NoError(t, err)
+
+	require.NotEqual(t, first, second, "sealing the same plaintext twice reused the nonce")
 }
 
 func TestOpenRejectsWrongKey(t *testing.T) {
 	blob, err := newTestKey(t).Seal([]byte("secret"))
-	if err != nil {
-		t.Fatalf("Seal() error = %v", err)
-	}
-	if _, err := newTestKey(t).Open(blob); err == nil {
-		t.Fatal("Open() with an unrelated key succeeded, want error")
-	}
+	require.NoError(t, err)
+
+	_, err = newTestKey(t).Open(blob)
+	require.Error(t, err, "a blob sealed under one key opened under another")
 }
 
 func TestOpenRejectsTamperedBlob(t *testing.T) {
 	k := newTestKey(t)
 	blob, err := k.Seal([]byte("secret"))
-	if err != nil {
-		t.Fatalf("Seal() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	t.Run("flipped ciphertext bit", func(t *testing.T) {
 		tampered := bytes.Clone(blob)
 		tampered[len(tampered)-1] ^= 0x01
-		if _, err := k.Open(tampered); err == nil {
-			t.Fatal("Open() accepted a tampered ciphertext")
-		}
+		_, err := k.Open(tampered)
+		require.Error(t, err)
 	})
 
 	t.Run("flipped nonce bit", func(t *testing.T) {
 		tampered := bytes.Clone(blob)
 		tampered[0] ^= 0x01
-		if _, err := k.Open(tampered); err == nil {
-			t.Fatal("Open() accepted a tampered nonce")
-		}
+		_, err := k.Open(tampered)
+		require.Error(t, err)
 	})
 
 	t.Run("truncated below nonce length", func(t *testing.T) {
 		_, err := k.Open(blob[:4])
-		if err == nil || !strings.Contains(err.Error(), "shorter than its nonce") {
-			t.Fatalf("Open(truncated) error = %v, want a nonce-length complaint", err)
-		}
+		require.ErrorContains(t, err, "shorter than its nonce")
 	})
 
 	t.Run("empty", func(t *testing.T) {
 		_, err := k.Open(nil)
-		if err == nil || !strings.Contains(err.Error(), "shorter than its nonce") {
-			t.Fatalf("Open(nil) error = %v, want a nonce-length complaint", err)
-		}
+		require.ErrorContains(t, err, "shorter than its nonce")
 	})
 }
 
 func TestWrapUnwrapRoundTrip(t *testing.T) {
 	master := newTestKey(t)
 	dekRaw, err := GenerateKey()
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	wrapped, err := master.Wrap(dekRaw)
-	if err != nil {
-		t.Fatalf("Wrap() error = %v", err)
-	}
-	if bytes.Contains(wrapped, dekRaw) {
-		t.Fatal("wrapped DEK contains the raw key bytes")
-	}
+	require.NoError(t, err)
+	require.False(t, bytes.Contains(wrapped, dekRaw), "wrapped DEK contains the raw key bytes")
 
 	dek, err := master.Unwrap(wrapped)
-	if err != nil {
-		t.Fatalf("Unwrap() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// The unwrapped DEK must be the same key, not merely a valid one: seal with
 	// the original and open with the recovered copy.
 	original, err := NewKey(dekRaw)
-	if err != nil {
-		t.Fatalf("NewKey() error = %v", err)
-	}
+	require.NoError(t, err)
 	blob, err := original.Seal([]byte("payload"))
-	if err != nil {
-		t.Fatalf("Seal() error = %v", err)
-	}
+	require.NoError(t, err)
+
 	got, err := dek.Open(blob)
-	if err != nil {
-		t.Fatalf("Open() with unwrapped DEK error = %v", err)
-	}
-	if string(got) != "payload" {
-		t.Fatalf("Open() = %q, want %q", got, "payload")
-	}
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload"), got)
 }
 
 func TestWrapRejectsWrongLength(t *testing.T) {
-	if _, err := newTestKey(t).Wrap(make([]byte, KeyLen-1)); !errors.Is(err, ErrKeyLen) {
-		t.Fatalf("Wrap(short) error = %v, want ErrKeyLen", err)
-	}
+	_, err := newTestKey(t).Wrap(make([]byte, KeyLen-1))
+	require.ErrorIs(t, err, ErrKeyLen)
 }
 
 func TestUnwrapRejectsWrongMasterKey(t *testing.T) {
 	dekRaw, err := GenerateKey()
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	require.NoError(t, err)
 	wrapped, err := newTestKey(t).Wrap(dekRaw)
-	if err != nil {
-		t.Fatalf("Wrap() error = %v", err)
-	}
-	if _, err := newTestKey(t).Unwrap(wrapped); err == nil {
-		t.Fatal("Unwrap() with an unrelated master key succeeded, want error")
-	}
+	require.NoError(t, err)
+
+	_, err = newTestKey(t).Unwrap(wrapped)
+	require.Error(t, err)
 }
 
 func TestUnwrapRejectsCorruptWrappedKey(t *testing.T) {
 	master := newTestKey(t)
 	dekRaw, err := GenerateKey()
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	require.NoError(t, err)
 	wrapped, err := master.Wrap(dekRaw)
-	if err != nil {
-		t.Fatalf("Wrap() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	corrupt := bytes.Clone(wrapped)
 	corrupt[len(corrupt)-1] ^= 0xff
 	_, err = master.Unwrap(corrupt)
-	if err == nil {
-		t.Fatal("Unwrap() accepted a corrupt blob")
-	}
-	if errors.Is(err, ErrKeyLen) {
-		t.Fatal("corruption reported as a length problem; it is an AEAD failure")
-	}
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrKeyLen, "corruption reported as a length problem; it is an AEAD failure")
 }
 
 // Rotating the master key must rewrap the DEK without re-encrypting the data —
@@ -230,53 +176,33 @@ func TestUnwrapRejectsCorruptWrappedKey(t *testing.T) {
 func TestMasterKeyRotationPreservesSealedData(t *testing.T) {
 	oldMaster := newTestKey(t)
 	dekRaw, err := GenerateKey()
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	require.NoError(t, err)
 	dek, err := NewKey(dekRaw)
-	if err != nil {
-		t.Fatalf("NewKey() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	sealed, err := dek.Seal([]byte("enrolled secret"))
-	if err != nil {
-		t.Fatalf("Seal() error = %v", err)
-	}
+	require.NoError(t, err)
 	wrapped, err := oldMaster.Wrap(dekRaw)
-	if err != nil {
-		t.Fatalf("Wrap() error = %v", err)
-	}
+	require.NoError(t, err)
 
 	// Rotate: recover the DEK under the old master, rewrap under the new one.
 	// The sealed payload is never touched.
 	recovered, err := oldMaster.Unwrap(wrapped)
-	if err != nil {
-		t.Fatalf("Unwrap() error = %v", err)
-	}
-	if _, err := recovered.Open(sealed); err != nil {
-		t.Fatalf("recovered DEK could not open its own data: %v", err)
-	}
+	require.NoError(t, err)
+	_, err = recovered.Open(sealed)
+	require.NoError(t, err, "recovered DEK could not open its own data")
 
 	newMaster := newTestKey(t)
 	rewrapped, err := newMaster.Wrap(dekRaw)
-	if err != nil {
-		t.Fatalf("Wrap() under new master error = %v", err)
-	}
-	if _, err := oldMaster.Unwrap(rewrapped); err == nil {
-		t.Fatal("the retired master key still unwraps the rewrapped DEK")
-	}
+	require.NoError(t, err)
+	_, err = oldMaster.Unwrap(rewrapped)
+	require.Error(t, err, "the retired master key still unwraps the rewrapped DEK")
 
 	dekAfter, err := newMaster.Unwrap(rewrapped)
-	if err != nil {
-		t.Fatalf("Unwrap() under new master error = %v", err)
-	}
+	require.NoError(t, err)
 	got, err := dekAfter.Open(sealed)
-	if err != nil {
-		t.Fatalf("data sealed before rotation did not survive it: %v", err)
-	}
-	if string(got) != "enrolled secret" {
-		t.Fatalf("Open() = %q, want %q", got, "enrolled secret")
-	}
+	require.NoError(t, err, "data sealed before rotation did not survive it")
+	require.Equal(t, []byte("enrolled secret"), got)
 }
 
 func TestFileBackendCreatesKeyWhenAllowed(t *testing.T) {
@@ -284,63 +210,39 @@ func TestFileBackendCreatesKeyWhenAllowed(t *testing.T) {
 	b := &FileBackend{Path: path, AllowCreate: true}
 
 	key, err := b.Unseal(context.Background())
-	if err != nil {
-		t.Fatalf("Unseal() error = %v", err)
-	}
-	if len(key) != KeyLen {
-		t.Fatalf("Unseal() returned %d bytes, want %d", len(key), KeyLen)
-	}
+	require.NoError(t, err)
+	require.Len(t, key, KeyLen)
 
 	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat() error = %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("minted key file mode = %04o, want 0600", perm)
-	}
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "minted key file is readable beyond its owner")
 
 	// A second Unseal must return the same key, or every restart would orphan
 	// everything sealed before it.
 	again, err := b.Unseal(context.Background())
-	if err != nil {
-		t.Fatalf("second Unseal() error = %v", err)
-	}
-	if !bytes.Equal(key, again) {
-		t.Fatal("Unseal() returned a different key on the second call")
-	}
+	require.NoError(t, err)
+	require.Equal(t, key, again)
 }
 
 func TestFileBackendRefusesToCreateByDefault(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "master.key")
 
 	_, err := (&FileBackend{Path: path}).Unseal(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "no key file") {
-		t.Fatalf("Unseal() error = %v, want a missing-key-file refusal", err)
-	}
-	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatal("a refusal left a key file behind")
-	}
+	require.ErrorContains(t, err, "no key file")
+	require.NoFileExists(t, path, "a refusal left a key file behind")
 }
 
 func TestFileBackendRejectsLoosePermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "master.key")
 	raw, err := GenerateKey()
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
-	if err := os.WriteFile(path, []byte(base64.StdEncoding.EncodeToString(raw)), 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, []byte(base64.StdEncoding.EncodeToString(raw)), 0o600))
 
 	for _, mode := range []os.FileMode{0o640, 0o604, 0o644, 0o660} {
 		t.Run(mode.String(), func(t *testing.T) {
-			if err := os.Chmod(path, mode); err != nil {
-				t.Fatalf("Chmod() error = %v", err)
-			}
+			require.NoError(t, os.Chmod(path, mode))
 			_, err := (&FileBackend{Path: path}).Unseal(context.Background())
-			if err == nil || !strings.Contains(err.Error(), "chmod 600") {
-				t.Fatalf("Unseal() with mode %04o error = %v, want a permissions refusal", mode, err)
-			}
+			require.ErrorContains(t, err, "chmod 600")
 		})
 	}
 }
@@ -359,13 +261,10 @@ func TestFileBackendRejectsMalformedKeyFile(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "master.key")
-			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
-				t.Fatalf("WriteFile() error = %v", err)
-			}
+			require.NoError(t, os.WriteFile(path, []byte(tt.content), 0o600))
+
 			_, err := (&FileBackend{Path: path}).Unseal(context.Background())
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("Unseal() error = %v, want it to mention %q", err, tt.wantErr)
-			}
+			require.ErrorContains(t, err, tt.wantErr)
 		})
 	}
 }
@@ -375,66 +274,40 @@ func TestFileBackendRejectsMalformedKeyFile(t *testing.T) {
 func TestFileBackendToleratesTrailingWhitespace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "master.key")
 	raw, err := GenerateKey()
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
+	require.NoError(t, err)
 	content := base64.StdEncoding.EncodeToString(raw) + "\n\n  "
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 
 	key, err := (&FileBackend{Path: path}).Unseal(context.Background())
-	if err != nil {
-		t.Fatalf("Unseal() error = %v", err)
-	}
-	if !bytes.Equal(key, raw) {
-		t.Fatal("Unseal() did not recover the written key")
-	}
+	require.NoError(t, err)
+	require.Equal(t, raw, key)
 }
 
 func TestDefaultKeyPathHonoursXDGStateHome(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", "/tmp/example-state")
 	path, err := DefaultKeyPath()
-	if err != nil {
-		t.Fatalf("DefaultKeyPath() error = %v", err)
-	}
-	if want := "/tmp/example-state/chuvar/master.key"; path != want {
-		t.Fatalf("DefaultKeyPath() = %q, want %q", path, want)
-	}
+	require.NoError(t, err)
+	require.Equal(t, "/tmp/example-state/chuvar/master.key", path)
 }
 
 func TestDefaultKeyPathFallsBackToXDGConvention(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", "")
 	path, err := DefaultKeyPath()
-	if err != nil {
-		t.Fatalf("DefaultKeyPath() error = %v", err)
-	}
-	if want := filepath.Join(".local", "state", "chuvar"); !strings.Contains(path, want) {
-		t.Fatalf("DefaultKeyPath() = %q, want it under %q", path, want)
-	}
+	require.NoError(t, err)
+	require.Contains(t, path, filepath.Join(".local", "state", "chuvar"))
 }
 
 func TestEphemeralIsStableWithinAnInstance(t *testing.T) {
 	e := &Ephemeral{}
 	first, err := e.Unseal(context.Background())
-	if err != nil {
-		t.Fatalf("Unseal() error = %v", err)
-	}
+	require.NoError(t, err)
 	second, err := e.Unseal(context.Background())
-	if err != nil {
-		t.Fatalf("second Unseal() error = %v", err)
-	}
-	if !bytes.Equal(first, second) {
-		t.Fatal("Ephemeral returned a different key on the second call")
-	}
+	require.NoError(t, err)
+	require.Equal(t, first, second)
 
 	otherKey, err := (&Ephemeral{}).Unseal(context.Background())
-	if err != nil {
-		t.Fatalf("Unseal() on second instance error = %v", err)
-	}
-	if bytes.Equal(first, otherKey) {
-		t.Fatal("separate Ephemeral instances share a key")
-	}
+	require.NoError(t, err)
+	require.NotEqual(t, first, otherKey, "separate Ephemeral instances share a key")
 }
 
 // Both shipped backends are honest about being unsealed. When a backend that
@@ -443,9 +316,7 @@ func TestEphemeralIsStableWithinAnInstance(t *testing.T) {
 func TestShippedBackendsReportUnsealed(t *testing.T) {
 	for _, b := range []Backend{&FileBackend{}, &Ephemeral{}} {
 		t.Run(b.Name(), func(t *testing.T) {
-			if b.Sealed() {
-				t.Fatal("backend claims to seal at rest; no shipped backend does yet (see package doc)")
-			}
+			require.False(t, b.Sealed(), "backend claims to seal at rest; none does yet (see package doc)")
 		})
 	}
 }
