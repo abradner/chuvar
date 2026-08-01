@@ -142,7 +142,7 @@ func generateToken() (string, error) {
 // and REVIEWER_BOOTSTRAP_TOKEN can't help — a fresh bootstrap token still
 // faces a nonzero ever-enrolled count. That is deliberate: an API-reachable
 // recovery path is indistinguishable from the attack above. Recovery is a
-// direct database action (clear totp_secret on a token row, or delete the
+// direct database action (clear totp_secret_enc on a token row, or delete the
 // enrolled rows), which suits this deployment's single operator with DB
 // access; see docs/operations.md.
 func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +202,7 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 // reduces authority. That stance is a real invariant, not just a convention:
 // createToken's enrollment gate is keyed on a count this endpoint must not be
 // able to lower, which is why that count includes revoked tokens. Before
-// widening what revocation can do — hard-deleting rows, clearing totp_secret,
+// widening what revocation can do — hard-deleting rows, clearing totp_secret_enc,
 // anything that shrinks the ever-enrolled population — re-check createToken's
 // doc comment first; the two are coupled.
 func (a *API) revokeToken(w http.ResponseWriter, r *http.Request) {

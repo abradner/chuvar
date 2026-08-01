@@ -151,7 +151,7 @@ func TestRenewGrant_RevokedGrantRejected(t *testing.T) {
 // A capability grant must not be renewable through the memory-grant path. No
 // surface can create one yet (both API and MCP hardcode kind='memory'), so this
 // inserts one directly — the only way to exercise a latch closed ahead of the
-// door it guards. When brokerd gains a real creation path, this test keeps
+// door it guards. When the capability broker gains a real creation path, this test keeps
 // renewal from silently inheriting memory semantics on the way through.
 func TestRenewGrant_CapabilityGrantRejected(t *testing.T) {
 	s, pool := testStore(t)

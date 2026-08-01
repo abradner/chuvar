@@ -1,6 +1,7 @@
 package custody
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -116,6 +117,15 @@ func (b *FileBackend) Unseal(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("custody: stat key file: %w", err)
 	}
 
+	// Regular files only. A path pointing at a FIFO or a character device turns
+	// os.ReadFile into an unbounded blocking read, so a misconfigured path (or
+	// one an attacker can influence) becomes a boot that never completes rather
+	// than one that fails. Refusing is both safer and far easier to diagnose.
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("custody: key file %s is not a regular file (mode %s); "+
+			"refusing to read it", path, info.Mode().Type())
+	}
+
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		return nil, fmt.Errorf("custody: key file %s has mode %04o; it must not be readable "+
 			"or writable by group or other (chmod 600)", path, perm)
@@ -155,8 +165,17 @@ func (b *FileBackend) create(path string) ([]byte, error) {
 		return nil, fmt.Errorf("custody: create key file: %w", err)
 	}
 	if _, err := f.Write(encoded); err != nil {
-		f.Close()
+		f.Close() //nolint:errcheck // the write error is the one worth reporting
 		return nil, fmt.Errorf("custody: write key file: %w", err)
+	}
+	// fsync before reporting success. Without it a crash or power loss between
+	// the write and the OS flush leaves a truncated or empty key file — and the
+	// caller has already been told it has a key, so it will happily seal
+	// secrets that nothing can ever open again. On a Pi with no UPS this is not
+	// a theoretical window.
+	if err := f.Sync(); err != nil {
+		f.Close() //nolint:errcheck // the sync error is the one worth reporting
+		return nil, fmt.Errorf("custody: syncing key file to disk: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		return nil, fmt.Errorf("custody: close key file: %w", err)
@@ -199,5 +218,11 @@ func (e *Ephemeral) Unseal(ctx context.Context) ([]byte, error) {
 		}
 		e.key = key
 	}
-	return e.key, nil
+	// A copy, not the backing slice. NewKey's doc invites callers to clear their
+	// buffer once it has derived the cipher, and a caller taking that invitation
+	// would zero this backend's only copy — after which every later Unseal hands
+	// out 32 zero bytes and decryption silently fails against data sealed
+	// earlier in the same process. FileBackend is unaffected because it returns
+	// a freshly decoded slice per call.
+	return bytes.Clone(e.key), nil
 }

@@ -215,7 +215,10 @@ func TestFileBackendCreatesKeyWhenAllowed(t *testing.T) {
 
 	info, err := os.Stat(path)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "minted key file is readable beyond its owner")
+	// The contract is "not readable or writable by group or other", not exactly
+	// 0600 — the open mode is masked by umask, so an unusual umask can legally
+	// yield 0400. Asserting equality would fail on a file the code accepts.
+	require.Zero(t, info.Mode().Perm()&0o077, "minted key file is accessible beyond its owner (mode %04o)", info.Mode().Perm())
 
 	// A second Unseal must return the same key, or every restart would orphan
 	// everything sealed before it.

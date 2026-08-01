@@ -1,6 +1,10 @@
 package db
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestToPgx5URL(t *testing.T) {
 	tests := []struct {
@@ -40,17 +44,11 @@ func TestToPgx5URL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := toPgx5URL(tt.in)
 			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("toPgx5URL(%q) = %q, want error", tt.in, got)
-				}
+				require.Error(t, err, "toPgx5URL(%q) = %q, want error", tt.in, got)
 				return
 			}
-			if err != nil {
-				t.Fatalf("toPgx5URL(%q) unexpected error: %v", tt.in, err)
-			}
-			if got != tt.want {
-				t.Errorf("toPgx5URL(%q) = %q, want %q", tt.in, got, tt.want)
-			}
+			require.NoError(t, err, "toPgx5URL(%q)", tt.in)
+			require.Equal(t, tt.want, got, "toPgx5URL(%q)", tt.in)
 		})
 	}
 }

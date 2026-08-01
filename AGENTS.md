@@ -194,6 +194,10 @@ Things that cost real time to discover once — don't rediscover them:
   hits it again.
 - **zsh reserves `status` as a special read-only variable name.** Never use it as a
   loop/shell variable (`for status in ...` breaks) — use `hc`, `st`, or similar.
+- **`go test -race` does not work on this machine.** ThreadSanitizer aborts with
+  `unsupported VMA range / Found 47 - Supported 48` — the Pi's kernel uses a 47-bit
+  virtual address space and TSan requires 48. This is a host limitation, not a
+  failing test: drop `-race` locally and let CI (x86) cover it.
 - **The full backend test suite needs `go test -p 1 ./...`, not just `go test ./...`**
   — see §4's note on why (shared-database test isolation, not flakiness).
 

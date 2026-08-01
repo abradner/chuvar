@@ -174,7 +174,7 @@ func bootstrapReviewerToken(ctx context.Context, st *store.Store) error {
 // cannot be closed without making the system unbootstrappable.
 //
 // This is not just the fresh-install case. Every deployment that predates the
-// reviewer_totp migration lands here too: the migration adds totp_secret as a
+// reviewer_totp migration lands here too: it adds the secret column as a
 // nullable column with no backfill, so existing tokens are all unenrolled, and
 // nothing forces the operator to notice. Until they mint one enrolled device,
 // anything holding a bearer token can mint another and enroll it — exactly the

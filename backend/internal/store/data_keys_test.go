@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/abradner/chuvar/backend/internal/custody"
 )
 
 func TestLoadOrCreateDataKey_CreatesThenReuses(t *testing.T) {
@@ -191,4 +194,43 @@ func TestVerifyReviewerTOTP_WrongSealingKeyIsAnError(t *testing.T) {
 	require.Error(t, err, "VerifyReviewerTOTP with the wrong sealing key returned no error")
 	require.False(t, ok)
 	require.ErrorContains(t, err, "does not match")
+}
+
+// Two processes booting together both find no key and both try to insert. The
+// loser must adopt the winner's key rather than its own — otherwise it would
+// hold a DEK that opens nothing anyone else wrote. Exercised by racing real
+// concurrent calls, since the branch only triggers on a genuine ON CONFLICT.
+func TestLoadOrCreateDataKey_ConcurrentCreateConvergesOnOneKey(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+	master := testSecretKey(t)
+
+	const racers = 8
+	keys := make([]*custody.Key, racers)
+	errs := make([]error, racers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // maximise overlap on the insert
+			keys[i], errs[i] = s.LoadOrCreateDataKey(ctx, master, DataKeyPurposeSecrets)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		require.NoError(t, err, "racer %d failed", i)
+	}
+
+	// All eight must be the same key: seal with the first, open with each.
+	sealed, err := keys[0].Seal([]byte("payload"))
+	require.NoError(t, err)
+	for i, k := range keys {
+		got, err := k.Open(sealed)
+		require.NoError(t, err, "racer %d got a divergent key", i)
+		require.Equal(t, []byte("payload"), got)
+	}
 }
