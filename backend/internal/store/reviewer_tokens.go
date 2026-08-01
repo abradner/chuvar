@@ -159,3 +159,25 @@ func (s *Store) CountActiveReviewerTokens(ctx context.Context) (int64, error) {
 	}
 	return n, nil
 }
+
+// CountEverEnrolledReviewerTokens reports how many tokens have a TOTP secret,
+// counting revoked ones too — used by createToken (internal/api/tokens.go) to
+// decide whether minting a new token requires a TOTP code from the caller.
+// Zero means no device has ever been enrolled on this deployment: a fresh
+// install, or one still carrying only pre-TOTP-migration tokens. Either way
+// the operator has no enrolled device to prove possession of, so token
+// creation can't require one without becoming unbootstrappable.
+//
+// "Ever", not "currently active", is load-bearing: revocation is bearer-only
+// by design (it "only reduces authority"), so an active-only count would let
+// anyone holding a stolen bearer token revoke every enrolled device, reopen
+// this gate, and self-enroll a replacement. Because revoked rows are retained
+// rather than deleted, this count is monotonic and nothing reachable over the
+// API can lower it.
+func (s *Store) CountEverEnrolledReviewerTokens(ctx context.Context) (int64, error) {
+	n, err := s.q.CountEverEnrolledReviewerTokens(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("store: count ever-enrolled reviewer tokens: %w", err)
+	}
+	return n, nil
+}

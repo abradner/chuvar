@@ -21,3 +21,13 @@ UPDATE reviewer_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NU
 
 -- name: CountActiveReviewerTokens :one
 SELECT count(*) FROM reviewer_tokens WHERE revoked_at IS NULL;
+
+-- name: CountEverEnrolledReviewerTokens :one
+-- Deliberately NOT filtered on revoked_at: this counts whether a TOTP device
+-- has *ever* been enrolled, which is a monotonic, attacker-unlowerable signal.
+-- Counting only active tokens made revocation (bearer-only by design, since it
+-- "only reduces authority") into an escalation lever: revoke every enrolled
+-- device, drop the count to zero, then mint a fresh token and self-enroll
+-- through the now-open gate. Revoked rows are never deleted, so this count
+-- only ever grows. See createToken (internal/api/tokens.go).
+SELECT count(*) FROM reviewer_tokens WHERE totp_secret IS NOT NULL;

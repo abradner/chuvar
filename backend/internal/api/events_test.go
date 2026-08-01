@@ -237,6 +237,59 @@ func TestStreamEvents_AnnouncesGrantExpiring(t *testing.T) {
 	}
 }
 
+func TestStreamEvents_GrantExpiringRefiresAfterRenewalOnSameConnection(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	orig := eventPollInterval
+	eventPollInterval = 20 * time.Millisecond
+	t.Cleanup(func() { eventPollInterval = orig })
+
+	origWindow := grantExpiryWarningWindow
+	grantExpiryWarningWindow = time.Hour
+	t.Cleanup(func() { grantExpiryWarningWindow = origWindow })
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/events", nil)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testAuthToken)
+	resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // closed via t.Cleanup below
+	if err != nil {
+		t.Fatalf("GET /api/events: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	sse := newSSEReader(resp)
+	sse.readSSE(t, 1, 2*time.Second) // "ready"
+
+	soonTTL := 30 * time.Minute
+	g, err := st.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", &soonTTL, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	first := sse.readSSE(t, 1, 2*time.Second)
+	if first[0].Event != "grant_expiring" {
+		t.Fatalf("event = %q, want %q", first[0].Event, "grant_expiring")
+	}
+
+	// Renew it — still within the (shortened) warning window, but ExpiresAt
+	// has moved. Before keying warnedGrants by (ID, ExpiresAt), this second
+	// warning would never arrive on this connection — see warnedGrantKey's
+	// doc comment and the finding it fixes.
+	if _, err := st.RenewGrant(ctx, g.ID, 45*time.Minute, "human-reviewer"); err != nil {
+		t.Fatalf("RenewGrant() error = %v", err)
+	}
+
+	second := sse.readSSE(t, 1, 2*time.Second)
+	if second[0].Event != "grant_expiring" {
+		t.Fatalf("event after renewal = %q, want a second %q", second[0].Event, "grant_expiring")
+	}
+	if !strings.Contains(second[0].Data, g.ID) {
+		t.Errorf("second grant_expiring data = %q, want it to contain the renewed grant's ID %q", second[0].Data, g.ID)
+	}
+}
+
 func TestStreamEvents_RequiresAuth(t *testing.T) {
 	srv, _ := testServer(t)
 

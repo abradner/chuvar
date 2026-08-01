@@ -46,6 +46,9 @@ func run() error {
 	if err := bootstrapReviewerToken(ctx, st); err != nil {
 		return err
 	}
+	if err := warnIfNoEnrolledDevice(ctx, st); err != nil {
+		return err
+	}
 
 	// CORS_ALLOWED_ORIGIN is optional — the Vite dev server's default port is a
 	// reasonable default for local dev, but this is deliberately not baked into
@@ -116,5 +119,36 @@ func bootstrapReviewerToken(ctx context.Context, st *store.Store) error {
 		return fmt.Errorf("apiserver: creating bootstrap reviewer token: %w", err)
 	}
 	slog.Info("apiserver: no reviewer tokens existed; created one from REVIEWER_BOOTSTRAP_TOKEN", "label", "bootstrap")
+	return nil
+}
+
+// warnIfNoEnrolledDevice logs a prominent warning when no device has ever
+// enrolled a TOTP secret, because that is the one state in which
+// POST /api/tokens accepts a bearer token alone (see internal/api's
+// createToken): with nothing to prove possession against, the enrollment gate
+// cannot be closed without making the system unbootstrappable.
+//
+// This is not just the fresh-install case. Every deployment that predates the
+// reviewer_totp migration lands here too: the migration adds totp_secret as a
+// nullable column with no backfill, so existing tokens are all unenrolled, and
+// nothing forces the operator to notice. Until they mint one enrolled device,
+// anything holding a bearer token can mint another and enroll it — exactly the
+// escalation the gate exists to stop. There is no UI for this yet; it is a
+// deliberate operator action (see README.md's "Enrolling the first device").
+//
+// A warning rather than a hard failure: refusing to start would break every
+// existing deployment on upgrade, turning a security gap into an outage.
+func warnIfNoEnrolledDevice(ctx context.Context, st *store.Store) error {
+	n, err := st.CountEverEnrolledReviewerTokens(ctx)
+	if err != nil {
+		return fmt.Errorf("apiserver: checking for enrolled reviewer tokens: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	slog.Warn("apiserver: SECURITY — no reviewer device has enrolled a TOTP secret, " +
+		"so POST /api/tokens currently accepts a bearer token alone and anything holding " +
+		"that token can mint and enroll its own device. Enrol one now: POST /api/tokens " +
+		"and scan the returned otpauth:// URI. See README.md.")
 	return nil
 }

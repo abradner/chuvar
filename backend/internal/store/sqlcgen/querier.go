@@ -14,6 +14,14 @@ import (
 type Querier interface {
 	ApproveGrantRequest(ctx context.Context, arg ApproveGrantRequestParams) (int64, error)
 	CountActiveReviewerTokens(ctx context.Context) (int64, error)
+	// Deliberately NOT filtered on revoked_at: this counts whether a TOTP device
+	// has *ever* been enrolled, which is a monotonic, attacker-unlowerable signal.
+	// Counting only active tokens made revocation (bearer-only by design, since it
+	// "only reduces authority") into an escalation lever: revoke every enrolled
+	// device, drop the count to zero, then mint a fresh token and self-enroll
+	// through the now-open gate. Revoked rows are never deleted, so this count
+	// only ever grows. See createToken (internal/api/tokens.go).
+	CountEverEnrolledReviewerTokens(ctx context.Context) (int64, error)
 	DenyGrantRequest(ctx context.Context, arg DenyGrantRequestParams) (int64, error)
 	FactVisibleToScopes(ctx context.Context, arg FactVisibleToScopesParams) (bool, error)
 	// embedding_1/embedding_2 are the same repeated-named-param workaround used
@@ -52,7 +60,15 @@ type Querier interface {
 	// Subject-agnostic by design, like ListStagedDiffs/ListGrantRequests — v0 is a
 	// single-operator system (AGENTS.md), so the expiry-warning SSE stream isn't
 	// scoped per subject either.
-	ListGrantsNearingExpiry(ctx context.Context, expiresAt pgtype.Timestamptz) ([]Grant, error)
+	//
+	// Scopes come back via an array_agg subquery (same shape as GetFact/
+	// SearchFacts' fact_scopes aggregation in facts.sql) rather than a separate
+	// ListGrantScopes call per row: this query runs from the /api/events poll
+	// loop, potentially every eventPollInterval per connected SSE client, so an
+	// N+1 pattern here scales with (expiring grants) x (connected clients) x
+	// (polls/sec) — worth avoiding at the query level rather than in a hot loop.
+	// Found in review.
+	ListGrantsNearingExpiry(ctx context.Context, expiresAt pgtype.Timestamptz) ([]ListGrantsNearingExpiryRow, error)
 	ListReviewerTokens(ctx context.Context) ([]ListReviewerTokensRow, error)
 	ListStagedDiffs(ctx context.Context, status string) ([]StagedDiff, error)
 	LoadGrantRequestForUpdate(ctx context.Context, id string) (LoadGrantRequestForUpdateRow, error)

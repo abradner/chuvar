@@ -83,7 +83,10 @@ describe("StagedDiffsPage", () => {
 
   it("does not approve a diff when the TOTP prompt is cancelled", async () => {
     vi.mocked(api.listStagedDiffs).mockResolvedValue([sampleDiff]);
-    vi.spyOn(window, "prompt").mockReturnValue(null);
+    // window.prompt is already spied in beforeEach — re-spying here (rather
+    // than adjusting the existing spy's return value) would stack a second
+    // spy on top of it. Found in review.
+    vi.mocked(window.prompt).mockReturnValue(null);
 
     render(<StagedDiffsPage />);
     await screen.findByText("user prefers flat whites");

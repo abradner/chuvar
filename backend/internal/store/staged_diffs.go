@@ -122,6 +122,22 @@ func (s *Store) factVisibleToScopes(ctx context.Context, id string, grantedScope
 // empty embedding (caller has no Embedder configured) skips the check entirely and
 // reports novel — that's a degraded mode, not a silent failure, since the caller
 // chose not to provide one.
+//
+// KNOWN GAP: scope-filtered but NOT depth-filtered, unlike SearchFacts (facts.go).
+// grantedScopes arrives from GrantedScopes, which discards depth entirely, so a
+// caller holding only a summary-depth grant still gets a full-fidelity "duplicate"
+// verdict plus the matching fact's ID when it guesses that fact's exact content —
+// a guess-and-confirm oracle over content SearchFacts would have redacted to a
+// summary. Verified reproducible: exact guess returns duplicate + candidate ID,
+// wrong guess returns novel. Predates depth enforcement (the depth column was
+// inert when this was written) and is not fixed here because the useful fix is a
+// design question, not a filter: dedupe legitimately needs to compare against
+// facts the proposer cannot read, so narrowing the search to full-depth-granted
+// facts would silently degrade dedupe into letting duplicates through. Tracked as
+// its own ticket rather than guessed at: Notion, "Known gap: propose_write's
+// dedupe verdict is a content-confirmation oracle that bypasses grant depth"
+// (project: Enforcement Boundary & Known Gaps). Notion is this project's
+// issue tracker — GitHub issues are not used.
 func (s *Store) findDedupeCandidate(ctx context.Context, content string, embedding []float32, grantedScopes []string) (DedupeVerdict, string, error) {
 	if len(embedding) == 0 || len(grantedScopes) == 0 {
 		return DedupeNovel, "", nil

@@ -54,3 +54,28 @@ docker compose up -d         # Postgres + pgvector, local dev only
 cd backend && go run ./cmd/mcpserver   # MCP server (needs MCP_SUBJECT set)
 cd frontend && bun install && bun run dev   # approval UI
 ```
+
+## Enrolling the first device
+
+Mutations that grant or extend authority — approving a grant request, creating a
+grant directly, approving a staged diff, renewing a grant — require a
+device-local TOTP code on top of the bearer token.
+
+**Enrol one device immediately after first start, and immediately after
+upgrading a deployment that predates the `reviewer_totp` migration.** Until you
+do, the deployment sits in a state where a bearer token alone is enough to mint
+a token and enrol it, which defeats those gates. `apiserver` logs a `SECURITY`
+warning on every start until it's done.
+
+```sh
+curl -X POST http://127.0.0.1:8080/api/tokens \
+  -H "Authorization: Bearer $CHUVAR_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"alex-phone"}'
+```
+
+Scan the returned `totp_enroll_uri` into an authenticator app; the token
+plaintext is shown once.
+
+See [`docs/operations.md`](docs/operations.md) for adding and revoking devices,
+and for the break-glass procedure if every enrolled device is lost.

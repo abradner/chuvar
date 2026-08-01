@@ -2,6 +2,7 @@ package summarize
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -41,6 +42,22 @@ func TestStub_NeverContainsInputContent(t *testing.T) {
 	const probeLen = 20
 	if len(content) >= probeLen && strings.Contains(got, content[:probeLen]) {
 		t.Fatalf("Summarize() output %q leaks a content prefix", got)
+	}
+}
+
+func TestStub_ReportsRuneCountNotByteCount(t *testing.T) {
+	// "café" is 4 runes but 5 bytes (é is 2 bytes in UTF-8) — len(content)
+	// would over-report the length for any non-ASCII content. Found in review.
+	s := Stub{}
+	content := "café"
+
+	got, err := s.Summarize(context.Background(), content)
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+	want := fmt.Sprintf("[stub summary: %d characters, no real summarizer wired yet]", 4)
+	if got != want {
+		t.Fatalf("Summarize(%q) = %q, want %q (4 runes, not 5 bytes)", content, got, want)
 	}
 }
 
