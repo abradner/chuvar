@@ -261,9 +261,17 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 
 // warnedGrantKey is warnedGrants' map key: grant ID plus expiry together, so
 // a renewal (which changes ExpiresAt on the same row) gets a fresh key and
-// can warn again — see warnedGrants' own doc comment above. ExpiresAt is
-// never nil for anything ListGrantsNearingExpiry returns (its query filters
-// expires_at IS NOT NULL).
+// can warn again — see warnedGrants' own doc comment above.
+//
+// ExpiresAt should never be nil here (ListGrantsNearingExpiry's query filters
+// expires_at IS NOT NULL), but this is reached from a long-lived SSE handler
+// goroutine where a nil dereference would panic and drop the client's stream,
+// so it degrades to an ID-only key rather than trusting a cross-layer
+// invariant. The fallback is strictly less precise, never wrong: it just
+// dedupes as the original ID-only key did.
 func warnedGrantKey(g store.Grant) string {
+	if g.ExpiresAt == nil {
+		return g.ID
+	}
 	return fmt.Sprintf("%s@%s", g.ID, g.ExpiresAt.Format(time.RFC3339Nano))
 }
