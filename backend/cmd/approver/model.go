@@ -44,6 +44,16 @@ func (i item) id() string {
 	return i.req.ID
 }
 
+// promptState tracks an in-progress TOTP code entry for an approve action.
+// Approving (unlike reject/deny) is gated behind requireTOTP's device-local
+// second factor — see internal/api/api.go — so 'a' opens this prompt instead
+// of firing the request immediately; any other key while it's open cancels
+// without acting.
+type promptState struct {
+	it   item
+	code string
+}
+
 // model is the queue of currently-pending items plus which one is selected.
 // Owned entirely by main's event loop (single-goroutine — no mutex needed):
 // SSE events and key presses both flow through the same select statement there.
@@ -52,6 +62,7 @@ type model struct {
 	items    map[string]item
 	selected int
 	status   string // transient status line: last action result or a connection note
+	prompt   *promptState
 }
 
 func newModel() *model {
@@ -69,6 +80,13 @@ func (m *model) upsert(it item) {
 func (m *model) remove(id string) {
 	if _, exists := m.items[id]; !exists {
 		return
+	}
+	// An in-progress TOTP prompt for this exact item no longer makes sense if
+	// it just got resolved out from under the reviewer (another surface acted
+	// on it, or the server otherwise settled it) — submitting the code now
+	// would just 409 against an item that's no longer pending.
+	if m.prompt != nil && m.prompt.it.id() == id {
+		m.prompt = nil
 	}
 	delete(m.items, id)
 	for i, oid := range m.order {

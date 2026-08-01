@@ -109,14 +109,14 @@ func validateAllowedOrigin(origin string) error {
 func (a *API) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/staged-diffs", a.listStagedDiffs)
-	mux.HandleFunc("POST /api/staged-diffs/{id}/approve", a.approveStagedDiff)
+	mux.HandleFunc("POST /api/staged-diffs/{id}/approve", a.requireTOTP(a.approveStagedDiff))
 	mux.HandleFunc("POST /api/staged-diffs/{id}/reject", a.rejectStagedDiff)
 	mux.HandleFunc("GET /api/facts/{id}", a.getFact)
 	mux.HandleFunc("GET /api/grants", a.listGrants)
-	mux.HandleFunc("POST /api/grants", a.createGrant)
+	mux.HandleFunc("POST /api/grants", a.requireTOTP(a.createGrant))
 	mux.HandleFunc("POST /api/grants/{id}/revoke", a.revokeGrant)
 	mux.HandleFunc("GET /api/grant-requests", a.listGrantRequests)
-	mux.HandleFunc("POST /api/grant-requests/{id}/approve", a.approveGrantRequest)
+	mux.HandleFunc("POST /api/grant-requests/{id}/approve", a.requireTOTP(a.approveGrantRequest))
 	mux.HandleFunc("POST /api/grant-requests/{id}/deny", a.denyGrantRequest)
 	mux.HandleFunc("GET /api/tokens", a.listTokens)
 	mux.HandleFunc("POST /api/tokens", a.createToken)
@@ -203,7 +203,7 @@ func (a *API) requireAuth(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, errUnauthorized)
 			return
 		}
-		label, ok, err := a.Store.AuthenticateReviewerToken(r.Context(), strings.TrimPrefix(auth, prefix))
+		reviewer, ok, err := a.Store.AuthenticateReviewerToken(r.Context(), strings.TrimPrefix(auth, prefix))
 		if err != nil {
 			writeStoreError(w, http.StatusInternalServerError, "requireAuth", "could not authenticate", err)
 			return
@@ -212,32 +212,69 @@ func (a *API) requireAuth(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, errUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), reviewerContextKey{}, label)))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), reviewerContextKey{}, reviewer)))
 	})
 }
 
-var errUnauthorized = unauthorizedError{}
+// requireTOTP gates a handler behind the device-local TOTP second factor, on
+// top of (never instead of) requireAuth. Applied only to mutations that grant
+// or extend authority (approve grant request, direct grant create, approve
+// staged diff, grant renewal) — the confused-deputy hole this closes is
+// self-escalation, not denial/revocation, so those paths stay bearer-only.
+// See the reviewer_totp migration's doc comment for why a second factor is
+// needed at all: the bearer token alone is readable by anything with shell
+// access to the reviewer's environment.
+func (a *API) requireTOTP(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		code := r.Header.Get("X-Chuvar-TOTP-Code")
+		if code == "" {
+			writeError(w, http.StatusUnauthorized, errTOTPRequired)
+			return
+		}
+		reviewer := reviewerFromContext(r.Context())
+		ok, err := a.Store.VerifyReviewerTOTP(r.Context(), reviewer.ID, code)
+		if err != nil {
+			writeStoreError(w, http.StatusInternalServerError, "requireTOTP", "could not verify code", err)
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusUnauthorized, errTOTPInvalid)
+			return
+		}
+		next(w, r)
+	}
+}
+
+var (
+	errUnauthorized = unauthorizedError{}
+	errTOTPRequired = totpError{"X-Chuvar-TOTP-Code header is required for this action"}
+	errTOTPInvalid  = totpError{"invalid or expired TOTP code"}
+)
 
 type unauthorizedError struct{}
 
 func (unauthorizedError) Error() string { return "unauthorized" }
+
+type totpError struct{ msg string }
+
+func (e totpError) Error() string { return e.msg }
 
 // reviewerContextKey is an unexported type so this package's context value can
 // never collide with a key set by another package — the standard Go idiom for
 // context keys (see context.WithValue's doc comment).
 type reviewerContextKey struct{}
 
-// reviewerFromContext returns the authenticated reviewer's token label, set by
-// requireAuth on every request that reaches a handler. Panics if called on a
-// request that didn't go through requireAuth — every route in Routes() does, so
-// this is a programmer error (a new route added outside the auth chain), not a
-// runtime condition to handle gracefully.
-func reviewerFromContext(ctx context.Context) string {
-	label, ok := ctx.Value(reviewerContextKey{}).(string)
+// reviewerFromContext returns the authenticated reviewer's identity (token ID
+// and label), set by requireAuth on every request that reaches a handler.
+// Panics if called on a request that didn't go through requireAuth — every
+// route in Routes() does, so this is a programmer error (a new route added
+// outside the auth chain), not a runtime condition to handle gracefully.
+func reviewerFromContext(ctx context.Context) store.AuthenticatedReviewer {
+	reviewer, ok := ctx.Value(reviewerContextKey{}).(store.AuthenticatedReviewer)
 	if !ok {
 		panic("api: reviewerFromContext called on a request that bypassed requireAuth")
 	}
-	return label
+	return reviewer
 }
 
 // cors applies a single, explicitly-configured allowed origin — never a wildcard.

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/pquerna/otp/totp"
 
 	"github.com/abradner/chuvar/backend/internal/store/sqlcgen"
 )
@@ -36,14 +37,22 @@ func HashToken(token string) []byte {
 // CreateReviewerToken records a new device/reviewer token identified by label and
 // returns its store-side record. The caller already generated the plaintext
 // token and is responsible for showing it to the operator exactly once — this
-// method only ever persists the hash.
-func (s *Store) CreateReviewerToken(ctx context.Context, label, plaintext string) (ReviewerToken, error) {
+// method only ever persists the hash. totpSecret is the device's enrolled TOTP
+// secret (base32, empty if the caller chose not to enroll one) — see
+// api.createToken. A token with no secret simply cannot pass requireTOTP later;
+// it isn't a distinct error here.
+func (s *Store) CreateReviewerToken(ctx context.Context, label, plaintext, totpSecret string) (ReviewerToken, error) {
 	if label == "" {
 		return ReviewerToken{}, fmt.Errorf("store: reviewer token label must not be empty")
 	}
+	var secret *string
+	if totpSecret != "" {
+		secret = &totpSecret
+	}
 	row, err := s.q.InsertReviewerToken(ctx, sqlcgen.InsertReviewerTokenParams{
-		Label:     label,
-		TokenHash: HashToken(plaintext),
+		Label:      label,
+		TokenHash:  HashToken(plaintext),
+		TotpSecret: secret,
 	})
 	if err != nil {
 		return ReviewerToken{}, fmt.Errorf("store: insert reviewer token: %w", err)
@@ -51,8 +60,18 @@ func (s *Store) CreateReviewerToken(ctx context.Context, label, plaintext string
 	return ReviewerToken{ID: row.ID, Label: row.Label, CreatedAt: row.CreatedAt}, nil
 }
 
+// AuthenticatedReviewer identifies the token that authenticated a request: Label
+// is what every decided_by/approved_by/revoked_by field records, ID is what
+// requireTOTP uses to look up that specific device's enrolled secret. Two
+// different tokens can share a label (nothing enforces uniqueness there), so
+// TOTP verification is always keyed by ID, never by label.
+type AuthenticatedReviewer struct {
+	ID    string
+	Label string
+}
+
 // AuthenticateReviewerToken looks up the active (non-revoked) token matching
-// plaintext and reports its label, updating last_used_at as a side effect. The
+// plaintext and reports its identity, updating last_used_at as a side effect. The
 // second return value is false for "no such active token" — including a revoked
 // one — never a distinguishable error, so callers can't use response shape to
 // probe which tokens exist versus are merely revoked.
@@ -63,11 +82,11 @@ func (s *Store) CreateReviewerToken(ctx context.Context, label, plaintext string
 // comment), there's no comparable timing side channel here to guard with
 // subtle.ConstantTimeCompare: a B-tree equality lookup's timing is a function of
 // index depth, not of how many leading bytes of the hash matched.
-func (s *Store) AuthenticateReviewerToken(ctx context.Context, plaintext string) (label string, ok bool, err error) {
+func (s *Store) AuthenticateReviewerToken(ctx context.Context, plaintext string) (reviewer AuthenticatedReviewer, ok bool, err error) {
 	row, err := s.q.LookupActiveReviewerToken(ctx, HashToken(plaintext))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", false, nil
+			return AuthenticatedReviewer{}, false, nil
 		}
 		// A real DB failure (connection lost, pool exhausted, a migration
 		// that hasn't run) used to be swallowed into the same "not
@@ -77,12 +96,30 @@ func (s *Store) AuthenticateReviewerToken(ctx context.Context, plaintext string)
 		// actually is. Only "no matching row" means unauthenticated; every
 		// other error is a real failure the caller (requireAuth) should log
 		// and report as one. Found in review.
-		return "", false, fmt.Errorf("store: authenticate reviewer token: %w", err)
+		return AuthenticatedReviewer{}, false, fmt.Errorf("store: authenticate reviewer token: %w", err)
 	}
 	if err := s.q.TouchReviewerToken(ctx, row.ID); err != nil {
-		return "", false, fmt.Errorf("store: touch reviewer token: %w", err)
+		return AuthenticatedReviewer{}, false, fmt.Errorf("store: touch reviewer token: %w", err)
 	}
-	return row.Label, true, nil
+	return AuthenticatedReviewer{ID: row.ID, Label: row.Label}, true, nil
+}
+
+// VerifyReviewerTOTP validates a one-time code against the given token's
+// enrolled secret. Returns false, not an error, both when no code matches and
+// when the token has no secret enrolled — an unenrolled device fails the gate
+// the same way a wrong code does, it isn't a distinguishable server error.
+func (s *Store) VerifyReviewerTOTP(ctx context.Context, tokenID, code string) (bool, error) {
+	secret, err := s.q.GetReviewerTOTPSecret(ctx, tokenID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("store: get reviewer totp secret: %w", err)
+	}
+	if secret == nil || *secret == "" {
+		return false, nil
+	}
+	return totp.Validate(code, *secret), nil
 }
 
 // ListReviewerTokens returns every token, active or revoked, oldest first.

@@ -39,6 +39,9 @@ const sampleTargetFact: Fact = {
 describe("StagedDiffsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Approve prompts for the TOTP second factor via window.prompt — see
+    // Grants.test.tsx's identical setup for why.
+    vi.spyOn(window, "prompt").mockReturnValue("123456");
   });
 
   it("renders pending diffs with their dedupe verdict and proposer", async () => {
@@ -75,7 +78,19 @@ describe("StagedDiffsPage", () => {
     // decided_by is no longer a client-supplied argument — it's derived
     // server-side from the authenticated reviewer token (see internal/api's
     // package comment).
-    expect(api.approveStagedDiff).toHaveBeenCalledWith("diff-1");
+    expect(api.approveStagedDiff).toHaveBeenCalledWith("diff-1", "123456");
+  });
+
+  it("does not approve a diff when the TOTP prompt is cancelled", async () => {
+    vi.mocked(api.listStagedDiffs).mockResolvedValue([sampleDiff]);
+    vi.spyOn(window, "prompt").mockReturnValue(null);
+
+    render(<StagedDiffsPage />);
+    await screen.findByText("user prefers flat whites");
+
+    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    expect(api.approveStagedDiff).not.toHaveBeenCalled();
   });
 
   it("shows the target fact's current content for a diff that supersedes one, and blocks approval until it loads", async () => {

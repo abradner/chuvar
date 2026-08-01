@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/pquerna/otp/totp"
+
 	"github.com/abradner/chuvar/backend/internal/store"
 )
 
@@ -71,6 +73,23 @@ type createTokenResponse struct {
 	// store.HashToken); losing this value means the token can only be revoked and
 	// replaced with a new one, never recovered.
 	Token string `json:"token"`
+	// TOTPEnrollURI is an otpauth:// URI for scanning into an authenticator app —
+	// same "shown exactly once" discipline as Token. This is the device-local
+	// second factor requireTOTP checks on approval mutations; a token minted
+	// without ever seeing this value can authenticate for reads but can never
+	// pass that gate; see the reviewer_totp migration's doc comment for why.
+	TOTPEnrollURI string `json:"totp_enroll_uri"`
+}
+
+// generateTOTPSecret mints a new device TOTP secret and its otpauth:// enrollment
+// URI. label becomes the account name shown in the authenticator app, so the
+// operator can tell devices apart the same way they already do by token label.
+func generateTOTPSecret(label string) (secret, uri string, err error) {
+	key, err := totp.Generate(totp.GenerateOpts{Issuer: "Chuvar", AccountName: label})
+	if err != nil {
+		return "", "", fmt.Errorf("api: generating totp secret: %w", err)
+	}
+	return key.Secret(), key.URL(), nil
 }
 
 // generateToken produces a new random plaintext bearer credential: 32 bytes from
@@ -115,12 +134,17 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, http.StatusInternalServerError, "createToken.generateToken", "could not create token", err)
 		return
 	}
-	t, err := a.Store.CreateReviewerToken(r.Context(), req.Label, plaintext)
+	secret, enrollURI, err := generateTOTPSecret(req.Label)
+	if err != nil {
+		writeStoreError(w, http.StatusInternalServerError, "createToken.generateTOTPSecret", "could not create token", err)
+		return
+	}
+	t, err := a.Store.CreateReviewerToken(r.Context(), req.Label, plaintext, secret)
 	if err != nil {
 		writeStoreError(w, http.StatusInternalServerError, "createToken", "could not create token", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, createTokenResponse{tokenView: toTokenView(t), Token: plaintext})
+	writeJSON(w, http.StatusCreated, createTokenResponse{tokenView: toTokenView(t), Token: plaintext, TOTPEnrollURI: enrollURI})
 }
 
 // revokeToken handles POST /api/tokens/{id}/revoke. A token can revoke itself or

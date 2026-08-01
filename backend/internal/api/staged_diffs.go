@@ -118,7 +118,7 @@ func (a *API) listStagedDiffs(w http.ResponseWriter, r *http.Request) {
 // the package comment.
 func (a *API) approveStagedDiff(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	reviewer := reviewerFromContext(r.Context())
+	reviewer := reviewerFromContext(r.Context()).Label
 
 	diff, err := a.Store.GetStagedDiff(r.Context(), id)
 	if err != nil {
@@ -152,7 +152,7 @@ func (a *API) approveStagedDiff(w http.ResponseWriter, r *http.Request) {
 // authenticated reviewer, same as approveStagedDiff.
 func (a *API) rejectStagedDiff(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	reviewer := reviewerFromContext(r.Context())
+	reviewer := reviewerFromContext(r.Context()).Label
 
 	if err := a.Store.RejectDiff(r.Context(), id, reviewer); err != nil {
 		writeStoreError(w, http.StatusConflict, "rejectStagedDiff", "could not reject diff — it may no longer be pending", err)

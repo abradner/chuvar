@@ -83,7 +83,7 @@ func (a *API) listGrantRequests(w http.ResponseWriter, r *http.Request) {
 // reviewer.
 func (a *API) approveGrantRequest(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	approvedBy := reviewerFromContext(r.Context())
+	approvedBy := reviewerFromContext(r.Context()).Label
 
 	if !a.grantRequestExists(w, r, id) {
 		return
@@ -100,7 +100,7 @@ func (a *API) approveGrantRequest(w http.ResponseWriter, r *http.Request) {
 // denyGrantRequest handles POST /api/grant-requests/{id}/deny.
 func (a *API) denyGrantRequest(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	deniedBy := reviewerFromContext(r.Context())
+	deniedBy := reviewerFromContext(r.Context()).Label
 
 	if !a.grantRequestExists(w, r, id) {
 		return

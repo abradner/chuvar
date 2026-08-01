@@ -3,13 +3,16 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
+
+	"github.com/pquerna/otp/totp"
 )
 
 func TestReviewerTokens_CreateAuthenticateRevoke(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	tok, err := s.CreateReviewerToken(ctx, "alex-laptop", "plaintext-one")
+	tok, err := s.CreateReviewerToken(ctx, "alex-laptop", "plaintext-one", "")
 	if err != nil {
 		t.Fatalf("CreateReviewerToken() error = %v", err)
 	}
@@ -17,12 +20,12 @@ func TestReviewerTokens_CreateAuthenticateRevoke(t *testing.T) {
 		t.Errorf("Label = %q, want %q", tok.Label, "alex-laptop")
 	}
 
-	label, ok, err := s.AuthenticateReviewerToken(ctx, "plaintext-one")
+	reviewer, ok, err := s.AuthenticateReviewerToken(ctx, "plaintext-one")
 	if err != nil {
 		t.Fatalf("AuthenticateReviewerToken() error = %v", err)
 	}
-	if !ok || label != "alex-laptop" {
-		t.Fatalf("AuthenticateReviewerToken() = (%q, %v), want (%q, true)", label, ok, "alex-laptop")
+	if !ok || reviewer.Label != "alex-laptop" {
+		t.Fatalf("AuthenticateReviewerToken() = (%q, %v), want (%q, true)", reviewer.Label, ok, "alex-laptop")
 	}
 
 	// A never-issued plaintext must not authenticate.
@@ -59,11 +62,11 @@ func TestReviewerTokens_ListIncludesRevoked(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	a, err := s.CreateReviewerToken(ctx, "device-a", "plaintext-a")
+	a, err := s.CreateReviewerToken(ctx, "device-a", "plaintext-a", "")
 	if err != nil {
 		t.Fatalf("CreateReviewerToken() error = %v", err)
 	}
-	if _, err := s.CreateReviewerToken(ctx, "device-b", "plaintext-b"); err != nil {
+	if _, err := s.CreateReviewerToken(ctx, "device-b", "plaintext-b", ""); err != nil {
 		t.Fatalf("CreateReviewerToken() error = %v", err)
 	}
 	if err := s.RevokeReviewerToken(ctx, a.ID); err != nil {
@@ -96,7 +99,7 @@ func TestReviewerTokens_CountActive(t *testing.T) {
 		t.Fatalf("CountActiveReviewerTokens() on empty table = %d, want 0", n)
 	}
 
-	tok, err := s.CreateReviewerToken(ctx, "device-a", "plaintext-a")
+	tok, err := s.CreateReviewerToken(ctx, "device-a", "plaintext-a", "")
 	if err != nil {
 		t.Fatalf("CreateReviewerToken() error = %v", err)
 	}
@@ -124,7 +127,7 @@ func TestCreateReviewerToken_EmptyLabelRejected(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	if _, err := s.CreateReviewerToken(ctx, "", "plaintext"); err == nil {
+	if _, err := s.CreateReviewerToken(ctx, "", "plaintext", ""); err == nil {
 		t.Fatal("CreateReviewerToken() with an empty label succeeded, want an error")
 	}
 }
@@ -149,5 +152,51 @@ func TestAuthenticateReviewerToken_RealDBErrorIsReturnedNotMaskedAs401(t *testin
 	}
 	if ok {
 		t.Error("AuthenticateReviewerToken() reported ok=true despite a query error")
+	}
+}
+
+func TestVerifyReviewerTOTP_CorrectCodeAcceptedWrongAndUnenrolledRejected(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	const secret = "JBSWY3DPEHPK3PXP" // fixed base32 test secret, not a real credential
+	enrolled, err := s.CreateReviewerToken(ctx, "enrolled-device", "plaintext-enrolled", secret)
+	if err != nil {
+		t.Fatalf("CreateReviewerToken() error = %v", err)
+	}
+	unenrolled, err := s.CreateReviewerToken(ctx, "unenrolled-device", "plaintext-unenrolled", "")
+	if err != nil {
+		t.Fatalf("CreateReviewerToken() error = %v", err)
+	}
+
+	code, err := totp.GenerateCode(secret, time.Now())
+	if err != nil {
+		t.Fatalf("totp.GenerateCode() error = %v", err)
+	}
+
+	ok, err := s.VerifyReviewerTOTP(ctx, enrolled.ID, code)
+	if err != nil {
+		t.Fatalf("VerifyReviewerTOTP() error = %v", err)
+	}
+	if !ok {
+		t.Error("VerifyReviewerTOTP() with the correct current code = false, want true")
+	}
+
+	ok, err = s.VerifyReviewerTOTP(ctx, enrolled.ID, "000000")
+	if err != nil {
+		t.Fatalf("VerifyReviewerTOTP() error = %v", err)
+	}
+	if ok {
+		t.Error("VerifyReviewerTOTP() with a wrong code = true, want false")
+	}
+
+	// A token with no enrolled secret must fail closed, not error — a device
+	// that never enrolled simply cannot pass the gate, matching a wrong code.
+	ok, err = s.VerifyReviewerTOTP(ctx, unenrolled.ID, code)
+	if err != nil {
+		t.Fatalf("VerifyReviewerTOTP() error = %v", err)
+	}
+	if ok {
+		t.Error("VerifyReviewerTOTP() for a token with no enrolled secret = true, want false")
 	}
 }

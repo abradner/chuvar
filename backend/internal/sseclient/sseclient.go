@@ -163,13 +163,20 @@ func parseEvent(eventName, data string) Event {
 // updated for that action. Found in review.
 const actionTimeout = 10 * time.Second
 
-func (c *Client) postAction(ctx context.Context, path string) error {
+// postAction issues the POST and, when totpCode is non-empty, attaches it as
+// the device-local second factor requireTOTP checks on mutations that grant or
+// extend authority (see internal/api/api.go). Empty for actions that aren't
+// gated (reject/deny) — the header is simply omitted, not sent empty.
+func (c *Client) postAction(ctx context.Context, path, totpCode string) error {
 	ctx, cancel := context.WithTimeout(ctx, actionTimeout)
 	defer cancel()
 
 	req, err := c.newRequest(ctx, http.MethodPost, path)
 	if err != nil {
 		return err
+	}
+	if totpCode != "" {
+		req.Header.Set("X-Chuvar-TOTP-Code", totpCode)
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -182,18 +189,22 @@ func (c *Client) postAction(ctx context.Context, path string) error {
 	return nil
 }
 
-func (c *Client) ApproveStagedDiff(ctx context.Context, id string) error {
-	return c.postAction(ctx, "/api/staged-diffs/"+id+"/approve")
+// ApproveStagedDiff requires totpCode — see requireTOTP on
+// POST /api/staged-diffs/{id}/approve.
+func (c *Client) ApproveStagedDiff(ctx context.Context, id, totpCode string) error {
+	return c.postAction(ctx, "/api/staged-diffs/"+id+"/approve", totpCode)
 }
 
 func (c *Client) RejectStagedDiff(ctx context.Context, id string) error {
-	return c.postAction(ctx, "/api/staged-diffs/"+id+"/reject")
+	return c.postAction(ctx, "/api/staged-diffs/"+id+"/reject", "")
 }
 
-func (c *Client) ApproveGrantRequest(ctx context.Context, id string) error {
-	return c.postAction(ctx, "/api/grant-requests/"+id+"/approve")
+// ApproveGrantRequest requires totpCode — see requireTOTP on
+// POST /api/grant-requests/{id}/approve.
+func (c *Client) ApproveGrantRequest(ctx context.Context, id, totpCode string) error {
+	return c.postAction(ctx, "/api/grant-requests/"+id+"/approve", totpCode)
 }
 
 func (c *Client) DenyGrantRequest(ctx context.Context, id string) error {
-	return c.postAction(ctx, "/api/grant-requests/"+id+"/deny")
+	return c.postAction(ctx, "/api/grant-requests/"+id+"/deny", "")
 }

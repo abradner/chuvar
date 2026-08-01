@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pquerna/otp/totp"
+
 	"github.com/abradner/chuvar/backend/internal/db"
 	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/store"
@@ -21,6 +23,11 @@ import (
 // credential — analogous to the shared secret constant this replaced, but now
 // backed by a real reviewer_tokens row rather than a value the API trusts blindly.
 const testAuthToken = "test-token-do-not-use-in-prod"
+
+// testTOTPSecret is testAuthToken's enrolled TOTP secret — a fixed base32 value
+// (not a real credential), not generated per-test, so every test in this
+// package can compute a valid current code without coordinating on state.
+const testTOTPSecret = "JBSWY3DPEHPK3PXP"
 
 func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
@@ -43,7 +50,7 @@ func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 	}
 
 	st := store.New(pool)
-	if _, err := st.CreateReviewerToken(ctx, "test-reviewer", testAuthToken); err != nil {
+	if _, err := st.CreateReviewerToken(ctx, "test-reviewer", testAuthToken, testTOTPSecret); err != nil {
 		t.Fatalf("seeding reviewer token: %v", err)
 	}
 	a := New(st, embed.Stub{}, "http://localhost:5173", 10*time.Second)
@@ -79,6 +86,17 @@ func doJSONWithAuth(t *testing.T, method, url string, body any, token string) *h
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	// Attach a valid current TOTP code whenever the request is authenticating as
+	// the seeded testAuthToken — harmless for routes that don't check it
+	// (requireTOTP only gates approve/create-grant), and means individual tests
+	// don't each have to compute one just to reach a gated handler.
+	if token == testAuthToken {
+		code, err := totp.GenerateCode(testTOTPSecret, time.Now())
+		if err != nil {
+			t.Fatalf("totp.GenerateCode() error = %v", err)
+		}
+		req.Header.Set("X-Chuvar-TOTP-Code", code)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -128,7 +146,7 @@ func TestRequireAuth_RevokedTokenRejected(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	tok, err := st.CreateReviewerToken(ctx, "throwaway-device", "throwaway-plaintext")
+	tok, err := st.CreateReviewerToken(ctx, "throwaway-device", "throwaway-plaintext", "")
 	if err != nil {
 		t.Fatalf("CreateReviewerToken() error = %v", err)
 	}
@@ -146,6 +164,116 @@ func TestRequireAuth_RevokedTokenRejected(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("GET /api/grants with a revoked token: status = %d, want 401", resp.StatusCode)
 	}
+}
+
+func TestRequireTOTP_MissingHeaderRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Built manually, not via doJSON/doJSONWithAuth: both of those attach a valid
+	// TOTP code automatically for testAuthToken (see doJSONWithAuth), which would
+	// defeat the point of this test — a valid bearer token alone must not be
+	// enough for a mutation that grants authority.
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/grants", bytes.NewReader(mustJSON(t, createGrantRequest{
+		Subject: "agent-a",
+		Scopes:  []string{"identity.basic"},
+	})))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testAuthToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /api/grants with no TOTP header: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestRequireTOTP_WrongCodeRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/grants", bytes.NewReader(mustJSON(t, createGrantRequest{
+		Subject: "agent-a",
+		Scopes:  []string{"identity.basic"},
+	})))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testAuthToken)
+	req.Header.Set("X-Chuvar-TOTP-Code", "000000")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /api/grants with a wrong TOTP code: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestRequireTOTP_UnenrolledTokenRejected(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	// A token created with no TOTP secret (the pre-this-batch default, and the
+	// bootstrap token's own shape) authenticates fine but must never pass a
+	// requireTOTP-gated route — that's the whole point of failing closed.
+	if _, err := st.CreateReviewerToken(ctx, "no-totp-device", "no-totp-plaintext", ""); err != nil {
+		t.Fatalf("CreateReviewerToken() error = %v", err)
+	}
+
+	// A code header is present (any value — there's no enrolled secret to
+	// generate a real one against) to isolate "unenrolled" from the separate
+	// "missing header" case already covered above.
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/grants", bytes.NewReader(mustJSON(t, createGrantRequest{
+		Subject: "agent-a",
+		Scopes:  []string{"identity.basic"},
+	})))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer no-totp-plaintext")
+	req.Header.Set("X-Chuvar-TOTP-Code", "000000")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /api/grants with an unenrolled token: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestRequireTOTP_DenyRevokeNotGated(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	req, err := st.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "facts", nil, "")
+	if err != nil {
+		t.Fatalf("RequestGrant() error = %v", err)
+	}
+
+	// deny is deliberately not gated by requireTOTP (see api.go's Routes doc
+	// comment): it only reduces authority, not the self-escalation vector the
+	// gate exists for. doJSONWithAuth with no TOTP header must still succeed.
+	resp := doJSONWithAuth(t, http.MethodPost, srv.URL+"/api/grant-requests/"+req.ID+"/deny", nil, testAuthToken)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST deny with no TOTP header: status = %d, want 204", resp.StatusCode)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshaling: %v", err)
+	}
+	return b
 }
 
 func TestCreateAndListGrants(t *testing.T) {
@@ -495,7 +623,7 @@ func TestWithRequestTimeout_CancelsSlowHandlerContext(t *testing.T) {
 	}
 
 	st := store.New(pool)
-	if _, err := st.CreateReviewerToken(ctx, "test-reviewer", testAuthToken); err != nil {
+	if _, err := st.CreateReviewerToken(ctx, "test-reviewer", testAuthToken, testTOTPSecret); err != nil {
 		t.Fatalf("seeding reviewer token: %v", err)
 	}
 	canceled := make(chan bool, 1)
@@ -517,6 +645,11 @@ func TestWithRequestTimeout_CancelsSlowHandlerContext(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+testAuthToken)
+	code, err := totp.GenerateCode(testTOTPSecret, time.Now())
+	if err != nil {
+		t.Fatalf("totp.GenerateCode() error = %v", err)
+	}
+	req.Header.Set("X-Chuvar-TOTP-Code", code)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request error: %v", err)

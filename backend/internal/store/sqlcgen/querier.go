@@ -20,6 +20,7 @@ type Querier interface {
 	FindDedupeCandidate(ctx context.Context, arg FindDedupeCandidateParams) (FindDedupeCandidateRow, error)
 	GetFact(ctx context.Context, id string) (GetFactRow, error)
 	GetGrantRequest(ctx context.Context, id string) (GrantRequest, error)
+	GetReviewerTOTPSecret(ctx context.Context, id string) (*string, error)
 	GetStagedDiff(ctx context.Context, id string) (StagedDiff, error)
 	GrantedScopes(ctx context.Context, subject string) ([]string, error)
 	// Two distinct named params bound to the identical exclude-fact-ID value at the

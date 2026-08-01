@@ -72,11 +72,21 @@ export function GrantsPage() {
   }, [refreshKey]);
 
   const decideRequest = async (id: string, action: "approve" | "deny") => {
+    // Approving requires the device-local TOTP second factor (requireTOTP,
+    // backend/internal/api/api.go) — deny doesn't, since it only reduces
+    // authority, not the self-escalation vector the gate exists for. A plain
+    // prompt() is a deliberately minimal stopgap UI, not the eventual WebAuthn
+    // surface.
+    let totpCode = "";
+    if (action === "approve") {
+      totpCode = window.prompt("Enter TOTP code to approve") ?? "";
+      if (!totpCode) return;
+    }
     setBusyId(id);
     setError(null);
     try {
       if (action === "approve") {
-        await api.approveGrantRequest(id);
+        await api.approveGrantRequest(id, totpCode);
       } else {
         await api.denyGrantRequest(id);
       }
@@ -136,9 +146,15 @@ export function GrantsPage() {
       ttlSeconds = minutes * 60;
     }
 
+    // createGrant is a direct capability grant — the same requireTOTP gate as
+    // approving a grant request (it's the other REST path that ever creates a
+    // real grant; see the backend's Routes doc comment).
+    const totpCode = window.prompt("Enter TOTP code to create this grant") ?? "";
+    if (!totpCode) return;
+
     setCreating(true);
     try {
-      await api.createGrant(subject.trim(), scopes, newDepth, ttlSeconds);
+      await api.createGrant(subject.trim(), scopes, newDepth, totpCode, ttlSeconds);
       setNewScopes("");
       setRefreshKey((k) => k + 1);
     } catch (e) {

@@ -39,12 +39,12 @@ func TestBootstrapReviewerToken_CreatesFirstTokenWhenNoneExist(t *testing.T) {
 		t.Fatalf("bootstrapReviewerToken() error = %v", err)
 	}
 
-	label, ok, err := st.AuthenticateReviewerToken(ctx, "test-bootstrap-value")
+	reviewer, ok, err := st.AuthenticateReviewerToken(ctx, "test-bootstrap-value")
 	if err != nil {
 		t.Fatalf("AuthenticateReviewerToken() error = %v", err)
 	}
-	if !ok || label != "bootstrap" {
-		t.Fatalf("AuthenticateReviewerToken() = (%q, %v), want (bootstrap, true)", label, ok)
+	if !ok || reviewer.Label != "bootstrap" {
+		t.Fatalf("AuthenticateReviewerToken() = (%q, %v), want (bootstrap, true)", reviewer.Label, ok)
 	}
 }
 
@@ -62,7 +62,7 @@ func TestBootstrapReviewerToken_SkipsWhenActiveTokenExists(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
 
-	if _, err := st.CreateReviewerToken(ctx, "already-here", "some-other-value"); err != nil {
+	if _, err := st.CreateReviewerToken(ctx, "already-here", "some-other-value", ""); err != nil {
 		t.Fatalf("CreateReviewerToken() error = %v", err)
 	}
 
@@ -103,11 +103,11 @@ func TestBootstrapReviewerToken_ReusableAfterFullRevocation(t *testing.T) {
 		t.Fatalf("bootstrapReviewerToken() after full revocation, same token value: error = %v, want nil (break-glass recovery must work)", err)
 	}
 
-	label, ok, err := st.AuthenticateReviewerToken(ctx, "break-glass-value")
+	reviewer, ok, err := st.AuthenticateReviewerToken(ctx, "break-glass-value")
 	if err != nil {
 		t.Fatalf("AuthenticateReviewerToken() error = %v", err)
 	}
-	if !ok || label != "bootstrap" {
-		t.Fatalf("AuthenticateReviewerToken() after re-bootstrap = (%q, %v), want (bootstrap, true)", label, ok)
+	if !ok || reviewer.Label != "bootstrap" {
+		t.Fatalf("AuthenticateReviewerToken() after re-bootstrap = (%q, %v), want (bootstrap, true)", reviewer.Label, ok)
 	}
 }

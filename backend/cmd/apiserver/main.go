@@ -104,7 +104,12 @@ func bootstrapReviewerToken(ctx context.Context, st *store.Store) error {
 	if !ok || bootstrap == "" {
 		return fmt.Errorf("apiserver: no reviewer tokens exist and required environment variable REVIEWER_BOOTSTRAP_TOKEN is not set")
 	}
-	if _, err := st.CreateReviewerToken(ctx, "bootstrap", bootstrap); err != nil {
+	// No TOTP secret for the bootstrap token itself (empty string — see
+	// CreateReviewerToken): it's a break-glass way in, not a device meant for
+	// ongoing use. Its first job is authenticating a POST /api/tokens call to
+	// mint a real, TOTP-enrolled device token; requireTOTP-gated mutations stay
+	// unreachable on the bootstrap token alone.
+	if _, err := st.CreateReviewerToken(ctx, "bootstrap", bootstrap, ""); err != nil {
 		return fmt.Errorf("apiserver: creating bootstrap reviewer token: %w", err)
 	}
 	slog.Info("apiserver: no reviewer tokens existed; created one from REVIEWER_BOOTSTRAP_TOKEN", "label", "bootstrap")
