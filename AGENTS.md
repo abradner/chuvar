@@ -63,10 +63,10 @@ Two rules fall out of it, operationally:
   may be reachable from agent context through a legitimate, discoverable interface — an env var,
   a checked-in secret, an open port. The distinction that matters is *ambient reach* (must be
   zero) vs *attack-shaped actions* (`docker exec` into the DB container, reading `pgdata` bytes —
-  detected and tripwired, not prevented, on a single-user box). Known debt, being paid: today
-  `mcpserver` requires `DATABASE_URL` and runs migrations on boot inside the agent's own process
-  tree (tickets E2/E3). That is debt, **not precedent** — never add a new root of trust to an
-  agent-reachable environment.
+  detected and tripwired, not prevented, on a single-user box). Known debt, being paid:
+  `mcpserver` still requires `DATABASE_URL` inside the agent's own process tree, so anything
+  holding it can reach the database directly (ticket E3; it no longer migrates — §3.6). That is
+  debt, **not precedent** — never add a new root of trust to an agent-reachable environment.
 - **Tripwires are fail-closed.** When attack-shaped access is detected, the response is an
   outage — zeroize data-keys, seal, halt, require human re-unlock — never just a log line.
 
@@ -119,12 +119,36 @@ Operationally, starting now:
   processes), but chuvar is **not a hardened store** and doesn't claim to be — FIPS-style
   certification is an explicit non-goal. Don't write claims the mechanism doesn't back.
 
+### 3.6 Launch Topology — Who Runs What, With Which Authority
+Not every binary is equally trusted, and the differences are deliberate. Before
+adding a binary or moving work between them, place it on this table:
+
+| Binary | Launched by | Holds | Migrates? | Master key? |
+|---|---|---|---|---|
+| `cmd/apiserver` | operator | `DATABASE_URL`, custody master key | yes | **yes** — only process that verifies TOTP |
+| `cmd/migrate` | operator | `DATABASE_URL` | yes (that's its whole job) | no |
+| `cmd/mcpserver` | **an agent host** | `DATABASE_URL` (see below) | **no** — `db.CheckSchema` only | **no** |
+| `cmd/approver`, `cmd/pushbridge` | operator | `CHUVAR_API_TOKEN` only | no | no |
+
+`cmd/mcpserver` is the one that runs inside an agent's process tree, so it is
+the one that must hold least. It verifies the schema and refuses to start if it
+is stale, rather than migrating — an agent-side process silently applying DDL is
+how a migration ends up run by whoever happened to launch a tool first.
+
+**It still holds `DATABASE_URL`, and that is still the open gap** — anything with
+those credentials can run DDL through SQL regardless of what the Go code does.
+Removing it is ticket E3 (mcpserver becomes an API client with an agent-class
+token). Until then: never widen what mcpserver holds, and never add a new
+root-of-trust to any binary an agent launches.
+
 ## 4. Development Essentials
 
 - Toolchain via `mise install` (reads `mise.toml`: Go 1.26, Bun 1.3).
 - Local Postgres+pgvector: `docker compose up -d`.
 - Backend: `cd backend && go run ./cmd/mcpserver` (MCP over stdio) or `go run
-  ./cmd/apiserver` (REST API for the approval UI, separate process). `apiserver`
+  ./cmd/apiserver` (REST API for the approval UI, separate process). `mcpserver`
+  verifies the schema but never migrates (§3.6) — on a fresh database run `go run
+  ./cmd/migrate` first, or start `apiserver`, either of which applies it. `apiserver`
   needs a custody master key to seal reviewer TOTP secrets — on a first run pass
   `CHUVAR_CUSTODY_CREATE=1` to mint one (see `docs/operations.md`, "The master
   key"). It is opt-in so a later start with a missing key fails loudly instead of

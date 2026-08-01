@@ -42,7 +42,17 @@ func run() error {
 		return fmt.Errorf("mcpserver: required environment variable MCP_SUBJECT is not set")
 	}
 
-	if err := db.Migrate(cfg.DatabaseURL); err != nil {
+	// Checks the schema; does not change it. This process is spawned by an agent
+	// host and runs inside the agent's own process tree, so it must not assert
+	// DDL authority on boot — see db.CheckSchema and AGENTS.md §3.0. Migrating
+	// is cmd/migrate's job, or cmd/apiserver's.
+	//
+	// This narrows what mcpserver does with the credentials it holds; it does
+	// not remove them. mcpserver still receives DATABASE_URL, and anything
+	// holding that can run DDL through SQL regardless. Closing that is ticket
+	// E3 (mcpserver becomes an API client with an agent-class token), and this
+	// is a step toward it, not a substitute for it.
+	if err := db.CheckSchema(cfg.DatabaseURL); err != nil {
 		return err
 	}
 
@@ -60,6 +70,6 @@ func run() error {
 	server := mcp.NewServer(&mcp.Implementation{Name: "chuvar", Version: "v0"}, nil)
 	mcptools.Register(server, subject, st, emb, b)
 
-	slog.Info("mcpserver: connected and migrated, serving on stdio", "subject", subject)
+	slog.Info("mcpserver: connected, schema verified, serving on stdio", "subject", subject)
 	return server.Run(ctx, &mcp.StdioTransport{})
 }
