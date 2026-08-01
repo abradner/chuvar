@@ -28,9 +28,10 @@ type Querier interface {
 	// elsewhere in this migration (see facts.sql's SearchFacts) — bound to the
 	// identical value at the call site.
 	FindDedupeCandidate(ctx context.Context, arg FindDedupeCandidateParams) (FindDedupeCandidateRow, error)
+	GetDataKey(ctx context.Context, purpose string) (DataKey, error)
 	GetFact(ctx context.Context, id string) (GetFactRow, error)
 	GetGrantRequest(ctx context.Context, id string) (GrantRequest, error)
-	GetReviewerTOTPSecret(ctx context.Context, id string) (*string, error)
+	GetReviewerTOTPSecret(ctx context.Context, id string) ([]byte, error)
 	GetStagedDiff(ctx context.Context, id string) (StagedDiff, error)
 	// depth IS NOT NULL is implied by kind = 'memory' (the grants_kind_depth_pairing
 	// CHECK constraint), restated here rather than relied on so this query's own
@@ -47,6 +48,12 @@ type Querier interface {
 	// facts.sql's SearchFacts).
 	HasActiveDuplicateContent(ctx context.Context, arg HasActiveDuplicateContentParams) (bool, error)
 	InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) error
+	// ON CONFLICT DO NOTHING rather than an upsert: two processes booting at once
+	// must not each mint a DEK and have the second overwrite the first, because
+	// anything the loser sealed in between would become unopenable. The conflicting
+	// caller gets no row back and re-reads the winner's key instead — see
+	// LoadOrCreateDataKey.
+	InsertDataKey(ctx context.Context, arg InsertDataKeyParams) (DataKey, error)
 	InsertFact(ctx context.Context, arg InsertFactParams) (InsertFactRow, error)
 	InsertFactScope(ctx context.Context, arg InsertFactScopeParams) error
 	InsertGrant(ctx context.Context, arg InsertGrantParams) (Grant, error)
@@ -84,6 +91,10 @@ type Querier interface {
 	RenewGrant(ctx context.Context, arg RenewGrantParams) (Grant, error)
 	RevokeGrant(ctx context.Context, id string) (int64, error)
 	RevokeReviewerToken(ctx context.Context, id string) (int64, error)
+	// Master-key rotation: replaces the wrapping without touching anything sealed
+	// under the DEK itself. The DEK's plaintext bytes are unchanged by definition,
+	// so no data is re-encrypted.
+	RewrapDataKey(ctx context.Context, arg RewrapDataKeyParams) (int64, error)
 	SearchFacts(ctx context.Context, arg SearchFactsParams) ([]SearchFactsRow, error)
 	SupersedeFact(ctx context.Context, arg SupersedeFactParams) error
 	TouchReviewerToken(ctx context.Context, id string) error

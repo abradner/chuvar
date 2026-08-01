@@ -8,16 +8,35 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 
+	"github.com/abradner/chuvar/backend/internal/custody"
 	"github.com/abradner/chuvar/backend/internal/store/sqlcgen"
 )
 
 type Store struct {
 	pool *pgxpool.Pool
 	q    *sqlcgen.Queries
+
+	// secrets seals and opens the sealed columns (reviewer TOTP secrets today).
+	// Nil is a legitimate state — most of this package never touches a sealed
+	// value, and every caller that doesn't need one shouldn't have to hold key
+	// material to get a Store. The methods that do need it fail closed rather
+	// than falling back to plaintext; see VerifyReviewerTOTP.
+	secrets *custody.Key
 }
 
+// New returns a Store with no sealing key. Methods that read or write sealed
+// columns will refuse to run — deliberately, since the alternative to sealing
+// is storing the secret in the clear.
 func New(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool, q: sqlcgen.New(pool)}
+}
+
+// NewSealed returns a Store that can seal and open secret columns under the
+// given data-encryption key, which callers obtain from LoadOrCreateDataKey.
+func NewSealed(pool *pgxpool.Pool, secrets *custody.Key) *Store {
+	s := New(pool)
+	s.secrets = secrets
+	return s
 }
 
 // embeddingDim must match the `vector(384)` column in the facts table

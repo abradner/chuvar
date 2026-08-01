@@ -16,6 +16,73 @@ just goes stale:
 
 ---
 
+## The master key
+
+Reviewer TOTP secrets are encrypted at rest. `apiserver` seals them under a
+data-encryption key which is itself wrapped by a **master key** held outside the
+database — so a caller who reaches Postgres but not the key file reads
+ciphertext. That is the specific attacker this closes: one holding
+`DATABASE_URL` who could otherwise read a secret, mint a valid code, and approve
+its own grant request.
+
+Only `apiserver` needs the master key. `mcpserver` — the process an agent host
+spawns — never receives it, which is the point.
+
+| | |
+|---|---|
+| Default location | `$XDG_STATE_HOME/chuvar/master.key`, else `~/.local/state/chuvar/master.key` |
+| Override | `CHUVAR_CUSTODY_KEY_FILE` |
+| Mint on first run | `CHUVAR_CUSTODY_CREATE=1` |
+| Permissions | must be `0600`; `apiserver` refuses to start otherwise |
+
+### First start
+
+```sh
+CHUVAR_CUSTODY_CREATE=1 go run ./cmd/apiserver
+```
+
+Then **back the file up somewhere outside this machine**, before enrolling
+anything. Creation is opt-in precisely so that a later start with a missing key
+fails loudly instead of quietly minting a replacement that opens nothing.
+
+### ⚠️ Not sealed at rest yet
+
+The key file is currently **plaintext**, and `apiserver` logs a
+`DOOR WEDGED OPEN` warning on every start saying so. Anything that can read the
+filesystem as the service user can read the key, so this protects against a
+stolen backup, a `pgdata` scrape, or a DB-credentialled process — **not** against
+a filesystem reader. Suitable for development and low-value PoC secrets only.
+Encrypting the key file under a passphrase is ticket E7; when that lands the
+warning goes away and this section changes.
+
+### If the master key is lost
+
+Sealed secrets are unrecoverable — that is what sealing means. Nothing in the
+database can open them, and no procedure here can either. Recovery is the
+break-glass path below: clear every secret and re-enrol. Bearer tokens are
+unaffected (they are hashed, not sealed), so API access survives; only the
+second factor is lost.
+
+### Migrating to sealed TOTP secrets
+
+The `seal_totp_secret` migration **refuses to run** while any plaintext
+`totp_secret` is present, and reports how many. That refusal is deliberate:
+dropping populated secrets would reset the ever-enrolled count to zero and
+reopen the token-enrollment gate (see "Why there is no API path for this"
+below), silently, during what looks like a routine upgrade.
+
+To proceed, re-enrolment must be a decision rather than a side effect:
+
+1. Confirm you can re-enrol every device you care about — you will be scanning
+   fresh QR codes for all of them.
+2. Run the break-glass procedure below to clear the secrets deliberately, in a
+   transaction you inspect before committing.
+3. Re-run the migration. With no plaintext secrets left, the guard passes.
+4. **Enrol a device immediately** — between steps 2 and 4 the deployment is in
+   the ungated state, and any bearer token can mint and self-enrol.
+
+---
+
 ## Reviewer devices and the TOTP second factor
 
 Mutations that **grant or extend authority** — approving a grant request,
@@ -29,7 +96,7 @@ is the part a compromised agent session cannot produce.
 Do this **immediately after first start**, and **immediately after upgrading a
 deployment that predates the `reviewer_totp` migration**.
 
-That migration adds `totp_secret` as a nullable column with no backfill, so an
+That migration adds the secret column as nullable with no backfill, so an
 upgraded deployment starts with *zero* enrolled devices. While zero devices are
 enrolled, `POST /api/tokens` accepts a bearer token alone — so anything holding
 that token can mint a new one and enrol it, defeating every gate above. The API
@@ -127,16 +194,16 @@ BEGIN;
 
 -- 1. See what you are about to affect. Expect one row per device that has ever
 --    enrolled, revoked ones included.
-SELECT id, label, revoked_at, (totp_secret IS NOT NULL) AS enrolled
+SELECT id, label, revoked_at, (totp_secret_enc IS NOT NULL) AS enrolled
 FROM reviewer_tokens ORDER BY created_at;
 
 -- 2. Clear every secret. The absence of a WHERE clause is deliberate — see below.
-UPDATE reviewer_tokens SET totp_secret = NULL;
+UPDATE reviewer_tokens SET totp_secret_enc = NULL;
 
 -- 3. Confirm the gate is actually reopened. This MUST return 0, or the reset
 --    has not worked and committing achieves nothing.
 SELECT count(*) AS ever_enrolled
-FROM reviewer_tokens WHERE totp_secret IS NOT NULL;
+FROM reviewer_tokens WHERE totp_secret_enc IS NOT NULL;
 
 COMMIT;  -- or ROLLBACK; if step 3 did not return 0
 ```

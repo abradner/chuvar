@@ -5,6 +5,9 @@ import (
 	"os"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/abradner/chuvar/backend/internal/custody"
 	"github.com/abradner/chuvar/backend/internal/db"
 	"github.com/abradner/chuvar/backend/internal/store"
 )
@@ -24,10 +27,10 @@ func testStore(t *testing.T) *store.Store {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE reviewer_tokens`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE reviewer_tokens, data_keys`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
-	return store.New(pool)
+	return testSealedStore(t, pool)
 }
 
 func TestWarnIfNoEnrolledDevice_SucceedsInBothStates(t *testing.T) {
@@ -129,4 +132,20 @@ func TestBootstrapReviewerToken_ReusableAfterFullRevocation(t *testing.T) {
 	if !ok || reviewer.Label != "bootstrap" {
 		t.Fatalf("AuthenticateReviewerToken() after re-bootstrap = (%q, %v), want (bootstrap, true)", reviewer.Label, ok)
 	}
+}
+
+// testSealedStore returns a Store whose sealing key lives only for this test.
+// Enrolling a TOTP secret requires one — CreateReviewerToken refuses to write a
+// secret in the clear — so tests that seed an enrolled reviewer go through here.
+func testSealedStore(t *testing.T, pool *pgxpool.Pool) *store.Store {
+	t.Helper()
+	raw, err := (&custody.Ephemeral{}).Unseal(context.Background())
+	if err != nil {
+		t.Fatalf("custody.Ephemeral.Unseal() error = %v", err)
+	}
+	key, err := custody.NewKey(raw)
+	if err != nil {
+		t.Fatalf("custody.NewKey() error = %v", err)
+	}
+	return store.NewSealed(pool, key)
 }

@@ -22,7 +22,7 @@ func (q *Queries) CountActiveReviewerTokens(ctx context.Context) (int64, error) 
 }
 
 const countEverEnrolledReviewerTokens = `-- name: CountEverEnrolledReviewerTokens :one
-SELECT count(*) FROM reviewer_tokens WHERE totp_secret IS NOT NULL
+SELECT count(*) FROM reviewer_tokens WHERE totp_secret_enc IS NOT NULL
 `
 
 // Deliberately NOT filtered on revoked_at: this counts whether a TOTP device
@@ -40,26 +40,26 @@ func (q *Queries) CountEverEnrolledReviewerTokens(ctx context.Context) (int64, e
 }
 
 const getReviewerTOTPSecret = `-- name: GetReviewerTOTPSecret :one
-SELECT totp_secret FROM reviewer_tokens WHERE id = $1
+SELECT totp_secret_enc FROM reviewer_tokens WHERE id = $1
 `
 
-func (q *Queries) GetReviewerTOTPSecret(ctx context.Context, id string) (*string, error) {
+func (q *Queries) GetReviewerTOTPSecret(ctx context.Context, id string) ([]byte, error) {
 	row := q.db.QueryRow(ctx, getReviewerTOTPSecret, id)
-	var totp_secret *string
-	err := row.Scan(&totp_secret)
-	return totp_secret, err
+	var totp_secret_enc []byte
+	err := row.Scan(&totp_secret_enc)
+	return totp_secret_enc, err
 }
 
 const insertReviewerToken = `-- name: InsertReviewerToken :one
-INSERT INTO reviewer_tokens (label, token_hash, totp_secret)
+INSERT INTO reviewer_tokens (label, token_hash, totp_secret_enc)
 VALUES ($1, $2, $3)
 RETURNING id, label, created_at
 `
 
 type InsertReviewerTokenParams struct {
-	Label      string
-	TokenHash  []byte
-	TotpSecret *string
+	Label         string
+	TokenHash     []byte
+	TotpSecretEnc []byte
 }
 
 type InsertReviewerTokenRow struct {
@@ -69,7 +69,7 @@ type InsertReviewerTokenRow struct {
 }
 
 func (q *Queries) InsertReviewerToken(ctx context.Context, arg InsertReviewerTokenParams) (InsertReviewerTokenRow, error) {
-	row := q.db.QueryRow(ctx, insertReviewerToken, arg.Label, arg.TokenHash, arg.TotpSecret)
+	row := q.db.QueryRow(ctx, insertReviewerToken, arg.Label, arg.TokenHash, arg.TotpSecretEnc)
 	var i InsertReviewerTokenRow
 	err := row.Scan(&i.ID, &i.Label, &i.CreatedAt)
 	return i, err

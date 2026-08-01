@@ -10,8 +10,11 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/abradner/chuvar/backend/internal/api"
 	"github.com/abradner/chuvar/backend/internal/config"
+	"github.com/abradner/chuvar/backend/internal/custody"
 	"github.com/abradner/chuvar/backend/internal/db"
 	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/store"
@@ -42,7 +45,10 @@ func run() error {
 	}
 	defer pool.Close()
 
-	st := store.New(pool)
+	st, err := openSealedStore(ctx, pool)
+	if err != nil {
+		return err
+	}
 	if err := bootstrapReviewerToken(ctx, st); err != nil {
 		return err
 	}
@@ -77,6 +83,45 @@ func run() error {
 
 	slog.Info("apiserver: listening", "addr", cfg.HTTPAddr, "allowedOrigin", allowedOrigin)
 	return server.ListenAndServe()
+}
+
+// openSealedStore unseals the master key, resolves the secrets DEK, and returns
+// a Store that can read and write sealed columns.
+//
+// Note which binary this lives in. apiserver is the only process that verifies
+// TOTP codes, so it is the only one that needs the master key — cmd/mcpserver,
+// the process an agent host spawns, never receives it. That asymmetry is the
+// point of sealing the column: a process holding DATABASE_URL and nothing else
+// reads ciphertext (2026-08-01 trust-boundary decision, Notion).
+//
+// CHUVAR_CUSTODY_KEY_FILE overrides the key's location; CHUVAR_CUSTODY_CREATE=1
+// permits minting one when none exists. Creation is opt-in because a fresh key
+// silently replaces the old one and orphans every secret sealed under it —
+// an operator restoring a backup should hit an error, not a working server with
+// unopenable enrollments.
+func openSealedStore(ctx context.Context, pool *pgxpool.Pool) (*store.Store, error) {
+	backend := &custody.FileBackend{
+		Path:        os.Getenv("CHUVAR_CUSTODY_KEY_FILE"),
+		AllowCreate: os.Getenv("CHUVAR_CUSTODY_CREATE") == "1",
+	}
+
+	raw, err := backend.Unseal(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("apiserver: unsealing the master key: %w "+
+			"(set CHUVAR_CUSTODY_CREATE=1 on a first run to mint one)", err)
+	}
+	master, err := custody.NewKey(raw)
+	if err != nil {
+		return nil, fmt.Errorf("apiserver: master key: %w", err)
+	}
+
+	dek, err := store.New(pool).LoadOrCreateDataKey(ctx, master, store.DataKeyPurposeSecrets)
+	if err != nil {
+		return nil, fmt.Errorf("apiserver: %w", err)
+	}
+
+	slog.Info("apiserver: secrets sealed at rest", "custody_backend", backend.Name(), "sealed_at_rest", backend.Sealed())
+	return store.NewSealed(pool, dek), nil
 }
 
 // bootstrapReviewerToken ensures there is always at least one way in. Reviewer

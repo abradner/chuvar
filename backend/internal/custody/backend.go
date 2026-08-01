@@ -105,8 +105,11 @@ func (b *FileBackend) Unseal(ctx context.Context) ([]byte, error) {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if !b.AllowCreate {
-			return nil, fmt.Errorf("custody: no key file at %s (set AllowCreate to mint one, "+
-				"but note a new key cannot open anything sealed under the old one)", path)
+			// Deliberately does not suggest minting one: a replacement key opens
+			// nothing sealed under the original, so "just create it" is the wrong
+			// instinct when the real cause is a key that went missing. Callers
+			// that know minting is safe (a first run) say so in their own message.
+			return nil, fmt.Errorf("custody: no key file at %s", path)
 		}
 		return b.create(path)
 	case err != nil:
