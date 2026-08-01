@@ -71,6 +71,20 @@ func (s *Store) GetFact(ctx context.Context, id string) (Fact, error) {
 // filter-after-ranking anti-pattern §3.2 warns against: every fact in candidate_facts
 // is still returned, just with Content redacted to Summary at "summary" depth.
 //
+// Only the summary/{facts,full} split is projected here. "full" is meant to add
+// a fact's *provenance* to its content (the init migration's "progressive
+// disclosure per Notion §3": summary → facts → full provenance), which this
+// query does not yet select — see mcptools.factView's doc comment for the
+// columns involved and why that level is worth keeping distinct.
+//
+// Depth is enforced on THIS read path only. It is not a system-wide chokepoint,
+// and describing it as one would be wrong: findDedupeCandidate (staged_diffs.go,
+// reached via propose_write) is a second content-disclosure surface that is
+// scope-filtered but not depth-filtered, so a summary-depth holder can still use
+// its "duplicate" verdict as a guess-and-confirm oracle over exact content this
+// function would have redacted. Verified, tracked separately — see that
+// function's doc comment.
+//
 // An empty granted returns no results — no grant means no access, not "search
 // everything and filter later."
 func (s *Store) SearchFacts(ctx context.Context, queryText string, queryEmbedding []float32, granted []GrantedScope, limit int) ([]Fact, error) {

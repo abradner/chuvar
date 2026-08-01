@@ -22,9 +22,19 @@ type readArgs struct {
 // "full" depth, Summary at "summary" depth — never both, and Depth reports which
 // one applies so a caller can tell "no summary" (empty Summary at summary depth,
 // e.g. a pre-migration fact with none generated yet) apart from "not summary
-// depth" (empty Summary because Content was returned instead). "facts" and "full"
-// are indistinguishable today — both return full content; there is currently no
-// projection between them, only between {summary} and {facts, full}.
+// depth" (empty Summary because Content was returned instead).
+//
+// "facts" and "full" are indistinguishable today — both return full content —
+// but that is an unimplemented level, not a vestigial one. The ladder was
+// designed as summary → facts → *full provenance* (the init migration's
+// "progressive disclosure per Notion §3"): "full" was meant to add a fact's
+// provenance on top of its content, not more content. The data for it already
+// exists and is simply not projected here — facts.source_staged_diff_id
+// (NOT NULL, and staged_diffs carries decided_by/decided_at, i.e. who approved
+// this fact), facts.superseded_by, and the bi-temporal valid_at/invalid_at/
+// expired_at set. Note that shipping it discloses a human's identity, which is
+// exactly why it deserves its own grant level. Tracked in Notion; do not
+// "simplify" the two levels together on the assumption they're duplicates.
 type factView struct {
 	ID      string   `json:"id"`
 	Content string   `json:"content,omitempty"`
