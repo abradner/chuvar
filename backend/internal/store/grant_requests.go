@@ -194,7 +194,7 @@ func (s *Store) ApproveGrantRequest(ctx context.Context, id, decidedBy string) (
 		return Grant{}, fmt.Errorf("store: grant request %s was not pending at approval time", id)
 	}
 
-	if err := logAudit(ctx, qtx, "grant_request_approved", decidedBy, nil, &grantRow.ID, nil, req.RequestedScopes); err != nil {
+	if err := logAudit(ctx, qtx, "grant_request_approved", decidedBy, nil, &grantRow.ID, nil, &id, req.RequestedScopes); err != nil {
 		return Grant{}, err
 	}
 
@@ -236,7 +236,7 @@ func (s *Store) DenyGrantRequest(ctx context.Context, id, decidedBy string) erro
 		return fmt.Errorf("store: grant request %s is not pending", id)
 	}
 
-	if err := logAudit(ctx, qtx, "grant_request_denied", decidedBy, nil, nil, nil, nil); err != nil {
+	if err := logAudit(ctx, qtx, "grant_request_denied", decidedBy, nil, nil, nil, &id, nil); err != nil {
 		return err
 	}
 

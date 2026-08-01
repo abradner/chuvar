@@ -613,7 +613,7 @@ func TestAuditLog_Insert(t *testing.T) {
 	s, pool := testStore(t)
 	ctx := context.Background()
 
-	if err := s.LogAudit(ctx, "read", "agent-a", nil, nil, nil, []string{"identity.basic"}); err != nil {
+	if err := s.LogAudit(ctx, "read", "agent-a", nil, nil, nil, nil, []string{"identity.basic"}); err != nil {
 		t.Fatalf("LogAudit() error = %v", err)
 	}
 

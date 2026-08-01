@@ -124,7 +124,7 @@ func (s *Store) CreateGrant(ctx context.Context, subject string, scopes []string
 		}
 	}
 
-	if err := logAudit(ctx, qtx, "grant_created", actor, nil, &row.ID, nil, scopes); err != nil {
+	if err := logAudit(ctx, qtx, "grant_created", actor, nil, &row.ID, nil, nil, scopes); err != nil {
 		return Grant{}, err
 	}
 
@@ -207,7 +207,7 @@ func (s *Store) RevokeGrant(ctx context.Context, grantID, actor string) error {
 		return fmt.Errorf("store: grant %s not found or already revoked", grantID)
 	}
 
-	if err := logAudit(ctx, qtx, "grant_revoked", actor, nil, &grantID, nil, nil); err != nil {
+	if err := logAudit(ctx, qtx, "grant_revoked", actor, nil, &grantID, nil, nil, nil); err != nil {
 		return err
 	}
 

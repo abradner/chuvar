@@ -121,6 +121,64 @@ func TestGrantRequests_Deny(t *testing.T) {
 	}
 }
 
+// TestDenyGrantRequest_AuditRowIsAttributable is the regression test for the
+// gap flagged by Codex during review of PR #21: before audit_log had a
+// grant_request_id column, a denial's audit row carried only event_type and
+// the actor — every target identifier was NULL, so multiple denials by the
+// same reviewer were indistinguishable without cross-referencing the mutable
+// grant_requests table by timestamp.
+func TestDenyGrantRequest_AuditRowIsAttributable(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+
+	req, err := s.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "")
+	if err != nil {
+		t.Fatalf("RequestGrant() error = %v", err)
+	}
+	if err := s.DenyGrantRequest(ctx, req.ID, "human-reviewer"); err != nil {
+		t.Fatalf("DenyGrantRequest() error = %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_log WHERE event_type = 'grant_request_denied' AND grant_request_id = $1 AND subject = 'human-reviewer'`,
+		req.ID,
+	).Scan(&count); err != nil {
+		t.Fatalf("querying audit_log: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("audit_log rows for this denial attributed via grant_request_id = %d, want 1", count)
+	}
+}
+
+// TestApproveGrantRequest_AuditRowLinksBackToTheRequest checks the same
+// backward link on the approval path — it already linked forward via
+// grant_id (the newly created grant); this confirms it now links backward to
+// the request that was approved too, for consistent traceability either way.
+func TestApproveGrantRequest_AuditRowLinksBackToTheRequest(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+
+	req, err := s.RequestGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "")
+	if err != nil {
+		t.Fatalf("RequestGrant() error = %v", err)
+	}
+	if _, err := s.ApproveGrantRequest(ctx, req.ID, "human-reviewer"); err != nil {
+		t.Fatalf("ApproveGrantRequest() error = %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_log WHERE event_type = 'grant_request_approved' AND grant_request_id = $1`,
+		req.ID,
+	).Scan(&count); err != nil {
+		t.Fatalf("querying audit_log: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("audit_log rows for this approval linked back via grant_request_id = %d, want 1", count)
+	}
+}
+
 func TestGrantRequests_ListByStatus(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
