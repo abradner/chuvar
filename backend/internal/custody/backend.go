@@ -180,6 +180,27 @@ func (b *FileBackend) create(path string) ([]byte, error) {
 	if err := f.Close(); err != nil {
 		return nil, fmt.Errorf("custody: close key file: %w", err)
 	}
+	// Sync the parent directory as well. f.Sync() makes the file's *contents*
+	// durable, but the directory entry that gives those bytes a name is a
+	// separate write — so without this the file can vanish entirely after a
+	// power loss, while the database already holds a DEK wrapped under it. That
+	// is the unrecoverable case, in the one window where it is silent.
+	//
+	// This covers the key file's own entry. If MkdirAll had to create the
+	// directory too, that entry lives in *its* parent and is not synced here —
+	// bounded honesty rather than a durability guarantee: the common case is a
+	// pre-existing state directory.
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return nil, fmt.Errorf("custody: opening key directory to sync: %w", err)
+	}
+	if err := dir.Sync(); err != nil {
+		dir.Close() //nolint:errcheck // the sync error is the one worth reporting
+		return nil, fmt.Errorf("custody: syncing key directory: %w", err)
+	}
+	if err := dir.Close(); err != nil {
+		return nil, fmt.Errorf("custody: closing key directory: %w", err)
+	}
 
 	slog.Warn("custody: minted a new master key — back this file up before sealing anything, "+
 		"losing it means losing every secret sealed under it", "path", path)
