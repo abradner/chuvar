@@ -16,6 +16,9 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5" // registers the "pgx5" driver scheme
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -54,31 +57,47 @@ var ErrSchemaNotCurrent = errors.New("db: schema is not current")
 // Failing to start is the point. A stale schema is an operator problem, and an
 // agent-side process silently repairing it is how a migration ends up applied
 // by whoever happened to launch a tool first.
-func CheckSchema(databaseURL string) error {
-	m, closeFn, err := migrator(databaseURL)
-	if err != nil {
-		return err
-	}
-	defer closeFn()
-
+//
+// It reads golang-migrate's bookkeeping table with a plain SELECT rather than
+// going through the migrate library. That is not incidental: constructing a
+// migrate instance calls the driver's ensureVersionTable, which issues
+// CREATE TABLE IF NOT EXISTS schema_migrations — so the library route performs
+// DDL just by looking, which is precisely what this function exists to avoid.
+// Verified against a virgin database: it created the table, then reported no
+// migrations applied.
+//
+// The cost is a coupling to golang-migrate's table shape (version bigint, dirty
+// boolean). That shape is stable and documented, and paying a small coupling to
+// avoid doing DDL from an agent-side process is the right trade.
+func CheckSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	latest, err := latestEmbeddedVersion()
 	if err != nil {
 		return err
 	}
 
-	current, dirty, err := m.Version()
-	if errors.Is(err, migrate.ErrNilVersion) {
+	var current int64
+	var dirty bool
+	err = pool.QueryRow(ctx, `SELECT version, dirty FROM schema_migrations LIMIT 1`).Scan(&current, &dirty)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Table exists but is empty: migrate created the bookkeeping row's home
+		// and nothing has been applied, or everything was rolled back.
 		return fmt.Errorf("%w: database has no migrations applied (latest is %d); "+
 			"run `go run ./cmd/migrate` or start cmd/apiserver", ErrSchemaNotCurrent, latest)
-	}
-	if err != nil {
+	case err != nil:
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UndefinedTable {
+			return fmt.Errorf("%w: database has never been migrated (latest is %d); "+
+				"run `go run ./cmd/migrate` or start cmd/apiserver", ErrSchemaNotCurrent, latest)
+		}
 		return fmt.Errorf("db: reading schema version: %w", err)
 	}
+
 	if dirty {
 		return fmt.Errorf("%w: schema is marked dirty at version %d — a previous migration "+
 			"failed part-way and needs manual resolution (see docs/operations.md)", ErrSchemaNotCurrent, current)
 	}
-	if current < latest {
+	if current < int64(latest) {
 		return fmt.Errorf("%w: database is at version %d, this binary expects %d; "+
 			"run `go run ./cmd/migrate`", ErrSchemaNotCurrent, current, latest)
 	}
@@ -134,6 +153,8 @@ func migrator(databaseURL string) (*migrate.Migrate, func(), error) {
 
 	m, err := migrate.NewWithSourceInstance("iofs", source, pgx5URL)
 	if err != nil {
+		// Close the source we opened; m.Close() would have owned it on success.
+		source.Close() //nolint:errcheck // nothing useful to do with this error
 		return nil, nil, fmt.Errorf("db: initializing migrator: %w", err)
 	}
 	return m, func() { m.Close() }, nil

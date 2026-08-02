@@ -9,8 +9,9 @@ those projects document their own tools better than we can, and a copy here
 just goes stale:
 
 - Applying/rolling back migrations — [golang-migrate](https://github.com/golang-migrate/migrate/blob/master/README.md)
-  (Chuvar applies migrations automatically at startup via `db.Migrate`; you
-  rarely need the CLI)
+  (`cmd/apiserver` applies migrations at startup, and `cmd/migrate` applies them
+  on demand, so you rarely need the CLI. `cmd/mcpserver` deliberately does not —
+  it verifies the schema and refuses to start if it is behind; see AGENTS.md §3.6)
 - Running `psql`, dumps, restores — [PostgreSQL client docs](https://www.postgresql.org/docs/current/app-psql.html)
 - Container lifecycle — [Docker Compose CLI](https://docs.docker.com/reference/cli/docker/compose/)
 
@@ -28,17 +29,17 @@ its own grant request.
 Only `apiserver` needs the master key. `mcpserver` — the process an agent host
 spawns — never receives it, which is the point.
 
-| | |
+| Setting | Value |
 |---|---|
 | Default location | `$XDG_STATE_HOME/chuvar/master.key`, else `~/.local/state/chuvar/master.key` |
 | Override | `CHUVAR_CUSTODY_KEY_FILE` |
 | Mint on first run | `CHUVAR_CUSTODY_CREATE=1` |
-| Permissions | must be `0600`; `apiserver` refuses to start otherwise |
+| Permissions | no group or other access (`0600` or `0400`); `apiserver` refuses to start otherwise |
 
 ### First start
 
 ```sh
-CHUVAR_CUSTODY_CREATE=1 go run ./cmd/apiserver
+cd backend && CHUVAR_CUSTODY_CREATE=1 go run ./cmd/apiserver
 ```
 
 Then **back the file up somewhere outside this machine**, before enrolling
@@ -54,6 +55,14 @@ stolen backup, a `pgdata` scrape, or a DB-credentialled process — **not** agai
 a filesystem reader. Suitable for development and low-value PoC secrets only.
 Encrypting the key file under a passphrase is ticket E7; when that lands the
 warning goes away and this section changes.
+
+### Rotating the master key
+
+**There is no operator command for this yet.** The envelope supports it — rotating
+rewraps the data key and re-encrypts nothing — and `store.RewrapDataKey`
+implements it, but no binary calls it. Rotation still needs to answer where the
+replacement key comes from and what happens if the process dies mid-rewrap.
+Until that exists, treat the master key as fixed for the life of the deployment.
 
 ### If the master key is lost
 

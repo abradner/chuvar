@@ -82,6 +82,12 @@ func (s *Store) LoadOrCreateDataKey(ctx context.Context, master *custody.Key, pu
 // RewrapDataKey re-wraps an existing DEK under a new master key. The DEK's own
 // bytes are unchanged, so nothing sealed under it needs re-encrypting — that
 // property is the reason the envelope exists.
+//
+// No binary calls this yet: rotating the master key is library-only until there
+// is a command for it, because rotation also needs to answer where the new key
+// comes from and what happens if the process dies mid-rewrap. Kept here, tested,
+// so the envelope's central claim is demonstrably true rather than asserted —
+// but docs/operations.md says plainly that there is no operator path yet.
 func (s *Store) RewrapDataKey(ctx context.Context, oldMaster, newMaster *custody.Key, purpose string) error {
 	if oldMaster == nil || newMaster == nil {
 		return errors.New("store: rewrap data key: both master keys are required")

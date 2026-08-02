@@ -42,26 +42,30 @@ func run() error {
 		return fmt.Errorf("mcpserver: required environment variable MCP_SUBJECT is not set")
 	}
 
-	// Checks the schema; does not change it. This process is spawned by an agent
-	// host and runs inside the agent's own process tree, so it must not assert
-	// DDL authority on boot — see db.CheckSchema and AGENTS.md §3.0. Migrating
-	// is cmd/migrate's job, or cmd/apiserver's.
-	//
-	// This narrows what mcpserver does with the credentials it holds; it does
-	// not remove them. mcpserver still receives DATABASE_URL, and anything
-	// holding that can run DDL through SQL regardless. Closing that is ticket
-	// E3 (mcpserver becomes an API client with an agent-class token), and this
-	// is a step toward it, not a substitute for it.
-	if err := db.CheckSchema(cfg.DatabaseURL); err != nil {
-		return err
-	}
-
 	ctx := context.Background()
 	pool, err := db.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
+
+	// Checks the schema; does not change it. This process is spawned by an agent
+	// host and runs inside the agent's own process tree, so it must not assert
+	// DDL authority on boot — see db.CheckSchema and AGENTS.md §3.0. Migrating
+	// is cmd/migrate's job, or cmd/apiserver's.
+	//
+	// Runs on the pool rather than opening its own handle, so the check issues
+	// exactly one SELECT and no DDL — going through golang-migrate would create
+	// the schema_migrations table just by looking.
+	//
+	// This narrows what mcpserver does with the credentials it holds; it does
+	// not remove them. mcpserver still receives DATABASE_URL, and anything
+	// holding that can run DDL through SQL regardless. Closing that is ticket
+	// E3 (mcpserver becomes an API client with an agent-class token), and this
+	// is a step toward it, not a substitute for it.
+	if err := db.CheckSchema(ctx, pool); err != nil {
+		return err
+	}
 
 	st := store.New(pool)
 	emb := embed.Stub{} // TODO: swap for a real Embedder once the Research track lands one
