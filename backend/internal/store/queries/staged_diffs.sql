@@ -28,9 +28,15 @@ ORDER BY f.embedding <=> @embedding_2::vector
 LIMIT 1;
 
 -- name: InsertStagedDiff :one
+-- Returns only the columns the database generates. Everything else in the row
+-- is the caller's own input, so echoing it back is redundant — and it is not
+-- free: RETURNING requires SELECT privilege on every column it reads, so a
+-- wide RETURNING forced a table-wide SELECT grant for cmd/mcpserver, letting an
+-- agent enumerate every other subject's proposed content. Narrow here, and the
+-- grant narrows with it (see the least_privilege_roles migration).
 INSERT INTO staged_diffs (subject, content, proposed_scopes, target_fact_id, dedupe_verdict, dedupe_candidate_fact_id)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, subject, content, proposed_scopes, target_fact_id, status, dedupe_verdict, dedupe_candidate_fact_id, created_at;
+RETURNING id, status, created_at;
 
 -- name: GetStagedDiff :one
 SELECT id, subject, content, proposed_scopes, target_fact_id, status,

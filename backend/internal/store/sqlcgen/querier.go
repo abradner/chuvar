@@ -57,9 +57,19 @@ type Querier interface {
 	InsertFact(ctx context.Context, arg InsertFactParams) (InsertFactRow, error)
 	InsertFactScope(ctx context.Context, arg InsertFactScopeParams) error
 	InsertGrant(ctx context.Context, arg InsertGrantParams) (Grant, error)
-	InsertGrantRequest(ctx context.Context, arg InsertGrantRequestParams) (GrantRequest, error)
+	// Database-generated columns only; see InsertStagedDiff for why. The rest is
+	// the caller's own input, and returning `justification` in particular meant the
+	// agent role needed SELECT over every subject's stated reasons for wanting a
+	// grant.
+	InsertGrantRequest(ctx context.Context, arg InsertGrantRequestParams) (InsertGrantRequestRow, error)
 	InsertGrantScope(ctx context.Context, arg InsertGrantScopeParams) error
 	InsertReviewerToken(ctx context.Context, arg InsertReviewerTokenParams) (InsertReviewerTokenRow, error)
+	// Returns only the columns the database generates. Everything else in the row
+	// is the caller's own input, so echoing it back is redundant — and it is not
+	// free: RETURNING requires SELECT privilege on every column it reads, so a
+	// wide RETURNING forced a table-wide SELECT grant for cmd/mcpserver, letting an
+	// agent enumerate every other subject's proposed content. Narrow here, and the
+	// grant narrows with it (see the least_privilege_roles migration).
 	InsertStagedDiff(ctx context.Context, arg InsertStagedDiffParams) (InsertStagedDiffRow, error)
 	ListGrantRequests(ctx context.Context, status string) ([]GrantRequest, error)
 	ListGrantScopes(ctx context.Context, grantID string) ([]string, error)

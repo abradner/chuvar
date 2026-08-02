@@ -24,12 +24,29 @@ Three roles, so no service holds authority it does not use:
 |---|---|---|---|
 | owner (`chuvar`) | `cmd/migrate` only | everything, including DDL | — |
 | `chuvar_app` | `apiserver` | all DML; read `reviewer_tokens`, `data_keys` | DDL; write `schema_migrations` |
-| `chuvar_agent` | `mcpserver` | read grants/scopes/facts; append `audit_log`; stage diffs and grant requests | **write grants**; read `reviewer_tokens`, `data_keys`, `audit_log`; DDL |
+| `chuvar_agent` | `mcpserver` | read grants/scopes/facts; append `audit_log`; stage diffs and grant requests | **write grants**; read `reviewer_tokens`, `data_keys`, `audit_log`; read **other subjects' proposals**; DDL |
+
+`chuvar_agent` holds only *column-level* `SELECT` (`id`, `status`, `created_at`) on
+`staged_diffs` and `grant_requests`, so it can learn the id of what it wrote and nothing
+else — not another subject's proposed content, nor their stated justification for wanting a
+grant. That required narrowing the inserts' `RETURNING` clauses, since Postgres demands
+`SELECT` on every column a `RETURNING` reads.
 
 The one that matters: `chuvar_agent` **cannot write `grants`**. With the shared owner
 credential, anything holding `DATABASE_URL` could `INSERT INTO grants` and give itself every
 scope, with a matching `audit_log` row — the consent model defeated in two statements, seen
 by no API-layer control.
+
+### Roles are cluster-global — collisions are refused
+
+Postgres roles live in the cluster, not the database. The migration stamps each role it
+creates with a `COMMENT` naming the database, and **refuses to run** if a role of that name
+already exists without a matching stamp. Sharing a role across two Chuvar databases would
+silently grant one deployment's data to the other's credential holders; that is a decision
+for someone who knows both deployments, not for whichever migration ran second.
+
+If you hit that refusal, either drop the colliding role or give this deployment its own
+cluster.
 
 ### Provisioning (required — the roles arrive unusable)
 

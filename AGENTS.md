@@ -174,8 +174,8 @@ entirely. Never reintroduce a literal credential into a tracked file.
 - Local Postgres+pgvector: `docker compose up -d`.
 - Backend: `cd backend && go run ./cmd/mcpserver` (MCP over stdio) or `go run
   ./cmd/apiserver` (REST API for the approval UI, separate process). `mcpserver`
-  verifies the schema but never migrates (§3.6) — on a fresh database run `go run
-  ./cmd/migrate` first, or start `apiserver`, either of which applies it. `apiserver`
+  and `apiserver` both verify the schema and never migrate (§3.6) — on a fresh database run
+  `go run ./cmd/migrate` first; nothing else will apply migrations for you. `apiserver`
   needs a custody master key to seal reviewer TOTP secrets — on a first run pass
   `CHUVAR_CUSTODY_CREATE=1` to mint one (see `docs/operations.md`, "The master
   key"). It is opt-in so a later start with a missing key fails loudly instead of

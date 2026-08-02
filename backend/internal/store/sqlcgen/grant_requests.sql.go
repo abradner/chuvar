@@ -7,6 +7,7 @@ package sqlcgen
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -77,7 +78,7 @@ func (q *Queries) GetGrantRequest(ctx context.Context, id string) (GrantRequest,
 const insertGrantRequest = `-- name: InsertGrantRequest :one
 INSERT INTO grant_requests (subject, requested_scopes, kind, depth, requested_ttl_seconds, justification)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, subject, requested_scopes, depth, requested_ttl_seconds, justification, status, created_at, decided_at, decided_by, resulting_grant_id, kind
+RETURNING id, status, created_at
 `
 
 type InsertGrantRequestParams struct {
@@ -89,7 +90,17 @@ type InsertGrantRequestParams struct {
 	Justification       string
 }
 
-func (q *Queries) InsertGrantRequest(ctx context.Context, arg InsertGrantRequestParams) (GrantRequest, error) {
+type InsertGrantRequestRow struct {
+	ID        string
+	Status    string
+	CreatedAt time.Time
+}
+
+// Database-generated columns only; see InsertStagedDiff for why. The rest is
+// the caller's own input, and returning `justification` in particular meant the
+// agent role needed SELECT over every subject's stated reasons for wanting a
+// grant.
+func (q *Queries) InsertGrantRequest(ctx context.Context, arg InsertGrantRequestParams) (InsertGrantRequestRow, error) {
 	row := q.db.QueryRow(ctx, insertGrantRequest,
 		arg.Subject,
 		arg.RequestedScopes,
@@ -98,21 +109,8 @@ func (q *Queries) InsertGrantRequest(ctx context.Context, arg InsertGrantRequest
 		arg.RequestedTtlSeconds,
 		arg.Justification,
 	)
-	var i GrantRequest
-	err := row.Scan(
-		&i.ID,
-		&i.Subject,
-		&i.RequestedScopes,
-		&i.Depth,
-		&i.RequestedTtlSeconds,
-		&i.Justification,
-		&i.Status,
-		&i.CreatedAt,
-		&i.DecidedAt,
-		&i.DecidedBy,
-		&i.ResultingGrantID,
-		&i.Kind,
-	)
+	var i InsertGrantRequestRow
+	err := row.Scan(&i.ID, &i.Status, &i.CreatedAt)
 	return i, err
 }
 

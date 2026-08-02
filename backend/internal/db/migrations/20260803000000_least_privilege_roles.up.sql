@@ -26,14 +26,42 @@
 -- warning saying so, rather than this migration quietly implying a protection
 -- nothing has adopted.
 
+-- Roles are cluster-global, so "create it if absent" is not safe on its own: a
+-- role of the same name may already exist from another Chuvar database in this
+-- cluster — quite possibly with LOGIN, a password, and other members. Adopting
+-- it silently would hand this database's data to every principal that already
+-- holds it, with no provisioning step and nothing to notice.
+--
+-- So each role is stamped with a COMMENT naming the database that created it,
+-- and adoption is verified rather than assumed:
+--   * absent            -> create and stamp
+--   * stamped for us    -> reuse (a re-run after a rollback)
+--   * anything else     -> refuse, loudly, and name the collision
+--
+-- Refusing is the right failure: sharing a role across databases is a decision
+-- with cross-deployment consequences, and it should be made by a person who
+-- knows both, not by whichever migration happened to run second.
 DO $$
+DECLARE
+    r          text;
+    stamp      text := 'chuvar-role for database ' || current_database();
+    existing   text;
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'chuvar_app') THEN
-        CREATE ROLE chuvar_app NOLOGIN;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'chuvar_agent') THEN
-        CREATE ROLE chuvar_agent NOLOGIN;
-    END IF;
+    FOREACH r IN ARRAY ARRAY['chuvar_app', 'chuvar_agent'] LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+            EXECUTE format('CREATE ROLE %I NOLOGIN', r);
+            EXECUTE format('COMMENT ON ROLE %I IS %L', r, stamp);
+        ELSE
+            SELECT pg_catalog.shobj_description(oid, 'pg_authid') INTO existing
+            FROM pg_roles WHERE rolname = r;
+
+            IF existing IS DISTINCT FROM stamp THEN
+                RAISE EXCEPTION
+                    'role % already exists in this cluster and was not created for database % (comment: %). Refusing to grant it access: it may belong to another Chuvar deployment, and adopting it would share this database with every principal that already holds it. Either drop it, or run this deployment in its own cluster. See docs/operations.md.',
+                    r, current_database(), coalesce(existing, '(none)');
+            END IF;
+        END IF;
+    END LOOP;
 END $$;
 
 GRANT USAGE ON SCHEMA public TO chuvar_app, chuvar_agent;
@@ -48,11 +76,24 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO chuvar_app;
 -- (ListGrants, GrantedScopeDepths, SearchFacts, ProposeDiff, RequestGrant,
 -- LogAudit) rather than from what seemed plausible.
 --
--- SELECT on staged_diffs and grant_requests is required by their INSERTs, not
--- granted for its own sake: Postgres requires SELECT on any column read by a
--- RETURNING clause, and both inserts return the created row.
-GRANT SELECT ON grants, grant_scopes, facts, fact_scopes, staged_diffs, grant_requests TO chuvar_agent;
+GRANT SELECT ON grants, grant_scopes, facts, fact_scopes TO chuvar_agent;
+
+-- staged_diffs and grant_requests get INSERT plus *column-level* SELECT on only
+-- the three columns the database generates.
+--
+-- Postgres requires SELECT on every column a RETURNING clause reads, and those
+-- two inserts used to return the whole row — which forced a table-wide SELECT
+-- grant, and with it the ability to read every other subject's proposed content
+-- and stated justifications. That is a cross-subject read in a system whose
+-- entire premise is that subjects see only what they are granted.
+--
+-- The fix was to stop echoing the caller's own input back: InsertStagedDiff and
+-- InsertGrantRequest now return `id, status, created_at`, and the store rebuilds
+-- the rest from what it just sent. The privilege narrows to match. An agent can
+-- now write a proposal and learn its id, and read nothing else.
 GRANT INSERT ON staged_diffs, grant_requests TO chuvar_agent;
+GRANT SELECT (id, status, created_at) ON staged_diffs TO chuvar_agent;
+GRANT SELECT (id, status, created_at) ON grant_requests TO chuvar_agent;
 
 -- audit_log is INSERT without SELECT, and that asymmetry is deliberate.
 -- InsertAuditLog has no RETURNING clause, so nothing breaks — and it means an

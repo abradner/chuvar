@@ -1,7 +1,11 @@
 -- name: InsertGrantRequest :one
+-- Database-generated columns only; see InsertStagedDiff for why. The rest is
+-- the caller's own input, and returning `justification` in particular meant the
+-- agent role needed SELECT over every subject's stated reasons for wanting a
+-- grant.
 INSERT INTO grant_requests (subject, requested_scopes, kind, depth, requested_ttl_seconds, justification)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, subject, requested_scopes, depth, requested_ttl_seconds, justification, status, created_at, decided_at, decided_by, resulting_grant_id, kind;
+RETURNING id, status, created_at;
 
 -- name: GetGrantRequest :one
 SELECT id, subject, requested_scopes, depth, requested_ttl_seconds, justification, status, created_at, decided_at, decided_by, resulting_grant_id, kind

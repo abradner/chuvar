@@ -79,19 +79,20 @@ func (s *Store) ProposeDiff(ctx context.Context, subject, content string, scopes
 		return StagedDiff{}, fmt.Errorf("store: insert staged diff: %w", err)
 	}
 
+	// Only ID/Status/CreatedAt come back from the database; the rest is what we
+	// just sent. Reconstructing rather than echoing is what lets the agent role
+	// hold column-level SELECT on three generated columns instead of a
+	// table-wide read over every subject's proposed content.
 	d := StagedDiff{
 		ID:                    row.ID,
-		Subject:               row.Subject,
-		Content:               row.Content,
-		ProposedScopes:        row.ProposedScopes,
-		TargetFactID:          row.TargetFactID,
+		Subject:               subject,
+		Content:               content,
+		ProposedScopes:        scopes,
+		TargetFactID:          targetFactID,
 		Status:                DiffStatus(row.Status),
-		DedupeCandidateFactID: row.DedupeCandidateFactID,
+		DedupeCandidateFactID: candidate,
 		CreatedAt:             row.CreatedAt,
-	}
-	if row.DedupeVerdict != nil {
-		dv := DedupeVerdict(*row.DedupeVerdict)
-		d.DedupeVerdict = &dv
+		DedupeVerdict:         &verdict,
 	}
 	return d, nil
 }

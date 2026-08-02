@@ -84,12 +84,12 @@ func CheckSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		// Table exists but is empty: migrate created the bookkeeping row's home
 		// and nothing has been applied, or everything was rolled back.
 		return fmt.Errorf("%w: database has no migrations applied (latest is %d); "+
-			"run `go run ./cmd/migrate` or start cmd/apiserver", ErrSchemaNotCurrent, latest)
+			"run `go run ./cmd/migrate`", ErrSchemaNotCurrent, latest)
 	case err != nil:
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UndefinedTable {
 			return fmt.Errorf("%w: database has never been migrated (latest is %d); "+
-				"run `go run ./cmd/migrate` or start cmd/apiserver", ErrSchemaNotCurrent, latest)
+				"run `go run ./cmd/migrate`", ErrSchemaNotCurrent, latest)
 		}
 		return fmt.Errorf("db: reading schema version: %w", err)
 	}

@@ -102,7 +102,20 @@ func (s *Store) RequestGrant(ctx context.Context, subject string, scopes []strin
 	if err != nil {
 		return GrantRequest{}, fmt.Errorf("store: insert grant request: %w", err)
 	}
-	return toGrantRequest(row), nil
+	// Built from inputs plus the three generated columns, for the same reason as
+	// ProposeDiff: a wide RETURNING would require the agent role to hold SELECT
+	// over every subject's justification.
+	return GrantRequest{
+		ID:                  row.ID,
+		Subject:             subject,
+		RequestedScopes:     scopes,
+		Kind:                validKind,
+		Depth:               depth,
+		RequestedTTLSeconds: ttlSeconds,
+		Justification:       justification,
+		Status:              GrantRequestStatus(row.Status),
+		CreatedAt:           row.CreatedAt,
+	}, nil
 }
 
 // ListGrantRequests returns requests in the given status, oldest first (review
