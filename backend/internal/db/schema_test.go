@@ -2,8 +2,8 @@ package db
 
 import (
 	"context"
+	"net/url"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -11,11 +11,12 @@ import (
 
 func testDatabaseURL(t *testing.T) string {
 	t.Helper()
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
+	// Not named url: that would shadow the net/url package this file imports.
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
 		t.Skip("DATABASE_URL not set; skipping schema integration tests (see docker-compose.yml)")
 	}
-	return url
+	return dsn
 }
 
 func TestLatestEmbeddedVersion(t *testing.T) {
@@ -92,7 +93,14 @@ func TestCheckSchema_CreatesNoTablesOnAVirginDatabase(t *testing.T) {
 		_, _ = admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+scratch)
 	})
 
-	probeURL := strings.Replace(adminURL, "/chuvar?", "/"+scratch+"?", 1)
+	// Swap the database name by parsing, not by replacing a hard-coded substring:
+	// a DATABASE_URL pointing at any other database name would make the replace a
+	// no-op, and this probe would run against the migrated admin database instead
+	// of a virgin one — gutting the invariant it exists to guard.
+	u, err := url.Parse(adminURL)
+	require.NoError(t, err)
+	u.Path = "/" + scratch
+	probeURL := u.String()
 	probe, err := Open(ctx, probeURL)
 	require.NoError(t, err)
 	defer probe.Close()
