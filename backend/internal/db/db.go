@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
@@ -197,4 +198,53 @@ func toPgx5URL(databaseURL string) (string, error) {
 		return "", fmt.Errorf("db: unsupported DATABASE_URL scheme %q (expected postgres:// or postgresql://)", u.Scheme)
 	}
 	return u.String(), nil
+}
+
+// WarnIfOverprivileged logs a warning when the connection holds more authority
+// than the service needs — superuser, or the ability to reshape the schema at
+// runtime.
+//
+// The least-privilege roles (chuvar_app, chuvar_agent) are created by migration
+// but deliberately arrive NOLOGIN and passwordless: a credential belongs to a
+// deployment, not to a public repository. That leaves a gap between the roles
+// existing and anything using them, and a gap nobody can see is one nobody
+// closes — the same reason the custody backend announces DOOR WEDGED OPEN
+// rather than quietly being unsealed.
+//
+// A warning rather than a refusal, on purpose. This describes deployment
+// posture, not an authorization decision: refusing would break every existing
+// setup at the moment of upgrade, which is how a security control gets reverted
+// instead of adopted. It becomes an error once the roles are the documented
+// default (see docs/operations.md).
+func WarnIfOverprivileged(ctx context.Context, pool *pgxpool.Pool, service string) {
+	var role string
+	var superuser bool
+	if err := pool.QueryRow(ctx,
+		`SELECT current_user, rolsuper FROM pg_roles WHERE rolname = current_user`,
+	).Scan(&role, &superuser); err != nil {
+		// Never fatal: this is an advisory check, and a deployment that has
+		// locked down pg_roles shouldn't fail to boot over it.
+		slog.Debug("db: could not determine connection privileges", "error", err)
+		return
+	}
+
+	if superuser {
+		slog.Warn("db: connected as a SUPERUSER — this service can bypass every database-level "+
+			"control, including the least-privilege roles this deployment already has. "+
+			"Grant LOGIN to chuvar_app/chuvar_agent and connect as those instead "+
+			"(docs/operations.md, \"Least-privilege database roles\")",
+			"service", service, "role", role)
+		return
+	}
+
+	// Not superuser, but can it still create tables? That is the DDL half, and
+	// it is worth naming separately: a role can be non-super and still own the
+	// schema.
+	var canCreate bool
+	if err := pool.QueryRow(ctx,
+		`SELECT has_schema_privilege(current_user, 'public', 'CREATE')`,
+	).Scan(&canCreate); err == nil && canCreate {
+		slog.Warn("db: connection can CREATE in schema public — this service holds DDL authority "+
+			"it does not need at runtime", "service", service, "role", role)
+	}
 }

@@ -34,16 +34,25 @@ func run() error {
 		return err
 	}
 
-	if err := db.Migrate(cfg.DatabaseURL); err != nil {
-		return err
-	}
-
 	ctx := context.Background()
 	pool, err := db.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
+
+	// Verifies the schema; does not change it. apiserver used to migrate on
+	// boot, which was defensible when it ran as the database owner — but a
+	// runtime service holding DDL is exactly what the least-privilege roles
+	// (E8) remove, and chuvar_app has no DDL to migrate with. Completing the
+	// split started in E2 leaves exactly one binary that migrates: cmd/migrate.
+	//
+	// The cost is one extra command on a fresh database. The gain is that
+	// "who may change the schema" has a single answer instead of two.
+	if err := db.CheckSchema(ctx, pool); err != nil {
+		return err
+	}
+	db.WarnIfOverprivileged(ctx, pool, "apiserver")
 
 	st, err := openSealedStore(ctx, pool)
 	if err != nil {

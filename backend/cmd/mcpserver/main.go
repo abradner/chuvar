@@ -66,6 +66,9 @@ func run() error {
 	if err := db.CheckSchema(ctx, pool); err != nil {
 		return err
 	}
+	// Loudest here of anywhere: this is the process an agent host spawns, so an
+	// over-privileged connection is the one that matters most (ticket E8).
+	db.WarnIfOverprivileged(ctx, pool, "mcpserver")
 
 	st := store.New(pool)
 	emb := embed.Stub{} // TODO: swap for a real Embedder once the Research track lands one

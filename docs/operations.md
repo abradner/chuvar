@@ -9,11 +9,54 @@ those projects document their own tools better than we can, and a copy here
 just goes stale:
 
 - Applying/rolling back migrations — [golang-migrate](https://github.com/golang-migrate/migrate/blob/master/README.md)
-  (`cmd/apiserver` applies migrations at startup, and `cmd/migrate` applies them
-  on demand, so you rarely need the CLI. `cmd/mcpserver` deliberately does not —
-  it verifies the schema and refuses to start if it is behind; see AGENTS.md §3.6)
+  (`cmd/migrate` is the only thing that applies them; `apiserver` and `mcpserver`
+  verify the schema and refuse to start if it is behind — see AGENTS.md §3.6)
 - Running `psql`, dumps, restores — [PostgreSQL client docs](https://www.postgresql.org/docs/current/app-psql.html)
 - Container lifecycle — [Docker Compose CLI](https://docs.docker.com/reference/cli/docker/compose/)
+
+---
+
+## Least-privilege database roles
+
+Three roles, so no service holds authority it does not use:
+
+| Role | Used by | Can | Cannot |
+|---|---|---|---|
+| owner (`chuvar`) | `cmd/migrate` only | everything, including DDL | — |
+| `chuvar_app` | `apiserver` | all DML; read `reviewer_tokens`, `data_keys` | DDL; write `schema_migrations` |
+| `chuvar_agent` | `mcpserver` | read grants/scopes/facts; append `audit_log`; stage diffs and grant requests | **write grants**; read `reviewer_tokens`, `data_keys`, `audit_log`; DDL |
+
+The one that matters: `chuvar_agent` **cannot write `grants`**. With the shared owner
+credential, anything holding `DATABASE_URL` could `INSERT INTO grants` and give itself every
+scope, with a matching `audit_log` row — the consent model defeated in two statements, seen
+by no API-layer control.
+
+### Provisioning (required — the roles arrive unusable)
+
+The migration creates both roles `NOLOGIN` and passwordless on purpose: a credential belongs
+to a deployment, not to a repository. Until you do this, every service keeps connecting as
+the owner and logs a `SUPERUSER` warning on each start.
+
+```sh
+docker compose exec postgres psql -U chuvar -d chuvar
+```
+
+```sql
+ALTER ROLE chuvar_app   WITH LOGIN PASSWORD 'generate-a-real-one';
+ALTER ROLE chuvar_agent WITH LOGIN PASSWORD 'generate-a-different-one';
+```
+
+Then point each service at its own role — `apiserver` at `chuvar_app`, `mcpserver` at
+`chuvar_agent`, `cmd/migrate` at the owner — via their `DATABASE_URL`. The warning stops
+when a service is no longer over-privileged, which is how you confirm it took effect.
+
+### What this does and does not do
+
+It converts **ambient reach** (credentials sitting in the process's environment) into an
+**attack-shaped action**: on a single-user host, `docker exec` still yields a superuser
+shell, and nothing here prevents that. It is not claimed to — detecting it is the
+fail-closed tripwire work (ticket E4). What it removes is the ability to do real damage
+*through the credentials the service legitimately holds*.
 
 ---
 

@@ -1,0 +1,243 @@
+package db
+
+import (
+	"context"
+	"fmt"
+	"net/url"
+	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/require"
+)
+
+// connectAs provisions a login password for one of the least-privilege roles
+// and returns a pool connected as it.
+//
+// The migration deliberately creates these roles NOLOGIN and passwordless — a
+// credential belongs to a deployment, not to a public repository — so the test
+// grants LOGIN itself rather than depending on a checked-in secret or on an
+// operator having run the provisioning step first.
+func connectAs(t *testing.T, adminPool *pgxpool.Pool, role string) *pgxpool.Pool {
+	t.Helper()
+	ctx := context.Background()
+
+	const pw = "test-only-not-a-deployment-credential"
+	_, err := adminPool.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD '%s'", role, pw))
+	require.NoError(t, err, "granting LOGIN to %s", role)
+	t.Cleanup(func() {
+		_, _ = adminPool.Exec(context.Background(), fmt.Sprintf("ALTER ROLE %s WITH NOLOGIN PASSWORD NULL", role))
+	})
+
+	u, err := url.Parse(testDatabaseURL(t))
+	require.NoError(t, err)
+	u.User = url.UserPassword(role, pw)
+
+	pool, err := Open(ctx, u.String())
+	require.NoError(t, err, "connecting as %s", role)
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+func adminPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	dsn := testDatabaseURL(t)
+	require.NoError(t, Migrate(dsn))
+	pool, err := Open(context.Background(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// The reason this ticket exists. An agent holding mcpserver's credentials must
+// not be able to grant itself scopes — that is the consent model defeated in
+// one statement, and no API-layer control sees it happen.
+func TestAgentRoleCannotGrantItselfScopes(t *testing.T) {
+	admin := adminPool(t)
+	agent := connectAs(t, admin, "chuvar_agent")
+	ctx := context.Background()
+
+	_, err := agent.Exec(ctx,
+		`INSERT INTO grants (subject, kind, depth, expires_at) VALUES ('rogue', 'memory', 'full', NULL)`)
+	require.Error(t, err, "the agent role could insert a grant")
+	require.ErrorContains(t, err, "permission denied")
+
+	_, err = agent.Exec(ctx, `INSERT INTO grant_scopes (grant_id, scope) VALUES (gen_random_uuid(), 'identity.basic')`)
+	require.Error(t, err, "the agent role could insert a grant scope")
+
+	// Nor widen an existing one.
+	_, err = agent.Exec(ctx, `UPDATE grants SET expires_at = NULL`)
+	require.Error(t, err, "the agent role could extend a grant")
+
+	_, err = agent.Exec(ctx, `DELETE FROM grants`)
+	require.Error(t, err, "the agent role could delete grants")
+}
+
+// Secrets the agent has no use for: it should not be able to read them even as
+// ciphertext. Defence in depth rather than the primary control — both are
+// already hashed or sealed — but there is no reason to hand them over.
+func TestAgentRoleCannotReadSecretTables(t *testing.T) {
+	admin := adminPool(t)
+	agent := connectAs(t, admin, "chuvar_agent")
+	ctx := context.Background()
+
+	for _, table := range []string{"reviewer_tokens", "data_keys"} {
+		t.Run(table, func(t *testing.T) {
+			var n int
+			err := agent.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&n)
+			require.Error(t, err, "the agent role could read %s", table)
+			require.ErrorContains(t, err, "permission denied")
+		})
+	}
+}
+
+// The audit trail is append-only from the agent's side: it can write entries
+// but cannot read them back, so it can neither enumerate nor audit-check its
+// own history. InsertAuditLog has no RETURNING clause, so nothing needs SELECT.
+func TestAgentRoleCanAppendButNotReadAuditLog(t *testing.T) {
+	admin := adminPool(t)
+	agent := connectAs(t, admin, "chuvar_agent")
+	ctx := context.Background()
+
+	_, err := agent.Exec(ctx,
+		`INSERT INTO audit_log (event_type, subject, scopes) VALUES ('read', 'agent-a', ARRAY['identity.basic'])`)
+	require.NoError(t, err, "the agent role could not append to audit_log")
+
+	var n int
+	err = agent.QueryRow(ctx, `SELECT count(*) FROM audit_log`).Scan(&n)
+	require.Error(t, err, "the agent role could read audit_log")
+}
+
+// Everything mcpserver legitimately does must still work, or the role is not a
+// constraint but a breakage. These mirror the store methods reachable from
+// internal/mcptools.
+func TestAgentRoleCanDoItsActualJob(t *testing.T) {
+	admin := adminPool(t)
+	agent := connectAs(t, admin, "chuvar_agent")
+	ctx := context.Background()
+
+	t.Run("read grants and scopes", func(t *testing.T) {
+		var n int
+		require.NoError(t, agent.QueryRow(ctx, `SELECT count(*) FROM grants`).Scan(&n))
+		require.NoError(t, agent.QueryRow(ctx, `SELECT count(*) FROM grant_scopes`).Scan(&n))
+	})
+
+	t.Run("read facts and scopes", func(t *testing.T) {
+		var n int
+		require.NoError(t, agent.QueryRow(ctx, `SELECT count(*) FROM facts`).Scan(&n))
+		require.NoError(t, agent.QueryRow(ctx, `SELECT count(*) FROM fact_scopes`).Scan(&n))
+	})
+
+	// INSERT ... RETURNING, the shape ProposeDiff and RequestGrant actually use.
+	// This is what makes SELECT on these two tables necessary rather than
+	// generous, and it would fail with INSERT alone.
+	t.Run("stage a diff with RETURNING", func(t *testing.T) {
+		var id string
+		require.NoError(t, agent.QueryRow(ctx,
+			`INSERT INTO staged_diffs (subject, content, proposed_scopes)
+			 VALUES ('agent-a', 'proposed content', ARRAY['identity.basic']) RETURNING id`).Scan(&id))
+		require.NotEmpty(t, id)
+	})
+
+	t.Run("request a grant with RETURNING", func(t *testing.T) {
+		var id string
+		require.NoError(t, agent.QueryRow(ctx,
+			`INSERT INTO grant_requests (subject, requested_scopes, kind, depth)
+			 VALUES ('agent-a', ARRAY['identity.basic'], 'memory', 'facts') RETURNING id`).Scan(&id))
+		require.NotEmpty(t, id)
+	})
+}
+
+// The agent must not be able to reshape the schema — the question that started
+// this ticket, even though it turned out to be the smaller half.
+func TestAgentRoleHasNoDDL(t *testing.T) {
+	admin := adminPool(t)
+	agent := connectAs(t, admin, "chuvar_agent")
+	ctx := context.Background()
+
+	_, err := agent.Exec(ctx, `CREATE TABLE e8_probe (id int)`)
+	require.Error(t, err, "the agent role could create a table")
+
+	_, err = agent.Exec(ctx, `DROP TABLE IF EXISTS facts`)
+	require.Error(t, err, "the agent role could drop a table")
+}
+
+// apiserver's role needs full DML — it commits diffs, approves requests, writes
+// grants — but must not hold DDL. This one survives E3.
+func TestAppRoleHasFullDMLButNoDDL(t *testing.T) {
+	admin := adminPool(t)
+	app := connectAs(t, admin, "chuvar_app")
+	ctx := context.Background()
+
+	var id string
+	require.NoError(t, app.QueryRow(ctx,
+		`INSERT INTO grants (subject, kind, depth) VALUES ('app-created', 'memory', 'facts') RETURNING id`).Scan(&id))
+	_, err := app.Exec(ctx, `UPDATE grants SET revoked_at = now() WHERE id = $1`, id)
+	require.NoError(t, err)
+
+	// Unlike the agent, apiserver legitimately reads reviewer tokens and data
+	// keys — it authenticates reviewers and holds the master key.
+	var n int
+	require.NoError(t, app.QueryRow(ctx, `SELECT count(*) FROM reviewer_tokens`).Scan(&n))
+	require.NoError(t, app.QueryRow(ctx, `SELECT count(*) FROM data_keys`).Scan(&n))
+
+	_, err = app.Exec(ctx, `CREATE TABLE e8_probe_app (id int)`)
+	require.Error(t, err, "the app role could create a table")
+
+	_, err = admin.Exec(ctx, `DELETE FROM grants WHERE id = $1`, id)
+	require.NoError(t, err)
+}
+
+// A table added later must not become agent-readable by default. ALTER DEFAULT
+// PRIVILEGES covers chuvar_app deliberately and chuvar_agent deliberately not —
+// this asserts the asymmetry, which is the bit that rots silently otherwise.
+func TestNewTablesAreAgentInvisibleButAppWritable(t *testing.T) {
+	admin := adminPool(t)
+	ctx := context.Background()
+
+	_, err := admin.Exec(ctx, `CREATE TABLE IF NOT EXISTS e8_future_table (id int)`)
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), `DROP TABLE IF EXISTS e8_future_table`) })
+
+	agent := connectAs(t, admin, "chuvar_agent")
+	var n int
+	err = agent.QueryRow(ctx, `SELECT count(*) FROM e8_future_table`).Scan(&n)
+	require.Error(t, err, "a newly created table was readable by the agent role by default")
+
+	app := connectAs(t, admin, "chuvar_app")
+	require.NoError(t, app.QueryRow(ctx, `SELECT count(*) FROM e8_future_table`).Scan(&n),
+		"a newly created table was not writable by the app role; ALTER DEFAULT PRIVILEGES has regressed")
+}
+
+// Both services call CheckSchema at boot, which reads golang-migrate's
+// bookkeeping table. The privilege tests originally missed this because they
+// exercised CheckSchema on the admin pool — the omission only surfaced when
+// mcpserver was actually run under chuvar_agent and refused to start. This
+// asserts the boot path works under each service's own role.
+func TestServiceRolesCanRunTheBootSchemaCheck(t *testing.T) {
+	admin := adminPool(t)
+	ctx := context.Background()
+
+	for _, role := range []string{"chuvar_agent", "chuvar_app"} {
+		t.Run(role, func(t *testing.T) {
+			pool := connectAs(t, admin, role)
+			require.NoError(t, CheckSchema(ctx, pool),
+				"%s cannot run the boot schema check", role)
+		})
+	}
+}
+
+// Neither service may write the version table: forging a version or clearing
+// the dirty flag would let a process talk its way past the check that exists to
+// stop it running against a schema it does not understand.
+func TestServiceRolesCannotWriteTheVersionTable(t *testing.T) {
+	admin := adminPool(t)
+	ctx := context.Background()
+
+	for _, role := range []string{"chuvar_agent", "chuvar_app"} {
+		t.Run(role, func(t *testing.T) {
+			pool := connectAs(t, admin, role)
+			_, err := pool.Exec(ctx, `UPDATE schema_migrations SET dirty = false`)
+			require.Error(t, err, "%s could write schema_migrations", role)
+		})
+	}
+}
