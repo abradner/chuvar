@@ -32,13 +32,54 @@ var migrationsFS embed.FS
 func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("db: creating connection pool: %w", err)
+		return nil, fmt.Errorf("db: creating connection pool: %w", redactPassword(err, databaseURL))
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("db: pinging database: %w", err)
+		return nil, fmt.Errorf("db: pinging database: %w", redactPassword(err, databaseURL))
 	}
 	return pool, nil
+}
+
+// redactPassword removes the connection string's password from an error before
+// it escapes toward a log.
+//
+// Raised in review as a live leak: pgx's ParseConfigError was said to embed the
+// raw DSN, so a malformed connection string would put the password into every
+// command's fatal slog.Error. Checked before acting on it — pgx v5 already
+// sanitises the DSN itself, emitting `postgres://user:xxxxx@host/db`, so the
+// leak described does not currently exist.
+//
+// Kept anyway, as a cheap invariant rather than a fix. The property worth
+// holding is "the password does not appear in an error that reaches a log",
+// and today that depends entirely on a third party continuing to redact. This
+// layer means the property survives a pgx change, a different driver, or an
+// error path that formats the DSN some other way — which matters more than
+// usual here, because the whole point of loading the credential from a 0600
+// file (config.requireSecret) is to keep it out of readable places.
+//
+// Substring replacement rather than reconstructing the DSN: the password can be
+// echoed by any layer in any format, and the goal is that these bytes do not
+// appear in the output regardless of who wrote them.
+func redactPassword(err error, databaseURL string) error {
+	if err == nil {
+		return nil
+	}
+	u, parseErr := url.Parse(databaseURL)
+	if parseErr != nil || u.User == nil {
+		// Unparseable, so the password can't be located to remove it. The DSN
+		// itself may still be embedded in err, so say nothing more about it.
+		return errors.New("connection string is malformed (details withheld: they may contain the password)")
+	}
+	pw, ok := u.User.Password()
+	if !ok || pw == "" {
+		return err
+	}
+	msg := strings.ReplaceAll(err.Error(), pw, "[REDACTED]")
+	if msg == err.Error() {
+		return err
+	}
+	return errors.New(msg)
 }
 
 // ErrSchemaNotCurrent reports a database whose schema is behind the migrations

@@ -73,14 +73,25 @@ The compose file interpolates `${CHUVAR_DB_PASSWORD:-chuvar_dev_only}`. The fall
 so a fresh clone runs with no setup; it is checked in, so treat it as public.
 
 ```sh
-# 1. Set a real value in a gitignored .env (see .env.example)
-printf 'CHUVAR_DB_PASSWORD=%s\n' "$(openssl rand -base64 32)" >> .env
+# Generate once and reuse, so .env and the database cannot disagree — and edit
+# the existing line rather than appending a second one (the last wins, which
+# makes a duplicate silently authoritative).
+NEW_PW="$(openssl rand -base64 32)"
 
-# 2. Change it in the running database, then recreate the container
-docker compose exec postgres psql -U chuvar -d chuvar \
-  -c "ALTER ROLE chuvar WITH PASSWORD '<the new value>';"
+docker compose exec -T postgres psql -U chuvar -d chuvar \
+  -c "ALTER ROLE chuvar WITH PASSWORD '$NEW_PW';"
+
+touch .env
+sed -i '/^CHUVAR_DB_PASSWORD=/d' .env
+printf 'CHUVAR_DB_PASSWORD=%s\n' "$NEW_PW" >> .env
+chmod 600 .env
+
 docker compose up -d --force-recreate postgres
+unset NEW_PW
 ```
+
+Change the database first: if the `ALTER ROLE` fails you still have a working
+`.env`, whereas the reverse leaves the file claiming a password the server never took.
 
 Then update each service's connection string. Prefer a file over an environment variable:
 

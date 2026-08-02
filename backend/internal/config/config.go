@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -60,6 +61,12 @@ func Load() (Config, error) {
 // is worse than an environment variable, since it grants every user on the host
 // rather than just the one running the process. Refusing beats silently
 // accepting a credential the whole machine can read.
+// Secret is requireSecret exported for the cmd/ entrypoints, whose credentials
+// (CHUVAR_API_TOKEN, REVIEWER_BOOTSTRAP_TOKEN) are not part of Config but
+// deserve the same handling: an environment variable is a poor place for any of
+// them, not just the database URL.
+func Secret(key string) (string, error) { return requireSecret(key) }
+
 func requireSecret(key string) (string, error) {
 	path, ok := os.LookupEnv(key + "_FILE")
 	if ok && path != "" {
@@ -94,10 +101,16 @@ func readSecretFile(key, path string) (string, error) {
 	return v, nil
 }
 
+// ErrNotSet distinguishes "no value was supplied" from "a value was supplied and
+// is unusable" — a permissions refusal on a credential file is a very different
+// problem from a missing variable, and reporting both as "not set" sends the
+// operator looking in the wrong place.
+var ErrNotSet = errors.New("no value supplied")
+
 func requireEnv(key string) (string, error) {
 	v, ok := os.LookupEnv(key)
 	if !ok || v == "" {
-		return "", fmt.Errorf("config: required environment variable %s is not set", key)
+		return "", fmt.Errorf("config: required environment variable %s is not set (or %s_FILE): %w", key, key, ErrNotSet)
 	}
 	return v, nil
 }

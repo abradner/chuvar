@@ -54,8 +54,12 @@ Worked example: #16–#20 were interstitials, #21 the followup.
 - Postgres first: `sudo -n docker compose up -d` (Docker needs elevated
   access in this sandbox, AGENTS.md §4.5; port 54322, and the main
   checkout's container may already hold it — reuse it).
-- Go (from `backend/`), with
-  `DATABASE_URL=postgres://chuvar:chuvar_dev_only@127.0.0.1:54322/chuvar?sslmode=disable`:
+- Go (from `backend/`), with `DATABASE_URL` built from the *configured*
+  password rather than the literal — a checkout with `CHUVAR_DB_PASSWORD` set in
+  `.env` uses that, and hardcoding the fallback makes every validation
+  connection fail on such a checkout:
+  `PW="${CHUVAR_DB_PASSWORD:-chuvar_dev_only}"` (sourcing `.env` first if present),
+  then `DATABASE_URL=postgres://chuvar:$PW@127.0.0.1:54322/chuvar?sslmode=disable`:
   `mise exec -- go vet ./...`, `go build ./...`, `go test -p 1 ./...`.
   **`-p 1` is mandatory** — shared-database test isolation, AGENTS.md §4.
 - **sqlc drift**: after any change under `backend/internal/store/queries/`,

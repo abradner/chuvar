@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/abradner/chuvar/backend/internal/config"
 	"github.com/abradner/chuvar/backend/internal/sseclient"
 )
 
@@ -33,7 +35,14 @@ func main() {
 	if baseURL == "" {
 		baseURL = "http://localhost:8080"
 	}
-	token, ok := os.LookupEnv("CHUVAR_API_TOKEN")
+	// config.Secret so CHUVAR_API_TOKEN_FILE works here too — see
+	// config.requireSecret on why a file beats an environment variable.
+	token, secretErr := config.Secret("CHUVAR_API_TOKEN")
+	if secretErr != nil && !errors.Is(secretErr, config.ErrNotSet) {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", "pushbridge", secretErr)
+		os.Exit(1)
+	}
+	ok := secretErr == nil
 	if !ok || token == "" {
 		fmt.Fprintln(os.Stderr, "pushbridge: required environment variable CHUVAR_API_TOKEN is not set")
 		os.Exit(1)

@@ -155,7 +155,8 @@ New tables are granted to `chuvar_app` automatically (`ALTER DEFAULT PRIVILEGES`
 `chuvar_agent` **never** — widening the agent's view is always a deliberate act.
 
 ### 3.7 Credentials Come From Files, Not the Environment
-Every required credential is read by `config.requireSecret`, which prefers `<KEY>_FILE`
+Every required credential — `DATABASE_URL`, `CHUVAR_API_TOKEN`,
+`REVIEWER_BOOTSTRAP_TOKEN` — is read by `config.Secret`, which prefers `<KEY>_FILE`
 (a `0600` file, refused if group/other-readable) over `<KEY>`. An environment variable is
 readable via `/proc` by anything running as the same user, is inherited by every child
 process, and turns up in crash dumps — a file read once at boot is narrower on all three,
