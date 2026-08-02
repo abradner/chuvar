@@ -154,6 +154,20 @@ itself every scope — but the connection still exists. Removing it entirely is 
 New tables are granted to `chuvar_app` automatically (`ALTER DEFAULT PRIVILEGES`) and to
 `chuvar_agent` **never** — widening the agent's view is always a deliberate act.
 
+### 3.7 Credentials Come From Files, Not the Environment
+Every required credential is read by `config.requireSecret`, which prefers `<KEY>_FILE`
+(a `0600` file, refused if group/other-readable) over `<KEY>`. An environment variable is
+readable via `/proc` by anything running as the same user, is inherited by every child
+process, and turns up in crash dumps — a file read once at boot is narrower on all three,
+and matches how systemd, Docker and Kubernetes expect secrets to arrive. Plain `<KEY>` still
+works for local development.
+
+The Postgres owner password is interpolated in `docker-compose.yml`
+(`${CHUVAR_DB_PASSWORD:-chuvar_dev_only}`) from a gitignored `.env`. **The fallback is not a
+secret**: leaving it as the only option meant any local process could read the owner
+credential out of a checked-in file and connect as superuser, which bypasses §3.6's roles
+entirely. Never reintroduce a literal credential into a tracked file.
+
 ## 4. Development Essentials
 
 - Toolchain via `mise install` (reads `mise.toml`: Go 1.26, Bun 1.3).

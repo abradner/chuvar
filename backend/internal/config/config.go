@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -29,7 +30,7 @@ type Config struct {
 // Load reads Config from the environment, returning an error if a required variable
 // is missing rather than substituting a default.
 func Load() (Config, error) {
-	databaseURL, err := requireEnv("DATABASE_URL")
+	databaseURL, err := requireSecret("DATABASE_URL")
 	if err != nil {
 		return Config{}, err
 	}
@@ -39,6 +40,58 @@ func Load() (Config, error) {
 		HTTPAddr:       envOr("HTTP_ADDR", "127.0.0.1:8080"),
 		RequestTimeout: envDurationOr("REQUEST_TIMEOUT", 10*time.Second),
 	}, nil
+}
+
+// requireSecret reads a required credential, preferring <KEY>_FILE over <KEY>.
+//
+// An environment variable is a poor place for a credential: it is readable via
+// /proc for anything running as the same user, it is inherited by every child
+// process a service spawns, and it turns up in crash dumps and process listings.
+// A file read once at boot is narrower on all three counts — and it is how
+// systemd (LoadCredential), Docker, and Kubernetes all expect secrets to be
+// delivered, so this is the conventional shape rather than a bespoke one.
+//
+// Both are still supported: <KEY> alone remains fine for local development, and
+// removing it would break every existing run for no gain. <KEY>_FILE wins when
+// both are set, because a deployment that has bothered to provide a file has
+// made the more deliberate choice.
+//
+// The file's permissions are checked, not assumed: a world-readable secret file
+// is worse than an environment variable, since it grants every user on the host
+// rather than just the one running the process. Refusing beats silently
+// accepting a credential the whole machine can read.
+func requireSecret(key string) (string, error) {
+	path, ok := os.LookupEnv(key + "_FILE")
+	if ok && path != "" {
+		return readSecretFile(key+"_FILE", path)
+	}
+	return requireEnv(key)
+}
+
+func readSecretFile(key, path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("config: %s=%s: %w", key, path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("config: %s=%s is not a regular file", key, path)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return "", fmt.Errorf("config: %s=%s has mode %04o; a credential file must not be "+
+			"readable or writable by group or other (chmod 600)", key, path, perm)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("config: reading %s=%s: %w", key, path, err)
+	}
+	// TrimSpace because every editor and `echo` leaves a trailing newline, and a
+	// connection string with one appended fails later with a confusing parse
+	// error rather than here with a clear one.
+	v := strings.TrimSpace(string(raw))
+	if v == "" {
+		return "", fmt.Errorf("config: %s=%s is empty", key, path)
+	}
+	return v, nil
 }
 
 func requireEnv(key string) (string, error) {

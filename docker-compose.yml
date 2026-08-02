@@ -4,7 +4,15 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: chuvar
-      POSTGRES_PASSWORD: chuvar_dev_only
+      # Interpolated, with the old literal as the fallback so a fresh clone still
+      # runs `docker compose up -d` with no setup. Set CHUVAR_DB_PASSWORD in a
+      # gitignored .env (see .env.example) for anything holding real data.
+      #
+      # The fallback is not a secret and is not treated as one — but leaving it
+      # as the only option meant every local process could read the owner
+      # credential out of a checked-in file and connect as superuser, which
+      # bypasses the least-privilege roles entirely (AGENTS.md §3.7).
+      POSTGRES_PASSWORD: ${CHUVAR_DB_PASSWORD:-chuvar_dev_only}
       POSTGRES_DB: chuvar
     ports:
       # Offset from the standard 5432: several projects likely will run concurrently

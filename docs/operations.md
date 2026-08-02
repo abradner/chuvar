@@ -50,6 +50,32 @@ Then point each service at its own role — `apiserver` at `chuvar_app`, `mcpser
 `chuvar_agent`, `cmd/migrate` at the owner — via their `DATABASE_URL`. The warning stops
 when a service is no longer over-privileged, which is how you confirm it took effect.
 
+### Rotating the database password
+
+The compose file interpolates `${CHUVAR_DB_PASSWORD:-chuvar_dev_only}`. The fallback exists
+so a fresh clone runs with no setup; it is checked in, so treat it as public.
+
+```sh
+# 1. Set a real value in a gitignored .env (see .env.example)
+printf 'CHUVAR_DB_PASSWORD=%s\n' "$(openssl rand -base64 32)" >> .env
+
+# 2. Change it in the running database, then recreate the container
+docker compose exec postgres psql -U chuvar -d chuvar \
+  -c "ALTER ROLE chuvar WITH PASSWORD '<the new value>';"
+docker compose up -d --force-recreate postgres
+```
+
+Then update each service's connection string. Prefer a file over an environment variable:
+
+```sh
+install -m 600 /dev/null ~/.config/chuvar/apiserver.url
+printf 'postgres://chuvar_app:PW@127.0.0.1:54322/chuvar?sslmode=disable\n' > ~/.config/chuvar/apiserver.url
+DATABASE_URL_FILE=~/.config/chuvar/apiserver.url go run ./cmd/apiserver
+```
+
+`DATABASE_URL_FILE` wins over `DATABASE_URL` when both are set, and the service refuses to
+start if the file is group- or world-readable.
+
 ### What this does and does not do
 
 It converts **ambient reach** (credentials sitting in the process's environment) into an

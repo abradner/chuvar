@@ -1,1 +1,5 @@
 /reference/
+
+# Local credentials — never commit. .env.example documents the shape.
+.env
+*.url
