@@ -13,6 +13,9 @@ import (
 
 	"github.com/pquerna/otp/totp"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/abradner/chuvar/backend/internal/custody"
 	"github.com/abradner/chuvar/backend/internal/db"
 	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/store"
@@ -46,11 +49,11 @@ func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
-	st := store.New(pool)
+	st := testSealedStore(t, pool)
 	if _, err := st.CreateReviewerToken(ctx, "test-reviewer", testAuthToken, testTOTPSecret); err != nil {
 		t.Fatalf("seeding reviewer token: %v", err)
 	}
@@ -81,11 +84,11 @@ func testServerWithBootstrapToken(t *testing.T) (*httptest.Server, string) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
-	st := store.New(pool)
+	st := testSealedStore(t, pool)
 	const bootstrapToken = "bootstrap-token-do-not-use-in-prod"
 	if _, err := st.CreateReviewerToken(ctx, "bootstrap", bootstrapToken, ""); err != nil {
 		t.Fatalf("seeding bootstrap token: %v", err)
@@ -798,11 +801,11 @@ func TestWithRequestTimeout_CancelsSlowHandlerContext(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
-	st := store.New(pool)
+	st := testSealedStore(t, pool)
 	if _, err := st.CreateReviewerToken(ctx, "test-reviewer", testAuthToken, testTOTPSecret); err != nil {
 		t.Fatalf("seeding reviewer token: %v", err)
 	}
@@ -1170,4 +1173,20 @@ func TestGrantRequestActions_RealDBErrorIsNotMaskedAs404(t *testing.T) {
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("POST approve with a malformed ID: status = %d, want 500", resp.StatusCode)
 	}
+}
+
+// testSealedStore returns a Store whose sealing key lives only for this test.
+// Enrolling a TOTP secret requires one — CreateReviewerToken refuses to write a
+// secret in the clear — so tests that seed an enrolled reviewer go through here.
+func testSealedStore(t *testing.T, pool *pgxpool.Pool) *store.Store {
+	t.Helper()
+	raw, err := (&custody.Ephemeral{}).Unseal(context.Background())
+	if err != nil {
+		t.Fatalf("custody.Ephemeral.Unseal() error = %v", err)
+	}
+	key, err := custody.NewKey(raw)
+	if err != nil {
+		t.Fatalf("custody.NewKey() error = %v", err)
+	}
+	return store.NewSealed(pool, key)
 }

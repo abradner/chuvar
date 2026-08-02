@@ -124,7 +124,11 @@ Operationally, starting now:
 - Toolchain via `mise install` (reads `mise.toml`: Go 1.26, Bun 1.3).
 - Local Postgres+pgvector: `docker compose up -d`.
 - Backend: `cd backend && go run ./cmd/mcpserver` (MCP over stdio) or `go run
-  ./cmd/apiserver` (REST API for the approval UI, separate process). Tests: `go
+  ./cmd/apiserver` (REST API for the approval UI, separate process). `apiserver`
+  needs a custody master key to seal reviewer TOTP secrets — on a first run pass
+  `CHUVAR_CUSTODY_CREATE=1` to mint one (see `docs/operations.md`, "The master
+  key"). It is opt-in so a later start with a missing key fails loudly instead of
+  minting a replacement that opens nothing. Tests: `go
   test -p 1 ./...` with `DATABASE_URL` set to run the full suite including
   integration tests, or without it to run only the DB-free ones (they skip
   cleanly). **The `-p 1` matters**: most tests are integration tests against the

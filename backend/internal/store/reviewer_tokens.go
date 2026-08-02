@@ -41,18 +41,30 @@ func HashToken(token string) []byte {
 // secret (base32, empty if the caller chose not to enroll one) — see
 // api.createToken. A token with no secret simply cannot pass requireTOTP later;
 // it isn't a distinct error here.
+//
+// The secret is sealed before it reaches Postgres. Enrolling one therefore
+// requires a Store built by NewSealed: without a key the only way to satisfy
+// the caller would be to write the secret in the clear, and that is the exact
+// failure this column was changed to close.
 func (s *Store) CreateReviewerToken(ctx context.Context, label, plaintext, totpSecret string) (ReviewerToken, error) {
 	if label == "" {
 		return ReviewerToken{}, fmt.Errorf("store: reviewer token label must not be empty")
 	}
-	var secret *string
+	var sealed []byte
 	if totpSecret != "" {
-		secret = &totpSecret
+		if s.secrets == nil {
+			return ReviewerToken{}, errors.New("store: cannot enroll a TOTP secret without a sealing key " +
+				"(build the Store with NewSealed) — refusing to store it in the clear")
+		}
+		var err error
+		if sealed, err = s.secrets.Seal([]byte(totpSecret)); err != nil {
+			return ReviewerToken{}, fmt.Errorf("store: seal totp secret: %w", err)
+		}
 	}
 	row, err := s.q.InsertReviewerToken(ctx, sqlcgen.InsertReviewerTokenParams{
-		Label:      label,
-		TokenHash:  HashToken(plaintext),
-		TotpSecret: secret,
+		Label:         label,
+		TokenHash:     HashToken(plaintext),
+		TotpSecretEnc: sealed,
 	})
 	if err != nil {
 		return ReviewerToken{}, fmt.Errorf("store: insert reviewer token: %w", err)
@@ -108,18 +120,36 @@ func (s *Store) AuthenticateReviewerToken(ctx context.Context, plaintext string)
 // enrolled secret. Returns false, not an error, both when no code matches and
 // when the token has no secret enrolled — an unenrolled device fails the gate
 // the same way a wrong code does, it isn't a distinguishable server error.
+//
+// A missing sealing key IS an error rather than a false, unlike the cases
+// above: those are ordinary "this request doesn't pass" outcomes, whereas a
+// keyless Store gating an approval endpoint is a misconfigured deployment. It
+// should surface as a 500 the operator investigates, not as a wrong code the
+// operator retries.
 func (s *Store) VerifyReviewerTOTP(ctx context.Context, tokenID, code string) (bool, error) {
-	secret, err := s.q.GetReviewerTOTPSecret(ctx, tokenID)
+	sealed, err := s.q.GetReviewerTOTPSecret(ctx, tokenID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
 		}
 		return false, fmt.Errorf("store: get reviewer totp secret: %w", err)
 	}
-	if secret == nil || *secret == "" {
+	if len(sealed) == 0 {
 		return false, nil
 	}
-	return totp.Validate(code, *secret), nil
+	if s.secrets == nil {
+		return false, errors.New("store: cannot verify TOTP without a sealing key " +
+			"(build the Store with NewSealed)")
+	}
+	secret, err := s.secrets.Open(sealed)
+	if err != nil {
+		// The row exists but this key can't open it — a replaced key file, or a
+		// database restored beside the wrong one. Never a wrong code, so don't
+		// report it as one.
+		return false, fmt.Errorf("store: opening the enrolled totp secret failed; the sealing key "+
+			"does not match the one it was enrolled under: %w", err)
+	}
+	return totp.Validate(code, string(secret)), nil
 }
 
 // ListReviewerTokens returns every token, active or revoked, oldest first.

@@ -24,6 +24,13 @@ type AuditLog struct {
 	GrantRequestID *string
 }
 
+type DataKey struct {
+	Purpose    string
+	WrappedKey []byte
+	CreatedAt  time.Time
+	RotatedAt  *time.Time
+}
+
 type Fact struct {
 	ID                 string
 	Content            string
@@ -75,13 +82,13 @@ type GrantScope struct {
 }
 
 type ReviewerToken struct {
-	ID         string
-	Label      string
-	TokenHash  []byte
-	CreatedAt  time.Time
-	LastUsedAt *time.Time
-	RevokedAt  *time.Time
-	TotpSecret *string
+	ID            string
+	Label         string
+	TokenHash     []byte
+	CreatedAt     time.Time
+	LastUsedAt    *time.Time
+	RevokedAt     *time.Time
+	TotpSecretEnc []byte
 }
 
 type StagedDiff struct {

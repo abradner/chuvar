@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 
+	"github.com/abradner/chuvar/backend/internal/custody"
 	"github.com/abradner/chuvar/backend/internal/db"
 )
 
@@ -38,12 +39,29 @@ func testStore(t *testing.T) (*Store, *pgxpool.Pool) {
 
 	// Isolate each test: truncate everything before it runs rather than after, so a
 	// failed run leaves data behind to inspect.
-	_, err = pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests`)
+	_, err = pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys`)
 	if err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
-	return New(pool), pool
+	// Sealed by default: enrolling a TOTP secret needs a key, and a test Store
+	// that couldn't do it would just be a different Store from the real one.
+	// The unsealed case has its own coverage in data_keys_test.go.
+	return NewSealed(pool, testSecretKey(t)), pool
+}
+
+// testSecretKey mints a data-encryption key scoped to a single test.
+func testSecretKey(t *testing.T) *custody.Key {
+	t.Helper()
+	raw, err := custody.GenerateKey()
+	if err != nil {
+		t.Fatalf("custody.GenerateKey() error = %v", err)
+	}
+	key, err := custody.NewKey(raw)
+	if err != nil {
+		t.Fatalf("custody.NewKey() error = %v", err)
+	}
+	return key
 }
 
 func TestGrants_CreateListRevoke(t *testing.T) {
