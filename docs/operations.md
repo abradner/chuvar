@@ -24,12 +24,29 @@ Three roles, so no service holds authority it does not use:
 |---|---|---|---|
 | owner (`chuvar`) | `cmd/migrate` only | everything, including DDL | — |
 | `chuvar_app` | `apiserver` | all DML; read `reviewer_tokens`, `data_keys` | DDL; write `schema_migrations` |
-| `chuvar_agent` | `mcpserver` | read grants/scopes/facts; append `audit_log`; stage diffs and grant requests | **write grants**; read `reviewer_tokens`, `data_keys`, `audit_log`; DDL |
+| `chuvar_agent` | `mcpserver` | read grants/scopes/facts; append `audit_log`; stage diffs and grant requests | **write grants**; read `reviewer_tokens`, `data_keys`, `audit_log`; read **other subjects' proposals**; DDL |
+
+`chuvar_agent` holds only *column-level* `SELECT` (`id`, `status`, `created_at`) on
+`staged_diffs` and `grant_requests`, so it can learn the id of what it wrote and nothing
+else — not another subject's proposed content, nor their stated justification for wanting a
+grant. That required narrowing the inserts' `RETURNING` clauses, since Postgres demands
+`SELECT` on every column a `RETURNING` reads.
 
 The one that matters: `chuvar_agent` **cannot write `grants`**. With the shared owner
 credential, anything holding `DATABASE_URL` could `INSERT INTO grants` and give itself every
 scope, with a matching `audit_log` row — the consent model defeated in two statements, seen
 by no API-layer control.
+
+### Roles are cluster-global — collisions are refused
+
+Postgres roles live in the cluster, not the database. The migration stamps each role it
+creates with a `COMMENT` naming the database, and **refuses to run** if a role of that name
+already exists without a matching stamp. Sharing a role across two Chuvar databases would
+silently grant one deployment's data to the other's credential holders; that is a decision
+for someone who knows both deployments, not for whichever migration ran second.
+
+If you hit that refusal, either drop the colliding role or give this deployment its own
+cluster.
 
 ### Provisioning (required — the roles arrive unusable)
 
@@ -49,6 +66,43 @@ ALTER ROLE chuvar_agent WITH LOGIN PASSWORD 'generate-a-different-one';
 Then point each service at its own role — `apiserver` at `chuvar_app`, `mcpserver` at
 `chuvar_agent`, `cmd/migrate` at the owner — via their `DATABASE_URL`. The warning stops
 when a service is no longer over-privileged, which is how you confirm it took effect.
+
+### Rotating the database password
+
+The compose file interpolates `${CHUVAR_DB_PASSWORD:-chuvar_dev_only}`. The fallback exists
+so a fresh clone runs with no setup; it is checked in, so treat it as public.
+
+```sh
+# Generate once and reuse, so .env and the database cannot disagree — and edit
+# the existing line rather than appending a second one (the last wins, which
+# makes a duplicate silently authoritative).
+NEW_PW="$(openssl rand -base64 32)"
+
+docker compose exec -T postgres psql -U chuvar -d chuvar \
+  -c "ALTER ROLE chuvar WITH PASSWORD '$NEW_PW';"
+
+touch .env
+sed -i '/^CHUVAR_DB_PASSWORD=/d' .env
+printf 'CHUVAR_DB_PASSWORD=%s\n' "$NEW_PW" >> .env
+chmod 600 .env
+
+docker compose up -d --force-recreate postgres
+unset NEW_PW
+```
+
+Change the database first: if the `ALTER ROLE` fails you still have a working
+`.env`, whereas the reverse leaves the file claiming a password the server never took.
+
+Then update each service's connection string. Prefer a file over an environment variable:
+
+```sh
+install -m 600 /dev/null ~/.config/chuvar/apiserver.url
+printf 'postgres://chuvar_app:PW@127.0.0.1:54322/chuvar?sslmode=disable\n' > ~/.config/chuvar/apiserver.url
+DATABASE_URL_FILE=~/.config/chuvar/apiserver.url go run ./cmd/apiserver
+```
+
+`DATABASE_URL_FILE` wins over `DATABASE_URL` when both are set, and the service refuses to
+start if the file is group- or world-readable.
 
 ### What this does and does not do
 

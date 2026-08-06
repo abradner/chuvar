@@ -188,7 +188,7 @@ func (q *Queries) InsertFactScope(ctx context.Context, arg InsertFactScopeParams
 const insertStagedDiff = `-- name: InsertStagedDiff :one
 INSERT INTO staged_diffs (subject, content, proposed_scopes, target_fact_id, dedupe_verdict, dedupe_candidate_fact_id)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, subject, content, proposed_scopes, target_fact_id, status, dedupe_verdict, dedupe_candidate_fact_id, created_at
+RETURNING id, status, created_at
 `
 
 type InsertStagedDiffParams struct {
@@ -201,17 +201,17 @@ type InsertStagedDiffParams struct {
 }
 
 type InsertStagedDiffRow struct {
-	ID                    string
-	Subject               string
-	Content               string
-	ProposedScopes        []string
-	TargetFactID          *string
-	Status                string
-	DedupeVerdict         *string
-	DedupeCandidateFactID *string
-	CreatedAt             time.Time
+	ID        string
+	Status    string
+	CreatedAt time.Time
 }
 
+// Returns only the columns the database generates. Everything else in the row
+// is the caller's own input, so echoing it back is redundant — and it is not
+// free: RETURNING requires SELECT privilege on every column it reads, so a
+// wide RETURNING forced a table-wide SELECT grant for cmd/mcpserver, letting an
+// agent enumerate every other subject's proposed content. Narrow here, and the
+// grant narrows with it (see the least_privilege_roles migration).
 func (q *Queries) InsertStagedDiff(ctx context.Context, arg InsertStagedDiffParams) (InsertStagedDiffRow, error) {
 	row := q.db.QueryRow(ctx, insertStagedDiff,
 		arg.Subject,
@@ -222,17 +222,7 @@ func (q *Queries) InsertStagedDiff(ctx context.Context, arg InsertStagedDiffPara
 		arg.DedupeCandidateFactID,
 	)
 	var i InsertStagedDiffRow
-	err := row.Scan(
-		&i.ID,
-		&i.Subject,
-		&i.Content,
-		&i.ProposedScopes,
-		&i.TargetFactID,
-		&i.Status,
-		&i.DedupeVerdict,
-		&i.DedupeCandidateFactID,
-		&i.CreatedAt,
-	)
+	err := row.Scan(&i.ID, &i.Status, &i.CreatedAt)
 	return i, err
 }
 

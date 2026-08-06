@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -160,9 +161,15 @@ func bootstrapReviewerToken(ctx context.Context, st *store.Store) error {
 		return nil
 	}
 
-	bootstrap, ok := os.LookupEnv("REVIEWER_BOOTSTRAP_TOKEN")
-	if !ok || bootstrap == "" {
-		return fmt.Errorf("apiserver: no reviewer tokens exist and required environment variable REVIEWER_BOOTSTRAP_TOKEN is not set")
+	// config.Secret so REVIEWER_BOOTSTRAP_TOKEN_FILE works here too. Only an
+	// absent value is the "you must configure this" case; a file that exists but
+	// is unreadable or group-readable is a different problem and says so.
+	bootstrap, err := config.Secret("REVIEWER_BOOTSTRAP_TOKEN")
+	if errors.Is(err, config.ErrNotSet) {
+		return fmt.Errorf("apiserver: no reviewer tokens exist and REVIEWER_BOOTSTRAP_TOKEN (or REVIEWER_BOOTSTRAP_TOKEN_FILE) is not set")
+	}
+	if err != nil {
+		return fmt.Errorf("apiserver: reading REVIEWER_BOOTSTRAP_TOKEN: %w", err)
 	}
 	// No TOTP secret for the bootstrap token itself (empty string — see
 	// CreateReviewerToken): it's a break-glass way in, not a device meant for

@@ -127,14 +127,15 @@ func TestAgentRoleCanDoItsActualJob(t *testing.T) {
 		require.NoError(t, agent.QueryRow(ctx, `SELECT count(*) FROM fact_scopes`).Scan(&n))
 	})
 
-	// INSERT ... RETURNING, the shape ProposeDiff and RequestGrant actually use.
-	// This is what makes SELECT on these two tables necessary rather than
-	// generous, and it would fail with INSERT alone.
+	// INSERT ... RETURNING over only the generated columns — the shape
+	// ProposeDiff and RequestGrant now use. Column-level SELECT is what makes
+	// this work without granting a table-wide read.
 	t.Run("stage a diff with RETURNING", func(t *testing.T) {
 		var id string
 		require.NoError(t, agent.QueryRow(ctx,
 			`INSERT INTO staged_diffs (subject, content, proposed_scopes)
-			 VALUES ('agent-a', 'proposed content', ARRAY['identity.basic']) RETURNING id`).Scan(&id))
+			 VALUES ('agent-a', 'proposed content', ARRAY['identity.basic'])
+			 RETURNING id, status, created_at`).Scan(&id, new(string), new(any)))
 		require.NotEmpty(t, id)
 	})
 
@@ -142,7 +143,8 @@ func TestAgentRoleCanDoItsActualJob(t *testing.T) {
 		var id string
 		require.NoError(t, agent.QueryRow(ctx,
 			`INSERT INTO grant_requests (subject, requested_scopes, kind, depth)
-			 VALUES ('agent-a', ARRAY['identity.basic'], 'memory', 'facts') RETURNING id`).Scan(&id))
+			 VALUES ('agent-a', ARRAY['identity.basic'], 'memory', 'facts')
+			 RETURNING id, status, created_at`).Scan(&id, new(string), new(any)))
 		require.NotEmpty(t, id)
 	})
 }
@@ -203,9 +205,18 @@ func TestNewTablesAreAgentInvisibleButAppWritable(t *testing.T) {
 	err = agent.QueryRow(ctx, `SELECT count(*) FROM e8_future_table`).Scan(&n)
 	require.Error(t, err, "a newly created table was readable by the agent role by default")
 
+	// Exercise every verb ALTER DEFAULT PRIVILEGES is supposed to confer, not
+	// just SELECT: a regression that granted reads but dropped writes would
+	// otherwise pass here while breaking apiserver at runtime.
 	app := connectAs(t, admin, "chuvar_app")
 	require.NoError(t, app.QueryRow(ctx, `SELECT count(*) FROM e8_future_table`).Scan(&n),
-		"a newly created table was not writable by the app role; ALTER DEFAULT PRIVILEGES has regressed")
+		"app role cannot read a new table; ALTER DEFAULT PRIVILEGES has regressed")
+	_, err = app.Exec(ctx, `INSERT INTO e8_future_table (id) VALUES (1)`)
+	require.NoError(t, err, "app role cannot INSERT into a new table")
+	_, err = app.Exec(ctx, `UPDATE e8_future_table SET id = 2 WHERE id = 1`)
+	require.NoError(t, err, "app role cannot UPDATE a new table")
+	_, err = app.Exec(ctx, `DELETE FROM e8_future_table WHERE id = 2`)
+	require.NoError(t, err, "app role cannot DELETE from a new table")
 }
 
 // Both services call CheckSchema at boot, which reads golang-migrate's
@@ -240,4 +251,47 @@ func TestServiceRolesCannotWriteTheVersionTable(t *testing.T) {
 			require.Error(t, err, "%s could write schema_migrations", role)
 		})
 	}
+}
+
+// The point of narrowing the RETURNING clauses: an agent can learn the id of
+// what it just wrote, and read nothing else. Before this, RETURNING the whole
+// row forced a table-wide SELECT grant, letting any agent enumerate every other
+// subject's proposed content and stated justifications — a cross-subject read
+// in a system whose premise is that subjects see only what they are granted.
+func TestAgentRoleCannotReadOtherSubjectsProposals(t *testing.T) {
+	admin := adminPool(t)
+	ctx := context.Background()
+
+	// Someone else's pending work, written by a privileged caller.
+	_, err := admin.Exec(ctx,
+		`INSERT INTO staged_diffs (subject, content, proposed_scopes)
+		 VALUES ('someone-else', 'a secret nobody else should read', ARRAY['identity.basic'])`)
+	require.NoError(t, err)
+	_, err = admin.Exec(ctx,
+		`INSERT INTO grant_requests (subject, requested_scopes, kind, depth, justification)
+		 VALUES ('someone-else', ARRAY['identity.basic'], 'memory', 'facts', 'a private reason')`)
+	require.NoError(t, err)
+
+	agent := connectAs(t, admin, "chuvar_agent")
+
+	for _, q := range []string{
+		`SELECT content FROM staged_diffs`,
+		`SELECT subject FROM staged_diffs`,
+		`SELECT justification FROM grant_requests`,
+		`SELECT subject FROM grant_requests`,
+		`SELECT * FROM staged_diffs`,
+	} {
+		t.Run(q, func(t *testing.T) {
+			rows, err := agent.Query(ctx, q)
+			if err == nil {
+				rows.Close()
+				err = rows.Err()
+			}
+			require.Error(t, err, "the agent role could run: %s", q)
+		})
+	}
+
+	// The generated columns it does need remain readable.
+	var n int
+	require.NoError(t, agent.QueryRow(ctx, `SELECT count(id) FROM staged_diffs`).Scan(&n))
 }

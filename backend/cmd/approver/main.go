@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/abradner/chuvar/backend/internal/config"
 	"github.com/abradner/chuvar/backend/internal/sseclient"
 )
 
@@ -34,7 +36,14 @@ func main() {
 	// credential in this codebase (AGENTS.md §6): a TUI that silently started
 	// with no way to authenticate would just fail every request one at a time
 	// instead of explaining the problem once, up front.
-	token, ok := os.LookupEnv("CHUVAR_API_TOKEN")
+	// config.Secret so CHUVAR_API_TOKEN_FILE works here too — see
+	// config.requireSecret on why a file beats an environment variable.
+	token, secretErr := config.Secret("CHUVAR_API_TOKEN")
+	if secretErr != nil && !errors.Is(secretErr, config.ErrNotSet) {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", "approver", secretErr)
+		os.Exit(1)
+	}
+	ok := secretErr == nil
 	if !ok || token == "" {
 		fmt.Fprintln(os.Stderr, "approver: required environment variable CHUVAR_API_TOKEN is not set")
 		fmt.Fprintln(os.Stderr, "approver: issue one via POST /api/tokens (see internal/api/tokens.go) using an existing token, or the REVIEWER_BOOTSTRAP_TOKEN on a fresh install")
