@@ -123,23 +123,36 @@ Operationally, starting now:
 Not every binary is equally trusted, and the differences are deliberate. Before
 adding a binary or moving work between them, place it on this table:
 
-| Binary | Launched by | Holds | Migrates? | Master key? |
+| Binary | Launched by | DB role | Migrates? | Master key? |
 |---|---|---|---|---|
-| `cmd/apiserver` | operator | `DATABASE_URL`, custody master key | yes | **yes** — only process that verifies TOTP |
-| `cmd/migrate` | operator | `DATABASE_URL` | yes (that's its whole job) | no |
-| `cmd/mcpserver` | **an agent host** | `DATABASE_URL` (see below) | **no** — `db.CheckSchema` only | **no** |
-| `cmd/approver`, `cmd/pushbridge` | operator | `CHUVAR_API_TOKEN` only | no | no |
+| `cmd/apiserver` | operator | `chuvar_app` — DML, no DDL | **no** — `db.CheckSchema` only | **yes** — only process that verifies TOTP |
+| `cmd/migrate` | operator | owner — the only role with DDL | yes (that's its whole job) | no |
+| `cmd/mcpserver` | **an agent host** | `chuvar_agent` — narrow (see below) | **no** — `db.CheckSchema` only | **no** |
+| `cmd/approver`, `cmd/pushbridge` | operator | none — `CHUVAR_API_TOKEN` only | no | no |
+
+**Exactly one binary migrates.** `cmd/migrate` holds DDL; nothing else does, including
+`apiserver`. On a fresh database run it before starting anything — both services verify the
+schema and refuse to start if it is behind.
 
 `cmd/mcpserver` is the one that runs inside an agent's process tree, so it is
 the one that must hold least. It verifies the schema and refuses to start if it
 is stale, rather than migrating — an agent-side process silently applying DDL is
 how a migration ends up run by whoever happened to launch a tool first.
 
-**It still holds `DATABASE_URL`, and that is still the open gap** — anything with
-those credentials can run DDL through SQL regardless of what the Go code does.
-Removing it is ticket E3 (mcpserver becomes an API client with an agent-class
-token). Until then: never widen what mcpserver holds, and never add a new
-root-of-trust to any binary an agent launches.
+`chuvar_agent` is derived from what the code actually calls, not from what seemed
+plausible: SELECT on `grants`, `grant_scopes`, `facts`, `fact_scopes`, `staged_diffs`,
+`grant_requests`; INSERT on `staged_diffs`, `grant_requests`, `audit_log`. It has **no
+access at all** to `reviewer_tokens` or `data_keys`, and **INSERT without SELECT** on
+`audit_log` — it can append to the audit trail but never read it back.
+
+**The residual gap: mcpserver still holds a database credential.** The role constrains what
+that credential can *do*, which is why an agent can no longer `INSERT INTO grants` and grant
+itself every scope — but the connection still exists. Removing it entirely is ticket E3
+(mcpserver becomes an API client with an agent-class token). Until then: never widen
+`chuvar_agent`, and never add a new root-of-trust to any binary an agent launches.
+
+New tables are granted to `chuvar_app` automatically (`ALTER DEFAULT PRIVILEGES`) and to
+`chuvar_agent` **never** — widening the agent's view is always a deliberate act.
 
 ## 4. Development Essentials
 
@@ -194,6 +207,13 @@ Things that cost real time to discover once — don't rediscover them:
   hits it again.
 - **zsh reserves `status` as a special read-only variable name.** Never use it as a
   loop/shell variable (`for status in ...` breaks) — use `hc`, `st`, or similar.
+- **`gh stack submit` creates PRs as drafts**, which silently breaks the batch-review
+  workflow ("open every PR ready-for-review immediately") and blocks a merge train
+  mid-run. Mark them ready explicitly. Related: `gh pr merge` and the REST
+  `PUT .../merge` both **refuse PRs that belong to a gh-stack** — `gh stack unstack <n>`
+  frees them without touching the PRs or their base branches. This repo auto-deletes
+  merged branches and GitHub auto-retargets children, so a redundant retarget returns a
+  harmless 422; verify the base rather than treating it as a failure.
 - **`go test -race` does not work on this machine.** ThreadSanitizer aborts with
   `unsupported VMA range / Found 47 - Supported 48` — the Pi's kernel uses a 47-bit
   virtual address space and TSan requires 48. This is a host limitation, not a
