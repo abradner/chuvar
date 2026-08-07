@@ -72,7 +72,19 @@ type Querier interface {
 	// grant narrows with it (see the least_privilege_roles migration).
 	InsertStagedDiff(ctx context.Context, arg InsertStagedDiffParams) (InsertStagedDiffRow, error)
 	ListGrantRequests(ctx context.Context, status string) ([]GrantRequest, error)
+	// Explicit-bound variant of ListGrantRequests for the /api/events SSE poll
+	// loop, same rationale as staged_diffs.sql's ListStagedDiffsBounded. The REST
+	// listing endpoint (GET /api/grant-requests, internal/api/grant_requests.go)
+	// keeps calling the plain ListGrantRequests above unchanged — pagination for
+	// that endpoint isn't this ticket's scope (a separate ticket in the same
+	// batch); only its poll-loop caller needed a bound here.
+	ListGrantRequestsBounded(ctx context.Context, arg ListGrantRequestsBoundedParams) ([]GrantRequest, error)
 	ListGrantScopes(ctx context.Context, grantID string) ([]string, error)
+	// Unpaginated, subject-scoped by design: this is also what
+	// internal/mcptools/list_grants.go's list_grants tool calls for an agent to
+	// list its own grants, a small result set by construction — not the
+	// reviewer-facing "list everything" surface the pagination ticket is about.
+	// ListGrantsPage (below) is the paginated sibling used by GET /api/grants.
 	// Scopes come back via an array_agg subquery (same shape as
 	// ListGrantsNearingExpiry and GetFact/SearchFacts' fact_scopes aggregation in
 	// facts.sql) rather than a separate ListGrantScopes call per row, to avoid an
@@ -90,8 +102,41 @@ type Querier interface {
 	// (polls/sec) — worth avoiding at the query level rather than in a hot loop.
 	// Found in review.
 	ListGrantsNearingExpiry(ctx context.Context, expiresAt pgtype.Timestamptz) ([]ListGrantsNearingExpiryRow, error)
+	// Cursor-paginated listing for GET /api/grants (internal/api/grants.go).
+	// Newest first, matching ListGrants' own ORDER BY, so the cursor comparison
+	// runs the opposite direction from ListStagedDiffsPage's oldest-first queue
+	// order (staged_diffs.sql): a page here is "every one of subject's grants
+	// strictly older than the last row already returned." Same (created_at, id)
+	// keyset rationale as ListStagedDiffsPage — see that query's doc comment.
+	// Scopes use the same array_agg subquery as ListGrants above, for the same
+	// N+1 reason.
+	ListGrantsPage(ctx context.Context, arg ListGrantsPageParams) ([]ListGrantsPageRow, error)
 	ListReviewerTokens(ctx context.Context) ([]ListReviewerTokensRow, error)
-	ListStagedDiffs(ctx context.Context, status string) ([]StagedDiff, error)
+	// Explicit-bound (not paginated) listing for the /api/events SSE poll loop
+	// (internal/api/events.go's streamEvents): that loop re-runs a status query
+	// every eventPollInterval per connected client and needs a snapshot of
+	// "currently pending," not a page it resumes across polls — there's no
+	// cursor to carry between ticks, only a cap, so a large backlog can't turn a
+	// fixed-cadence poll into an unbounded-cost one. Same shape/rationale as
+	// ListGrantsNearingExpiry (grants.sql), bounded for the identical reason.
+	ListStagedDiffsBounded(ctx context.Context, arg ListStagedDiffsBoundedParams) ([]StagedDiff, error)
+	// Cursor-paginated listing for GET /api/staged-diffs (internal/api/
+	// staged_diffs.go). Keyed on (created_at, id), not an offset: the pending
+	// queue this backs gains rows (new proposals) and loses them (approvals/
+	// rejections) continuously while a reviewer works it, and offset pagination
+	// silently skips or repeats rows across that churn — a keyset comparison
+	// against the last row actually returned doesn't, since it isn't a row
+	// count. id breaks ties between rows sharing a created_at (uuidv7 IDs are
+	// roughly time-ordered but created_at itself isn't guaranteed distinct down
+	// to its own precision) — without it, two same-timestamp rows could be
+	// skipped or duplicated across the page boundary, depending on Postgres'
+	// otherwise-unspecified tie order. sqlc.narg(cursor_created_at) IS NULL means
+	// "first page," matching internal/api's "no cursor" convention.
+	//
+	// LIMIT is bound to limit+1, not limit, by the caller (store.
+	// ListStagedDiffsPage) — fetching one extra row is how that caller answers
+	// "does another page exist" without a second query.
+	ListStagedDiffsPage(ctx context.Context, arg ListStagedDiffsPageParams) ([]StagedDiff, error)
 	LoadGrantRequestForUpdate(ctx context.Context, id string) (LoadGrantRequestForUpdateRow, error)
 	LoadStagedDiffForUpdate(ctx context.Context, id string) (LoadStagedDiffForUpdateRow, error)
 	LockTargetFact(ctx context.Context, id string) (*time.Time, error)

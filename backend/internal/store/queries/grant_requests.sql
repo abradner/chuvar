@@ -15,6 +15,16 @@ FROM grant_requests WHERE id = $1;
 SELECT id, subject, requested_scopes, depth, requested_ttl_seconds, justification, status, created_at, decided_at, decided_by, resulting_grant_id, kind
 FROM grant_requests WHERE status = $1 ORDER BY created_at ASC;
 
+-- name: ListGrantRequestsBounded :many
+-- Explicit-bound variant of ListGrantRequests for the /api/events SSE poll
+-- loop, same rationale as staged_diffs.sql's ListStagedDiffsBounded. The REST
+-- listing endpoint (GET /api/grant-requests, internal/api/grant_requests.go)
+-- keeps calling the plain ListGrantRequests above unchanged — pagination for
+-- that endpoint isn't this ticket's scope (a separate ticket in the same
+-- batch); only its poll-loop caller needed a bound here.
+SELECT id, subject, requested_scopes, depth, requested_ttl_seconds, justification, status, created_at, decided_at, decided_by, resulting_grant_id, kind
+FROM grant_requests WHERE status = @status ORDER BY created_at ASC LIMIT @lim;
+
 -- name: LoadGrantRequestForUpdate :one
 SELECT subject, requested_scopes, depth, requested_ttl_seconds, status, kind FROM grant_requests WHERE id = $1 FOR UPDATE;
 

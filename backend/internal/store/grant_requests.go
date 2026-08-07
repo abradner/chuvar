@@ -132,6 +132,30 @@ func (s *Store) ListGrantRequests(ctx context.Context, status GrantRequestStatus
 	return out, nil
 }
 
+// ListGrantRequestsBounded returns up to limit requests in status, oldest
+// first, with no cursor/resumption support — same rationale as staged_diffs.
+// go's ListStagedDiffsBounded: the /api/events SSE poll loop needs a bounded
+// snapshot each tick, not a page it walks forward. The REST listing endpoint
+// (GET /api/grant-requests) keeps calling ListGrantRequests above, unbounded
+// — pagination for that endpoint is a separate ticket, not this one's scope.
+func (s *Store) ListGrantRequestsBounded(ctx context.Context, status GrantRequestStatus, limit int) ([]GrantRequest, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("store: limit must be positive")
+	}
+	rows, err := s.q.ListGrantRequestsBounded(ctx, sqlcgen.ListGrantRequestsBoundedParams{
+		Status: string(status),
+		Lim:    int64(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: list grant requests bounded: %w", err)
+	}
+	out := make([]GrantRequest, len(rows))
+	for i, r := range rows {
+		out[i] = toGrantRequest(r)
+	}
+	return out, nil
+}
+
 // GetGrantRequest fetches a single request by ID.
 func (s *Store) GetGrantRequest(ctx context.Context, id string) (GrantRequest, error) {
 	row, err := s.q.GetGrantRequest(ctx, id)

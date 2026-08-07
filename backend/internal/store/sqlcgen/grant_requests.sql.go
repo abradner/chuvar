@@ -152,6 +152,55 @@ func (q *Queries) ListGrantRequests(ctx context.Context, status string) ([]Grant
 	return items, nil
 }
 
+const listGrantRequestsBounded = `-- name: ListGrantRequestsBounded :many
+SELECT id, subject, requested_scopes, depth, requested_ttl_seconds, justification, status, created_at, decided_at, decided_by, resulting_grant_id, kind
+FROM grant_requests WHERE status = $1 ORDER BY created_at ASC LIMIT $2
+`
+
+type ListGrantRequestsBoundedParams struct {
+	Status string
+	Lim    int64
+}
+
+// Explicit-bound variant of ListGrantRequests for the /api/events SSE poll
+// loop, same rationale as staged_diffs.sql's ListStagedDiffsBounded. The REST
+// listing endpoint (GET /api/grant-requests, internal/api/grant_requests.go)
+// keeps calling the plain ListGrantRequests above unchanged — pagination for
+// that endpoint isn't this ticket's scope (a separate ticket in the same
+// batch); only its poll-loop caller needed a bound here.
+func (q *Queries) ListGrantRequestsBounded(ctx context.Context, arg ListGrantRequestsBoundedParams) ([]GrantRequest, error) {
+	rows, err := q.db.Query(ctx, listGrantRequestsBounded, arg.Status, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GrantRequest
+	for rows.Next() {
+		var i GrantRequest
+		if err := rows.Scan(
+			&i.ID,
+			&i.Subject,
+			&i.RequestedScopes,
+			&i.Depth,
+			&i.RequestedTtlSeconds,
+			&i.Justification,
+			&i.Status,
+			&i.CreatedAt,
+			&i.DecidedAt,
+			&i.DecidedBy,
+			&i.ResultingGrantID,
+			&i.Kind,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const loadGrantRequestForUpdate = `-- name: LoadGrantRequestForUpdate :one
 SELECT subject, requested_scopes, depth, requested_ttl_seconds, status, kind FROM grant_requests WHERE id = $1 FOR UPDATE
 `
