@@ -237,7 +237,7 @@ func (s *Store) RejectDiff(ctx context.Context, diffID, decidedBy string) error 
 		return fmt.Errorf("store: diff %s is not pending", diffID)
 	}
 
-	if err := logAudit(ctx, qtx, "diff_rejected", decidedBy, nil, nil, &diffID, nil, nil); err != nil {
+	if err := logAudit(ctx, qtx, "diff_rejected", decidedBy, nil, nil, &diffID, nil, nil, nil); err != nil {
 		return err
 	}
 
@@ -364,7 +364,7 @@ func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedd
 		return Fact{}, fmt.Errorf("store: mark diff committed: %w", err)
 	}
 
-	if err := logAudit(ctx, qtx, "diff_committed", decidedBy, &f.ID, nil, &diffID, nil, diff.ProposedScopes); err != nil {
+	if err := logAudit(ctx, qtx, "diff_committed", decidedBy, &f.ID, nil, &diffID, nil, diff.ProposedScopes, nil); err != nil {
 		return Fact{}, err
 	}
 

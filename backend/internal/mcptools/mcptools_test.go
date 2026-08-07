@@ -611,6 +611,124 @@ func TestReadWithScopeCheck_FullDepthAddsProvenance_FactsDepthDoesNot_ViaMCP(t *
 	})
 }
 
+// TestReadWithScopeCheck_AuditsPerFactDepth_ViaMCP is the regression test for the
+// audit gap this ticket closes: a "read" audit row used to record only the
+// subject's granted scopes, which answers "what was this agent allowed to see"
+// but not "what did it actually see, and at what fidelity" — the question that
+// matters after a suspected compromise. Two facts, two different granted
+// depths, one read call: proves the audit row carries a per-fact depth (not one
+// depth for the whole call), because a single scalar would be a lie the moment
+// depth varies within a call, which effectiveDepth (facts.go) means it can.
+func TestReadWithScopeCheck_AuditsPerFactDepth_ViaMCP(t *testing.T) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set; skipping mcptools integration test")
+	}
+	if err := db.Migrate(url); err != nil {
+		t.Fatalf("db.Migrate() error = %v", err)
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+		t.Fatalf("truncating tables: %v", err)
+	}
+
+	st := store.New(pool)
+	emb := embed.Stub{}
+	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
+	server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
+	Register(server, "agent-a", st, emb, b)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server.Connect() error = %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "test"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	coffee := callTool[proposeWriteOutput](t, session, "propose_write", proposeWriteArgs{
+		Content:        "user's favorite coffee order is a flat white",
+		ProposedScopes: []string{"preferences.coffee"},
+	})
+	tea := callTool[proposeWriteOutput](t, session, "propose_write", proposeWriteArgs{
+		Content:        "user's favorite tea order is earl grey",
+		ProposedScopes: []string{"preferences.tea"},
+	})
+
+	if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.coffee"}, "memory", "full", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+	if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.tea"}, "memory", "summary", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	coffeeVec, err := emb.Embed(ctx, "user's favorite coffee order is a flat white")
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	coffeeFact, err := st.CommitDiff(ctx, coffee.DiffID, "human-reviewer", coffeeVec, "coffee summary")
+	if err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+	teaVec, err := emb.Embed(ctx, "user's favorite tea order is earl grey")
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	teaFact, err := st.CommitDiff(ctx, tea.DiffID, "human-reviewer", teaVec, "tea summary")
+	if err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	out := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
+		Query:           "favorite",
+		RequestedScopes: []string{"preferences.coffee", "preferences.tea"},
+		Limit:           10,
+	})
+	if out.Status != "ok" {
+		t.Fatalf("read status = %q, want ok", out.Status)
+	}
+	if len(out.Facts) != 2 {
+		t.Fatalf("read facts = %+v, want 2", out.Facts)
+	}
+
+	wantDepth := map[string]string{coffeeFact.ID: "full", teaFact.ID: "summary"}
+	for _, f := range out.Facts {
+		if f.Depth != wantDepth[f.ID] {
+			t.Errorf("fact %s Depth = %q, want %q", f.ID, f.Depth, wantDepth[f.ID])
+		}
+	}
+
+	var detailJSON []byte
+	if err := pool.QueryRow(ctx,
+		`SELECT detail FROM audit_log WHERE event_type = 'read' AND subject = 'agent-a' ORDER BY created_at DESC LIMIT 1`,
+	).Scan(&detailJSON); err != nil {
+		t.Fatalf("querying audit_log.detail: %v", err)
+	}
+	var detail store.ReadAuditDetail
+	if err := json.Unmarshal(detailJSON, &detail); err != nil {
+		t.Fatalf("unmarshaling audit_log.detail %s: %v", detailJSON, err)
+	}
+	if len(detail.Facts) != 2 {
+		t.Fatalf("audit detail facts = %+v, want 2", detail.Facts)
+	}
+	gotDepth := make(map[string]string, len(detail.Facts))
+	for _, f := range detail.Facts {
+		gotDepth[f.FactID] = f.Depth
+	}
+	for factID, want := range wantDepth {
+		if got := gotDepth[factID]; got != want {
+			t.Errorf("audit detail depth for fact %s = %q, want %q", factID, got, want)
+		}
+	}
+}
+
 func TestGrantedScopeStrs_DedupesWhenSameScopeAtDifferentDepths(t *testing.T) {
 	// GrantedScopeDepths (its query is DISTINCT on (scope, depth), not scope
 	// alone) can legitimately return the same scope twice when two active
