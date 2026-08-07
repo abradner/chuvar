@@ -2,6 +2,7 @@ package mcptools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -55,13 +56,18 @@ func registerProposeWrite(s *mcp.Server, subject string, b *bouncer.Bouncer) {
 		diff, err := b.ProposeWrite(ctx, subject, args.Content, scopes, target)
 		if err != nil {
 			// bouncer.ProposeWrite's errors mix genuine input-validation failures
-			// (safe and useful to show the agent verbatim, e.g. a malformed scope)
-			// with wrapped store/DB errors (not safe — could contain raw driver
-			// text). Rather than trying to split those apart under time pressure,
-			// this masks all of them uniformly via toolError, same as the other
-			// two tools — trading some agent self-correction ergonomics for not
-			// leaking internals. Worth revisiting with a proper error taxonomy
-			// (e.g. a bouncer.ValidationError type) as a fast follow-up.
+			// (safe and useful to show the agent verbatim, e.g. a malformed scope —
+			// it can self-correct and retry) with wrapped store/DB errors (not
+			// safe — could contain raw driver text). errors.As against
+			// bouncer.ValidationError is how those are told apart: only errors
+			// ProposeWrite positively constructed as that type are returned
+			// verbatim; everything else — including anything unrecognized — still
+			// goes through toolError's generic masking. Fail closed: this is an
+			// allowlist, not a denylist.
+			var verr *bouncer.ValidationError
+			if errors.As(err, &verr) {
+				return nil, proposeWriteOutput{}, verr
+			}
 			return nil, proposeWriteOutput{}, toolError("propose_write", err)
 		}
 

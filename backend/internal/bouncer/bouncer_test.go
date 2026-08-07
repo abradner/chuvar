@@ -33,52 +33,71 @@ func (f fakeEmbedder) Embed(context.Context, string) ([]float32, error) {
 	return f.vec, f.err
 }
 
+// wantValidationError fails the test unless err is non-nil and satisfies
+// errors.As against *ValidationError — the taxonomy propose_write (mcptools)
+// relies on to decide what's safe to show an agent verbatim.
+func wantValidationError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("want a *ValidationError, got nil")
+	}
+	var verr *ValidationError
+	if !errors.As(err, &verr) {
+		t.Fatalf("err = %v (%T), want it to satisfy errors.As(err, &ValidationError{})", err, err)
+	}
+}
+
+// wantNotValidationError fails the test unless err is non-nil and does NOT
+// satisfy errors.As against *ValidationError — these are the failure paths
+// (misconfiguration, Classifier/Embedder/Store failures) that must stay masked
+// by mcptools' generic toolError, since they can carry internal details a
+// ValidationError is allowed to skip masking for.
+func wantNotValidationError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("want an error, got nil")
+	}
+	var verr *ValidationError
+	if errors.As(err, &verr) {
+		t.Fatalf("err = %v: satisfies errors.As(err, &ValidationError{}), want it to stay masked (not a caller-input failure)", err)
+	}
+}
+
 func TestProposeWrite_NoScopesIsError(t *testing.T) {
 	b := New(nil, embed.Stub{}, PassthroughClassifier{})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", nil, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with no proposed/classified scopes: want error, got nil")
-	}
+	wantValidationError(t, err)
 }
 
 func TestProposeWrite_InvalidScopeIsError(t *testing.T) {
 	b := New(nil, embed.Stub{}, PassthroughClassifier{})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"Not Valid"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with malformed scope: want error, got nil")
-	}
+	wantValidationError(t, err)
 }
 
 func TestProposeWrite_EmptyContentIsError(t *testing.T) {
 	b := New(nil, embed.Stub{}, PassthroughClassifier{})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with empty content: want error, got nil")
-	}
+	wantValidationError(t, err)
 }
 
 func TestProposeWrite_NilClassifierReturnsErrorNotPanic(t *testing.T) {
 	b := &Bouncer{Store: nil, Embedder: embed.Stub{}, Classifier: nil}
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with nil Classifier: want error, got nil")
-	}
+	// Misconfiguration, not a caller mistake — must stay masked.
+	wantNotValidationError(t, err)
 }
 
 func TestProposeWrite_NilEmbedderReturnsErrorNotPanic(t *testing.T) {
 	b := &Bouncer{Store: nil, Embedder: nil, Classifier: PassthroughClassifier{}}
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with nil Embedder: want error, got nil")
-	}
+	wantNotValidationError(t, err)
 }
 
 func TestProposeWrite_NilStoreReturnsErrorNotPanic(t *testing.T) {
 	b := &Bouncer{Store: nil, Embedder: embed.Stub{}, Classifier: PassthroughClassifier{}}
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with nil Store: want error, got nil")
-	}
+	wantNotValidationError(t, err)
 }
 
 type emptySliceClassifier struct{}
@@ -93,17 +112,34 @@ func TestProposeWrite_ClassifierNonNilEmptySliceOverridesCaller(t *testing.T) {
 	// the caller's proposed scopes down to nothing, not be treated as "no opinion."
 	b := New(nil, embed.Stub{}, emptySliceClassifier{})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with classifier returning non-nil empty scopes: want error (overridden to no scopes), got nil")
-	}
+	// "No scopes proposed or classified" is still safe/actionable even though the
+	// classifier (not the caller) drove it here — see the ValidationError call
+	// site's comment in bouncer.go.
+	wantValidationError(t, err)
 }
 
 func TestProposeWrite_ClassifierErrorIsWrapped(t *testing.T) {
 	b := New(nil, embed.Stub{}, fakeClassifier{err: errors.New("classifier unavailable")})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with a failing classifier: want error, got nil")
-	}
+	// A Classifier failure isn't caller input — could wrap an external service's
+	// error text — so it must stay masked.
+	wantNotValidationError(t, err)
+}
+
+type invalidScopeClassifier struct{}
+
+func (invalidScopeClassifier) Classify(context.Context, string) ([]scope.Scope, error) {
+	return []scope.Scope{"Not Valid"}, nil
+}
+
+func TestProposeWrite_ClassifierProducedInvalidScopeIsNotValidationError(t *testing.T) {
+	// A malformed scope from the CLASSIFIER (as opposed to one the caller
+	// proposed directly) is this service's own component misbehaving, not
+	// something the calling agent can fix by resubmitting — so, unlike the
+	// caller-supplied-scope case, it must stay masked rather than shown verbatim.
+	b := New(nil, embed.Stub{}, invalidScopeClassifier{})
+	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
+	wantNotValidationError(t, err)
 }
 
 func TestProposeWrite_EmbedderErrorIsWrapped(t *testing.T) {
@@ -112,9 +148,9 @@ func TestProposeWrite_EmbedderErrorIsWrapped(t *testing.T) {
 	// cleanly.
 	b := New(nil, fakeEmbedder{err: errors.New("embedding provider unavailable")}, PassthroughClassifier{})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with a failing embedder: want error, got nil")
-	}
+	// An Embedder failure isn't caller input either — same reasoning as the
+	// Classifier failure case above.
+	wantNotValidationError(t, err)
 }
 
 func TestProposeWrite_ClassifierOverridesProposedScopes(t *testing.T) {
@@ -242,6 +278,11 @@ func TestProposeWrite_TargetOutsideSubjectGrantsRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("ProposeWrite() targeting a fact outside the subject's actual grants: want error, got nil")
 	}
+	// This rejection comes back from store.ProposeDiff, wrapped by ProposeWrite's
+	// generic "bouncer: stage diff: %w" — it must NOT satisfy errors.As against
+	// ValidationError, or mcptools.propose_write would show a store-originated
+	// error verbatim, the exact leak the taxonomy exists to prevent.
+	wantNotValidationError(t, err)
 }
 
 func TestProposeWrite_EndToEnd(t *testing.T) {
