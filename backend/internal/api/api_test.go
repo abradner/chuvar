@@ -662,6 +662,30 @@ func TestApproveStagedDiff_NotFoundReturnsCleanError(t *testing.T) {
 	}
 }
 
+// TestApproveStagedDiff_RealDBErrorIsNotMaskedAs404 is the regression test for
+// the same error-masking class already fixed for grant requests in this batch
+// (TestGrantRequestActions_RealDBErrorIsNotMaskedAs404): approveStagedDiff used
+// to turn every GetStagedDiff failure into a 404, so a real database error would
+// come back indistinguishable from a bad ID. A syntactically invalid UUID
+// triggers a real Postgres error ("invalid input syntax for type uuid"), not
+// pgx.ErrNoRows — a realistic way to exercise the non-404 path through an
+// ordinary HTTP request, without needing to fake a connection failure.
+func TestApproveStagedDiff_RealDBErrorIsNotMaskedAs404(t *testing.T) {
+	srv, _ := testServer(t)
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/staged-diffs/not-a-valid-uuid/approve", nil)
+	if resp.StatusCode == http.StatusNotFound {
+		t.Fatal("POST approve with a malformed ID: got 404, want a real database error to surface as 500 (not masked as not-found)")
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("POST approve with a malformed ID: status = %d, want 500", resp.StatusCode)
+	}
+	body := decodeInto[errorResponse](t, resp)
+	if body.Error != "could not look up staged diff" {
+		t.Errorf("error message = %q, want a clean generic message, not a raw store/driver error", body.Error)
+	}
+}
+
 func TestRoutes_CORSReflectsConfiguredOriginOnly(t *testing.T) {
 	srv, _ := testServer(t)
 
