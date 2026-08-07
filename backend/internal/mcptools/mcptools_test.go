@@ -610,6 +610,15 @@ func TestReadWithScopeCheck_FullDepthAddsProvenance_FactsDepthDoesNot_ViaMCP(t *
 		if got.Provenance.SourceStagedDiffID != proposed.DiffID {
 			t.Errorf("Provenance.SourceStagedDiffID = %q, want %q", got.Provenance.SourceStagedDiffID, proposed.DiffID)
 		}
+		// Both starts of the bi-temporal window — created_at (system time)
+		// alongside valid_at (real-world time). created_at was missing from the
+		// wire shape entirely; found in review.
+		if got.Provenance.CreatedAt == "" {
+			t.Error("Provenance.CreatedAt is empty, want the fact's system-time start (RFC3339)")
+		}
+		if got.Provenance.ValidAt == "" {
+			t.Error("Provenance.ValidAt is empty, want the fact's real-world validity start (RFC3339)")
+		}
 	})
 }
 
@@ -872,7 +881,7 @@ func TestProposeWrite_RateLimited(t *testing.T) {
 	emb := embed.Stub{}
 	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
 	b.RateLimit = 2
-	b.RateLimitWindow = time.Minute
+	b.RateLimitWindow = time.Hour
 
 	newSession := func(subject string) *mcp.ClientSession {
 		server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)

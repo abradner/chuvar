@@ -82,10 +82,11 @@ func logAudit(ctx context.Context, q *sqlcgen.Queries, eventType, subject string
 	if scopes == nil {
 		scopes = []string{}
 	}
-	// detail is NOT NULL DEFAULT '{}'::jsonb — same story as scopes above: an
-	// explicit NULL bind would override that default, so callers with nothing
-	// structured to record (nearly all of them) pass nil for readability and get
-	// the column's own empty-object default instead.
+	// detail is NOT NULL DEFAULT '{}'::jsonb, but the INSERT always binds the
+	// column, so the DB default never actually applies — a nil bind would be
+	// SQL NULL and violate NOT NULL. Callers with nothing structured to record
+	// (nearly all of them) pass nil for readability; this normalization is what
+	// turns that into the empty object, not the column default.
 	if detail == nil {
 		detail = []byte("{}")
 	}

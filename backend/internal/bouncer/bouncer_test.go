@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/abradner/chuvar/backend/internal/db"
 	"github.com/abradner/chuvar/backend/internal/embed"
@@ -362,6 +363,7 @@ func TestProposeWrite_RateLimitExceededIsDistinguishable(t *testing.T) {
 
 	b := New(store.New(pool), embed.Stub{}, PassthroughClassifier{})
 	b.RateLimit = 1
+	b.RateLimitWindow = time.Hour
 
 	if _, err := b.ProposeWrite(ctx, "agent-a", "first fact, within the limit", []scope.Scope{"preferences.coffee"}, nil); err != nil {
 		t.Fatalf("ProposeWrite() (first, within limit) error = %v", err)

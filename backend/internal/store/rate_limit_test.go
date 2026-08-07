@@ -13,7 +13,7 @@ func TestCheckProposeWriteRateLimit_AllowsUpToLimit(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", 3, time.Minute); err != nil {
+		if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", 3, time.Hour); err != nil {
 			t.Fatalf("call %d within limit: unexpected error = %v", i, err)
 		}
 	}
@@ -24,11 +24,11 @@ func TestCheckProposeWriteRateLimit_BlocksOverLimit(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", 3, time.Minute); err != nil {
+		if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", 3, time.Hour); err != nil {
 			t.Fatalf("call %d within limit: unexpected error = %v", i, err)
 		}
 	}
-	if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", 3, time.Minute); !errors.Is(err, ErrRateLimited) {
+	if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", 3, time.Hour); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("call past the limit: err = %v, want ErrRateLimited", err)
 	}
 }
@@ -41,15 +41,15 @@ func TestCheckProposeWriteRateLimit_IsolatedPerSubject(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", 1, time.Minute); err != nil {
+	if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", 1, time.Hour); err != nil {
 		t.Fatalf("agent-a first call: unexpected error = %v", err)
 	}
-	if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", 1, time.Minute); !errors.Is(err, ErrRateLimited) {
+	if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", 1, time.Hour); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("agent-a second call: err = %v, want ErrRateLimited", err)
 	}
 
 	// agent-b has never called before; its own limit of 1 must still be fresh.
-	if err := s.CheckProposeWriteRateLimit(ctx, "agent-b", 1, time.Minute); err != nil {
+	if err := s.CheckProposeWriteRateLimit(ctx, "agent-b", 1, time.Hour); err != nil {
 		t.Fatalf("agent-b first call: unexpected error = %v (agent-a's limit leaked across subjects)", err)
 	}
 }
@@ -64,10 +64,10 @@ func TestCheckProposeWriteRateLimit_NonPositiveConfigFailsClosed(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", 0, time.Minute); err == nil {
+	if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", 0, time.Hour); err == nil {
 		t.Fatal("limit=0: want an error (fail closed), got nil")
 	}
-	if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", -1, time.Minute); err == nil {
+	if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", -1, time.Hour); err == nil {
 		t.Fatal("limit=-1: want an error (fail closed), got nil")
 	}
 	if err := s.CheckProposeWriteRateLimit(ctx, "agent-a", 5, 0); err == nil {
@@ -98,7 +98,7 @@ func TestCheckProposeWriteRateLimit_ConcurrentCallsAreSerialized(t *testing.T) {
 	for i := 0; i < attempts; i++ {
 		go func(i int) {
 			defer wg.Done()
-			results[i] = s.CheckProposeWriteRateLimit(ctx, "agent-a", limit, time.Minute)
+			results[i] = s.CheckProposeWriteRateLimit(ctx, "agent-a", limit, time.Hour)
 		}(i)
 	}
 	wg.Wait()

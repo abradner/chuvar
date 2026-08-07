@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -705,6 +706,15 @@ func TestStagedDiffs_Pagination_InvalidCursorRejected(t *testing.T) {
 	resp := doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?cursor=not-a-valid-cursor!!", nil)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("GET /api/staged-diffs with a garbage cursor: status = %d, want 400", resp.StatusCode)
+	}
+
+	// A well-formed token whose ID half is not a UUID must also be a 400, not
+	// a 500 from the ::uuid cast inside the page query — found in review: the
+	// parser validated the timestamp but passed the ID through to Postgres.
+	badID := base64.RawURLEncoding.EncodeToString([]byte("2026-01-01T00:00:00Z|not-a-uuid"))
+	resp = doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?cursor="+badID, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("GET /api/staged-diffs with a non-UUID cursor ID: status = %d, want 400", resp.StatusCode)
 	}
 }
 

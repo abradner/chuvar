@@ -47,15 +47,17 @@ type factView struct {
 	Provenance *factProvenanceView `json:"provenance,omitempty"`
 }
 
-// factProvenanceView is the JSON shape of a "full"-depth fact's provenance —
-// see factView's doc comment and store.FactProvenance, which this mirrors
-// field-for-field (formatting times as RFC3339 strings, matching the rest of
-// this package's *string time convention — see formatTimePtr).
+// factProvenanceView is the JSON shape of a "full"-depth fact's provenance:
+// store.FactProvenance's fields plus the bi-temporal window's two starts,
+// CreatedAt (system time) and ValidAt (real-world time), which live on the
+// Fact itself. Times are formatted as RFC3339 strings, matching the rest of
+// this package's *string time convention — see formatTimePtr.
 type factProvenanceView struct {
 	SourceStagedDiffID string  `json:"source_staged_diff_id"`
 	DecidedBy          *string `json:"decided_by,omitempty"`
 	DecidedAt          *string `json:"decided_at,omitempty"`
 	SupersededBy       *string `json:"superseded_by,omitempty"`
+	CreatedAt          string  `json:"created_at"`
 	ValidAt            string  `json:"valid_at"`
 	InvalidAt          *string `json:"invalid_at,omitempty"`
 	ExpiredAt          *string `json:"expired_at,omitempty"`
@@ -173,6 +175,7 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 					DecidedBy:          p.DecidedBy,
 					DecidedAt:          formatTimePtr(p.DecidedAt),
 					SupersededBy:       p.SupersededBy,
+					CreatedAt:          f.CreatedAt.Format(time.RFC3339),
 					ValidAt:            f.ValidAt.Format(time.RFC3339),
 					InvalidAt:          formatTimePtr(p.InvalidAt),
 					ExpiredAt:          formatTimePtr(p.ExpiredAt),

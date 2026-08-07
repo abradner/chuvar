@@ -143,11 +143,16 @@ func envDurationOr(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	d, err := time.ParseDuration(v)
-	if err != nil {
+	if err != nil || d <= 0 {
 		// This is set-but-invalid, not merely unset — silently falling back here
 		// would hide a typo from whoever configured it. Still non-fatal: it's a
 		// tuning knob, not required config, so warn rather than fail boot.
-		slog.Warn("config: invalid duration, using default", "key", key, "value", v, "default", fallback, "error", err)
+		// Non-positive parses ("0", "-1s") count as invalid for the same reason
+		// envIntOr treats them so: no caller of this helper has a sane reading
+		// for a zero-or-negative duration, and the rate-limit window in
+		// particular would otherwise brick propose_write (the store fails
+		// closed on a non-positive window) off a single-character typo.
+		slog.Warn("config: invalid or non-positive duration, using default", "key", key, "value", v, "default", fallback, "error", err)
 		return fallback
 	}
 	return d

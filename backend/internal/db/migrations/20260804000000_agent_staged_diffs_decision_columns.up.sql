@@ -11,10 +11,19 @@
 -- justifications (subject, content, proposed_scopes) via a table-wide grant.
 -- decided_by/decided_at were never part of that set, and are not what the prior
 -- migration was narrowing against: they only exist on staged_diffs that have
--- already been decided, and the read path that will query them
--- (store.SearchFacts) reaches them only via facts already scope-filtered down
--- to what the caller's grant covers -- this is the provenance of a fact the
--- caller can already read, not a new window into pending review queues.
+-- already been decided, and the intended read path (store.SearchFacts) reaches
+-- them only via facts already scope-filtered down to what the caller's grant
+-- covers -- the provenance of a fact the caller can already read, not a new
+-- window into pending review queues.
+--
+-- Stated honestly: that scope-filtering lives in the query, not in this GRANT.
+-- The grant itself is table-wide for these two columns, so anything running
+-- arbitrary SQL as chuvar_agent can enumerate decided_by/decided_at across ALL
+-- staged_diffs rows (never subject/content/proposed_scopes -- those stay
+-- revoked). The accepted disclosure is approval metadata (a reviewer name and
+-- timestamp), and the boundary that scopes it per-grant is the service query,
+-- not Postgres. Row-scoping this at the DB layer would take RLS, which this
+-- schema does not use anywhere yet.
 --
 -- Without this grant, SearchFacts' new provenance join would work today only
 -- because chuvar_agent's role restriction is not yet enforced in any live

@@ -96,3 +96,23 @@ func TestLoad_InvalidOrNonPositiveRateLimitFallsBackToDefault(t *testing.T) {
 		})
 	}
 }
+
+// Same stance as the rate-limit count above, and higher stakes: the store
+// fails closed on a non-positive window, so "0" surviving Load() would brick
+// propose_write entirely off a one-character typo rather than falling back.
+func TestLoad_InvalidOrNonPositiveRateLimitWindowFallsBackToDefault(t *testing.T) {
+	for _, v := range []string{"not-a-duration", "0", "-1s"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://localhost:54322/chuvar")
+			t.Setenv("PROPOSE_WRITE_RATE_LIMIT_WINDOW", v)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() returned unexpected error: %v", err)
+			}
+			if cfg.ProposeWriteRateLimitWindow != time.Minute {
+				t.Errorf("ProposeWriteRateLimitWindow = %v, want fallback %v", cfg.ProposeWriteRateLimitWindow, time.Minute)
+			}
+		})
+	}
+}
