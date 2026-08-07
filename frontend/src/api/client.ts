@@ -56,6 +56,24 @@ export interface Fact {
   valid_at: string;
 }
 
+export interface ReviewerToken {
+  id: string;
+  label: string;
+  active: boolean;
+  created_at: string;
+  last_used_at?: string;
+  revoked_at?: string;
+}
+
+export interface CreatedReviewerToken extends ReviewerToken {
+  // token and totp_enroll_uri are both returned exactly once, in this response
+  // only — see backend/internal/api/tokens.go's createTokenResponse doc
+  // comment. Neither is recoverable afterward; losing them means starting
+  // over with a new token.
+  token: string;
+  totp_enroll_uri: string;
+}
+
 export interface GrantRequest {
   id: string;
   subject: string;
@@ -158,6 +176,19 @@ export const api = {
     request<Grant>(`/api/grant-requests/${id}/approve`, { method: "POST", totpCode }),
 
   denyGrantRequest: (id: string) => request<void>(`/api/grant-requests/${id}/deny`, { method: "POST" }),
+
+  listTokens: (signal?: AbortSignal) => request<ReviewerToken[]>("/api/tokens", { signal }),
+
+  // createToken's TOTP requirement is conditional server-side (backend's
+  // createToken doc comment): required once any device has ever been
+  // enrolled, not required for the very first (bootstrap) enrollment. totpCode
+  // is therefore optional here rather than mandatory like createGrant/
+  // approveGrantRequest/renewGrant — the caller passes what it has and the
+  // server decides whether it was needed.
+  createToken: (label: string, totpCode?: string) =>
+    request<CreatedReviewerToken>("/api/tokens", { method: "POST", body: JSON.stringify({ label }), totpCode }),
+
+  revokeToken: (id: string) => request<void>(`/api/tokens/${id}/revoke`, { method: "POST" }),
 };
 
 export { ApiError };

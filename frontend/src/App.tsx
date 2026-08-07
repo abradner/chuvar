@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { StagedDiffsPage } from "./pages/StagedDiffs";
 import { GrantsPage } from "./pages/Grants";
+import { TokensPage } from "./pages/Tokens";
 
-type Tab = "staged-diffs" | "grants";
+type Tab = "staged-diffs" | "grants" | "tokens";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("staged-diffs");
@@ -19,9 +20,16 @@ export default function App() {
           <button className={tab === "grants" ? "active" : ""} onClick={() => setTab("grants")}>
             Grants
           </button>
+          <button className={tab === "tokens" ? "active" : ""} onClick={() => setTab("tokens")}>
+            Tokens
+          </button>
         </nav>
       </header>
-      <main>{tab === "staged-diffs" ? <StagedDiffsPage /> : <GrantsPage />}</main>
+      <main>
+        {tab === "staged-diffs" && <StagedDiffsPage />}
+        {tab === "grants" && <GrantsPage />}
+        {tab === "tokens" && <TokensPage />}
+      </main>
     </div>
   );
 }
