@@ -8,41 +8,60 @@ import (
 	"github.com/abradner/chuvar/backend/internal/store/sqlcgen"
 )
 
-// ValidDepth mirrors the CHECK constraint on grants.depth/grant_requests.depth in
-// the schema — kept in sync by hand, not queried from the DB, since it changes
-// about as often as the migration itself. The single copy every layer that
-// accepts external input (this package, internal/api, internal/mcptools) now
-// calls, replacing three independently hand-synced maps that carried the
-// identical drift risk. Checking here means a bad value comes back as a clear
-// validation error instead of a raw Postgres check-constraint violation leaking
-// out.
+// depthOrder is the single source of truth for the depth vocabulary and its
+// permissiveness ordering, mirroring the CHECK constraint on
+// grants.depth/grant_requests.depth in the schema — kept in sync by hand, not
+// queried from the DB, since it changes about as often as the migration
+// itself. ValidDepth, depthRank and depthName all derive from this one slice
+// instead of each hand-encoding the same three values, which is what let them
+// drift back into three independently hand-synced copies after an earlier
+// consolidation (see Notion: depth vocabulary encoded in three places again).
+// Index order is the permissiveness order — not derivable by sorting the
+// strings themselves, since "facts" < "full" < "summary" alphabetically is
+// not that order.
+var depthOrder = []string{"summary", "facts", "full"}
+
+// ValidDepth reports whether depth is one of the three schema-valid values.
+// The single copy every layer that accepts external input (this package,
+// internal/api, internal/mcptools) calls. Checking here means a bad value
+// comes back as a clear validation error instead of a raw Postgres
+// check-constraint violation leaking out.
 func ValidDepth(depth string) bool {
-	switch depth {
-	case "summary", "facts", "full":
-		return true
-	default:
-		return false
+	for _, d := range depthOrder {
+		if d == depth {
+			return true
+		}
 	}
+	return false
 }
 
 // depthRank orders depths by permissiveness, for computing an effective depth
-// across multiple covering grants (facts.go's effectiveDepth) — not derivable
-// by sorting the strings themselves, since "facts" < "full" < "summary"
-// alphabetically is not the permissiveness order. Panics on an invalid depth:
-// every caller is expected to have already passed depth through ValidDepth
-// (at write time) or to be reading it back from a column the DB CHECK
-// constraint already restricts to these three values.
+// across multiple covering grants (facts.go's effectiveDepth). Panics on an
+// invalid depth: every caller is expected to have already passed depth
+// through ValidDepth (at write time) or to be reading it back from a column
+// the DB CHECK constraint already restricts to these three values.
 func depthRank(depth string) int {
-	switch depth {
-	case "summary":
-		return 0
-	case "facts":
-		return 1
-	case "full":
-		return 2
-	default:
-		panic(fmt.Sprintf("store: depthRank: invalid depth %q", depth))
+	for i, d := range depthOrder {
+		if d == depth {
+			return i
+		}
 	}
+	panic(fmt.Sprintf("store: depthRank: invalid depth %q", depth))
+}
+
+// depthName is depthRank's inverse, converting an effective-depth rank
+// (facts.go's effectiveDepth) back to its schema-valid string. Clamps rather
+// than panics on an out-of-range rank, matching the historical behaviour this
+// replaces (any rank higher than the top of depthOrder reads as the most
+// permissive depth, "full").
+func depthName(rank int) string {
+	if rank < 0 {
+		rank = 0
+	}
+	if rank >= len(depthOrder) {
+		rank = len(depthOrder) - 1
+	}
+	return depthOrder[rank]
 }
 
 // ValidKind mirrors the CHECK constraint on grants.kind/grant_requests.kind.

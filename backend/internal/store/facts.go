@@ -188,14 +188,3 @@ func effectiveDepth(factScopes []string, granted []GrantedScope) string {
 	}
 	return depthName(best)
 }
-
-func depthName(rank int) string {
-	switch rank {
-	case 0:
-		return "summary"
-	case 1:
-		return "facts"
-	default:
-		return "full"
-	}
-}
