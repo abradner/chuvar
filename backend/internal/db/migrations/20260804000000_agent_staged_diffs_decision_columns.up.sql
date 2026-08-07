@@ -1,0 +1,25 @@
+-- "full" depth adds a fact's provenance on top of its content — the approval
+-- trail (who decided the staged diff that produced it, and when), the
+-- supersession pointer, and the bi-temporal validity window (init migration's
+-- "progressive disclosure per Notion §3": summary -> facts -> full provenance;
+-- see mcptools.factView and store.SearchFacts). The approval trail lives on
+-- staged_diffs.decided_by/decided_at, reached via facts.source_staged_diff_id.
+--
+-- The least-privilege-roles migration (20260803000000) narrowed chuvar_agent's
+-- SELECT on staged_diffs to (id, status, created_at) specifically to stop an
+-- agent reading OTHER subjects' still-*pending* content and stated
+-- justifications (subject, content, proposed_scopes) via a table-wide grant.
+-- decided_by/decided_at were never part of that set, and are not what the prior
+-- migration was narrowing against: they only exist on staged_diffs that have
+-- already been decided, and the read path that will query them
+-- (store.SearchFacts) reaches them only via facts already scope-filtered down
+-- to what the caller's grant covers -- this is the provenance of a fact the
+-- caller can already read, not a new window into pending review queues.
+--
+-- Without this grant, SearchFacts' new provenance join would work today only
+-- because chuvar_agent's role restriction is not yet enforced in any live
+-- deployment (roles are created NOLOGIN/passwordless until an operator opts in
+-- -- see the least-privilege-roles migration's doc comment); it would break the
+-- moment an operator does. Granting it now keeps the schema honest about what
+-- mcpserver's actual runtime role needs.
+GRANT SELECT (decided_by, decided_at) ON staged_diffs TO chuvar_agent;

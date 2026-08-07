@@ -963,6 +963,66 @@ func TestSearchFacts_FactsAndFullDepthReturnContent(t *testing.T) {
 	}
 }
 
+// The ticket this implements: "full" depth is supposed to add a fact's
+// *provenance* on top of its content, not just be a synonym for "facts". This
+// asserts that split end to end through the real SearchFacts pipeline, not
+// just effectiveDepth's rank arithmetic.
+func TestSearchFacts_FullDepthAddsProvenance_FactsDepthDoesNot(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(35)
+	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite editor is neovim", []string{"preferences.tools"}, vec, nil, []string{"preferences.tools"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	fact, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, "editor preference summary")
+	if err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	factsResults, err := s.SearchFacts(ctx, "editor", vec, []GrantedScope{{Scope: "preferences.tools", Depth: "facts"}}, 10)
+	if err != nil {
+		t.Fatalf("SearchFacts() at facts depth error = %v", err)
+	}
+	if len(factsResults) != 1 {
+		t.Fatalf("SearchFacts() at facts depth = %+v, want 1 result", factsResults)
+	}
+	if factsResults[0].Provenance != nil {
+		t.Errorf("Provenance at facts depth = %+v, want nil (provenance is a full-depth-only projection)", factsResults[0].Provenance)
+	}
+
+	fullResults, err := s.SearchFacts(ctx, "editor", vec, []GrantedScope{{Scope: "preferences.tools", Depth: "full"}}, 10)
+	if err != nil {
+		t.Fatalf("SearchFacts() at full depth error = %v", err)
+	}
+	if len(fullResults) != 1 {
+		t.Fatalf("SearchFacts() at full depth = %+v, want 1 result", fullResults)
+	}
+	prov := fullResults[0].Provenance
+	if prov == nil {
+		t.Fatalf("Provenance at full depth = nil, want the approval trail")
+	}
+	if prov.SourceStagedDiffID != d.ID {
+		t.Errorf("Provenance.SourceStagedDiffID = %q, want %q", prov.SourceStagedDiffID, d.ID)
+	}
+	if prov.DecidedBy == nil || *prov.DecidedBy != "human-reviewer" {
+		t.Errorf("Provenance.DecidedBy = %v, want \"human-reviewer\"", prov.DecidedBy)
+	}
+	if prov.DecidedAt == nil {
+		t.Error("Provenance.DecidedAt = nil, want the commit time")
+	}
+	if prov.SupersededBy != nil {
+		t.Errorf("Provenance.SupersededBy = %v, want nil (fact is still current)", prov.SupersededBy)
+	}
+	if prov.InvalidAt != nil || prov.ExpiredAt != nil {
+		t.Errorf("Provenance.{InvalidAt,ExpiredAt} = %v, %v, want both nil (fact is still current)", prov.InvalidAt, prov.ExpiredAt)
+	}
+	if fact.ID == "" {
+		t.Fatal("CommitDiff() returned an empty fact ID")
+	}
+}
+
 func TestSearchFacts_EffectiveDepthIntersectsAcrossFactTags(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()

@@ -71,11 +71,13 @@ func (s *Store) GetFact(ctx context.Context, id string) (Fact, error) {
 // filter-after-ranking anti-pattern §3.2 warns against: every fact in candidate_facts
 // is still returned, just with Content redacted to Summary at "summary" depth.
 //
-// Only the summary/{facts,full} split is projected here. "full" is meant to add
-// a fact's *provenance* to its content (the init migration's "progressive
-// disclosure per Notion §3": summary → facts → full provenance), which this
-// query does not yet select — see mcptools.factView's doc comment for the
-// columns involved and why that level is worth keeping distinct.
+// The summary/{facts,full} content split and the facts/{full} provenance split
+// are both projected here, by the same per-row Depth this doc comment
+// describes above: "full" adds a fact's *provenance* to its content (the init
+// migration's "progressive disclosure per Notion §3": summary → facts → full
+// provenance) via Fact.Provenance, set only when depth == "full" — see
+// mcptools.factView's doc comment for why that level is worth keeping
+// distinct from "facts" rather than treated as a duplicate.
 //
 // Depth is enforced on THIS read path only. It is not a system-wide chokepoint,
 // and describing it as one would be wrong: findDedupeCandidate (staged_diffs.go,
@@ -137,6 +139,22 @@ func (s *Store) SearchFacts(ctx context.Context, queryText string, queryEmbeddin
 			}
 		} else {
 			f.Content = r.Content
+		}
+		// The one place this depth gate is applied: Provenance is attached to the
+		// Fact only when this row's own effective depth is "full", the same
+		// per-row rule that picks Content vs Summary above. It is never set and
+		// then filtered out downstream — mcptools.factView has no independent
+		// depth check to get wrong, because there is nothing for it to check;
+		// a "facts"-depth Fact simply never carries a non-nil Provenance to leak.
+		if depth == "full" {
+			f.Provenance = &FactProvenance{
+				SourceStagedDiffID: r.SourceStagedDiffID,
+				DecidedBy:          r.DecidedBy,
+				DecidedAt:          r.DecidedAt,
+				SupersededBy:       r.SupersededBy,
+				InvalidAt:          r.InvalidAt,
+				ExpiredAt:          r.ExpiredAt,
+			}
 		}
 		facts = append(facts, f)
 	}
