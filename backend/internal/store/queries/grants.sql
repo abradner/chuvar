@@ -7,7 +7,12 @@ RETURNING id, subject, depth, created_at, expires_at, revoked_at, kind;
 INSERT INTO grant_scopes (grant_id, scope) VALUES ($1, $2);
 
 -- name: ListGrants :many
-SELECT id, subject, depth, created_at, expires_at, revoked_at, kind
+-- Scopes come back via an array_agg subquery (same shape as
+-- ListGrantsNearingExpiry and GetFact/SearchFacts' fact_scopes aggregation)
+-- rather than a separate ListGrantScopes call per row — avoids an N+1 that
+-- scales with (grants for subject) per call. Found in review.
+SELECT id, subject, depth, created_at, expires_at, revoked_at, kind,
+       (SELECT array_agg(gs.scope) FROM grant_scopes gs WHERE gs.grant_id = grants.id)::text[] AS scopes
 FROM grants WHERE subject = $1 ORDER BY created_at DESC;
 
 -- name: ListGrantScopes :many
