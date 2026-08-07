@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/abradner/chuvar/backend/internal/store"
 )
 
@@ -122,15 +124,15 @@ func (a *API) approveStagedDiff(w http.ResponseWriter, r *http.Request) {
 
 	diff, err := a.Store.GetStagedDiff(r.Context(), id)
 	if err != nil {
-		// GetStagedDiff wraps every failure the same way, including a real DB
-		// error, not just "no row with that id" — turning that straight into a
-		// 404 with nothing logged made a genuine internal failure indistinguishable
-		// from a bad ID at both the client and in the logs. Log it server-side; the
-		// client still gets 404 either way for now (disambiguating via
-		// errors.Is(err, pgx.ErrNoRows) is a fine follow-up, not required to fix
-		// the "silently masked" part of this).
-		slog.Error("api: approveStagedDiff: get staged diff", "id", id, "error", err)
-		writeError(w, http.StatusNotFound, errors.New("staged diff not found"))
+		// Only pgx.ErrNoRows means "not found" — treating every GetStagedDiff
+		// error as a 404 silently turns a real database outage into "this
+		// staged diff doesn't exist" instead of the 500 it actually is. Same
+		// error-masking class this batch already fixed in grantRequestExists.
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, errors.New("staged diff not found"))
+			return
+		}
+		writeStoreError(w, http.StatusInternalServerError, "approveStagedDiff", "could not get staged diff", err)
 		return
 	}
 
