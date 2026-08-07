@@ -157,19 +157,35 @@ func (q *Queries) ListGrantScopes(ctx context.Context, grantID string) ([]string
 }
 
 const listGrants = `-- name: ListGrants :many
-SELECT id, subject, depth, created_at, expires_at, revoked_at, kind
-FROM grants WHERE subject = $1 ORDER BY created_at DESC
+SELECT g.id, g.subject, g.depth, g.created_at, g.expires_at, g.revoked_at, g.kind,
+       (SELECT array_agg(gs.scope) FROM grant_scopes gs WHERE gs.grant_id = g.id)::text[] AS scopes
+FROM grants g WHERE g.subject = $1 ORDER BY g.created_at DESC
 `
 
-func (q *Queries) ListGrants(ctx context.Context, subject string) ([]Grant, error) {
+type ListGrantsRow struct {
+	ID        string
+	Subject   string
+	Depth     *string
+	CreatedAt time.Time
+	ExpiresAt *time.Time
+	RevokedAt *time.Time
+	Kind      string
+	Scopes    []string
+}
+
+// Scopes come back via an array_agg subquery (same shape as
+// ListGrantsNearingExpiry and GetFact/SearchFacts' fact_scopes aggregation in
+// facts.sql) rather than a separate ListGrantScopes call per row, to avoid an
+// N+1 query per returned grant. Found in review.
+func (q *Queries) ListGrants(ctx context.Context, subject string) ([]ListGrantsRow, error) {
 	rows, err := q.db.Query(ctx, listGrants, subject)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Grant
+	var items []ListGrantsRow
 	for rows.Next() {
-		var i Grant
+		var i ListGrantsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Subject,
@@ -178,6 +194,7 @@ func (q *Queries) ListGrants(ctx context.Context, subject string) ([]Grant, erro
 			&i.ExpiresAt,
 			&i.RevokedAt,
 			&i.Kind,
+			&i.Scopes,
 		); err != nil {
 			return nil, err
 		}
