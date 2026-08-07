@@ -147,6 +147,71 @@ func TestAgentRoleCanDoItsActualJob(t *testing.T) {
 			 RETURNING id, status, created_at`).Scan(&id, new(string), new(any)))
 		require.NotEmpty(t, id)
 	})
+
+	// The propose_write rate limit's atomic upsert — INSERT ... ON CONFLICT ...
+	// DO UPDATE SET count = count + 1 ... RETURNING count — needs INSERT plus
+	// SELECT+UPDATE on the relevant columns. Exercised here rather than assumed,
+	// per the least_privilege_roles migration's own stated practice; see the
+	// propose_write_rate_limit migration's doc comment for what that turned out
+	// to require.
+	//
+	// Subject here is a value unique to this test (not "agent-a", which other
+	// subtests in this file and other packages' propose_write/ProposeWrite
+	// tests also use): every other table in this suite dedupes on a fresh UUID
+	// per row, so cross-test reuse of "agent-a" is harmless, but this table's
+	// primary key is (subject, window_start) — reusing a common subject would
+	// make the counter's starting value depend on what else ran against the
+	// shared database in the same minute, which is exactly the kind of
+	// inter-test pollution the fixed-window design (this file's migration
+	// comment) accepts as a tradeoff for tests, not for production.
+	t.Run("increment the propose_write rate limit counter", func(t *testing.T) {
+		const q = `INSERT INTO propose_write_rate_limits (subject, window_start, count)
+			 VALUES ('roles-test-rate-limit-increment', date_trunc('minute', now()), 1)
+			 ON CONFLICT (subject, window_start)
+			 DO UPDATE SET count = propose_write_rate_limits.count + 1
+			 RETURNING count`
+		var count int
+		require.NoError(t, agent.QueryRow(ctx, q).Scan(&count))
+		require.Equal(t, 1, count)
+		require.NoError(t, agent.QueryRow(ctx, q).Scan(&count))
+		require.Equal(t, 2, count, "the conflict branch did not see its own prior increment")
+	})
+}
+
+// Postgres requires SELECT on a conflict target's own columns to evaluate
+// `ON CONFLICT (subject, window_start)` — verified in the migration's own doc
+// comment, not assumed — so all three columns end up needing SELECT, unlike
+// the narrower staged_diffs/grant_requests grants this table's shape was
+// modeled on. What's still withheld: the ability to repoint an existing row
+// at a different subject or window via UPDATE, so the only way to affect a
+// row is through the same atomic upsert path store.CheckProposeWriteRateLimit
+// uses, not an arbitrary rewrite of who a counter belongs to.
+func TestAgentRoleCannotRepointRateLimitRowsToAnotherSubjectOrWindow(t *testing.T) {
+	admin := adminPool(t)
+	ctx := context.Background()
+
+	// A subject unique to this test, for the same reason as the "increment"
+	// subtest above: this table's primary key is (subject, window_start), so a
+	// commonly-reused subject would make this test's outcome depend on
+	// whatever else ran against the shared database in the same minute.
+	const subject = "roles-test-rate-limit-repoint"
+	_, err := admin.Exec(ctx,
+		`INSERT INTO propose_write_rate_limits (subject, window_start, count)
+		 VALUES ($1, date_trunc('minute', now()), 7)`, subject)
+	require.NoError(t, err)
+
+	agent := connectAs(t, admin, "chuvar_agent")
+
+	_, err = agent.Exec(ctx, `UPDATE propose_write_rate_limits SET subject = 'agent-a' WHERE subject = $1`, subject)
+	require.Error(t, err, "the agent role could repoint a rate-limit row to a different subject")
+
+	_, err = agent.Exec(ctx, `UPDATE propose_write_rate_limits SET window_start = now() WHERE subject = $1`, subject)
+	require.Error(t, err, "the agent role could repoint a rate-limit row to a different window")
+
+	// The one column it may write remains writable — this is what the upsert's
+	// conflict-branch SET clause depends on.
+	_, err = agent.Exec(ctx, `UPDATE propose_write_rate_limits SET count = 8 WHERE subject = $1`, subject)
+	require.NoError(t, err, "the agent role could not update its granted count column")
 }
 
 // The agent must not be able to reshape the schema — the question that started

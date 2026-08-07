@@ -3,9 +3,11 @@ package mcptools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -35,7 +37,7 @@ func testSession(t *testing.T, subject string) (*mcp.ClientSession, *store.Store
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -125,7 +127,7 @@ func TestSubjectIsBoundNotClientSupplied(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 	st := store.New(pool)
@@ -273,7 +275,7 @@ func TestReadWithScopeCheck_RevokedMidEmbedIsRejected(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -836,5 +838,93 @@ func TestRequestGrant_NegativeTTLIsError(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Fatal("request_grant with a negative ttl_seconds succeeded, want a tool error")
+	}
+}
+
+// TestProposeWrite_RateLimited exercises the ticket this rate limit exists
+// for: propose_write requires no grant at all (a brand-new agent has to be
+// able to propose before it holds anything to be granted), so without some
+// other control any configured MCP_SUBJECT could flood the human review queue
+// for free. This pins the behavior an agent actually observes: hitting a low
+// configured limit surfaces as a structured status=RATE_LIMITED (not a
+// generic tool error — res.IsError stays false, same as insufficient_scope),
+// nothing gets staged once limited, and a different subject's own calls are
+// completely unaffected by the first subject's activity.
+func TestProposeWrite_RateLimited(t *testing.T) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set; skipping mcptools integration test")
+	}
+	if err := db.Migrate(url); err != nil {
+		t.Fatalf("db.Migrate() error = %v", err)
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
+		t.Fatalf("truncating tables: %v", err)
+	}
+
+	st := store.New(pool)
+	emb := embed.Stub{}
+	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
+	b.RateLimit = 2
+	b.RateLimitWindow = time.Minute
+
+	newSession := func(subject string) *mcp.ClientSession {
+		server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
+		Register(server, subject, st, emb, b)
+		clientTransport, serverTransport := mcp.NewInMemoryTransports()
+		if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
+			t.Fatalf("server.Connect() error = %v", err)
+		}
+		client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "test"}, nil)
+		session, err := client.Connect(ctx, clientTransport, nil)
+		if err != nil {
+			t.Fatalf("client.Connect() error = %v", err)
+		}
+		t.Cleanup(func() { _ = session.Close() })
+		return session
+	}
+
+	agentA := newSession("agent-a")
+	agentB := newSession("agent-b")
+
+	// The first two proposals for agent-a fit within its configured limit of 2.
+	for i := 0; i < 2; i++ {
+		out := callTool[proposeWriteOutput](t, agentA, "propose_write", proposeWriteArgs{
+			Content:        fmt.Sprintf("agent-a fact number %d", i),
+			ProposedScopes: []string{"preferences.coffee"},
+		})
+		if out.Status == "RATE_LIMITED" {
+			t.Fatalf("proposal %d for agent-a: status = RATE_LIMITED, want it to succeed (still within limit)", i)
+		}
+	}
+
+	// The third trips the limit.
+	third := callTool[proposeWriteOutput](t, agentA, "propose_write", proposeWriteArgs{
+		Content:        "agent-a fact number 3",
+		ProposedScopes: []string{"preferences.coffee"},
+	})
+	if third.Status != "RATE_LIMITED" {
+		t.Fatalf("propose_write status = %q after exceeding the limit, want RATE_LIMITED", third.Status)
+	}
+	if third.DiffID != "" {
+		t.Fatalf("RATE_LIMITED response carried a diff_id (%q); nothing should have been staged", third.DiffID)
+	}
+
+	// agent-b's own limit must be untouched by agent-a's activity — a shared
+	// limit keyed wrong (e.g. ignoring subject, or on something client-
+	// supplied) would throttle a completely uninvolved subject, which is its
+	// own denial-of-service against a legitimate agent.
+	bOut := callTool[proposeWriteOutput](t, agentB, "propose_write", proposeWriteArgs{
+		Content:        "agent-b's own, unrelated fact",
+		ProposedScopes: []string{"preferences.tea"},
+	})
+	if bOut.Status == "RATE_LIMITED" {
+		t.Fatal("agent-b's first proposal was rate limited by agent-a's activity — the limit is not correctly keyed per subject")
 	}
 }

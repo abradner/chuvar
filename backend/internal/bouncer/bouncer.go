@@ -10,6 +10,7 @@ package bouncer
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/scope"
@@ -49,14 +50,41 @@ func (PassthroughClassifier) Classify(_ context.Context, _ string) ([]scope.Scop
 	return nil, nil
 }
 
+// defaultRateLimit and defaultRateLimitWindow are New's fallback for
+// RateLimit/RateLimitWindow — a generous but non-zero default, so a caller that
+// doesn't wire config.Config's PROPOSE_WRITE_RATE_LIMIT* values through still
+// gets a working limit rather than an accidental zero (which
+// store.CheckProposeWriteRateLimit treats as a misconfiguration error, not
+// "unlimited" — see that method's doc comment on why zero must fail closed).
+const (
+	defaultRateLimit       = 20
+	defaultRateLimitWindow = time.Minute
+)
+
 type Bouncer struct {
 	Store      *store.Store
 	Embedder   embed.Embedder
 	Classifier Classifier
+
+	// RateLimit and RateLimitWindow bound how many ProposeWrite calls a single
+	// subject may make per window before it starts returning
+	// store.ErrRateLimited — see that method's doc comment for the mechanism
+	// and CLAUDE.md's ticket ("propose_write requires no grant at all — the
+	// review queue is spammable") for why this exists. New sets both to a
+	// sane default; override after construction (e.g. from config.Config) to
+	// tune them.
+	RateLimit       int
+	RateLimitWindow time.Duration
 }
 
 func New(s *store.Store, e embed.Embedder, c Classifier) *Bouncer {
-	return &Bouncer{Store: s, Embedder: e, Classifier: c}
+	return &Bouncer{
+		Store:           s,
+		Embedder:        e,
+		Classifier:      c,
+		RateLimit:       defaultRateLimit,
+		RateLimitWindow: defaultRateLimitWindow,
+	}
 }
 
 // ProposeWrite runs the pipeline for one proposed fact and returns the staged
@@ -139,6 +167,19 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 	if b.Store == nil {
 		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Store")
 	}
+
+	// Rate-limit before any further work: this subject may hold zero grants
+	// (propose_write deliberately requires none, so a brand-new agent can
+	// still propose before it's been granted anything — see the
+	// propose_write_rate_limit migration for the full threat this guards
+	// against) and still be able to flood the human review queue for free.
+	// Checked here, after the cheap validation above but before the granted-
+	// scopes lookup and dedupe search below, so a subject already over its
+	// limit doesn't keep paying for those queries on every retry either.
+	if err := b.Store.CheckProposeWriteRateLimit(ctx, subject, b.RateLimit, b.RateLimitWindow); err != nil {
+		return store.StagedDiff{}, fmt.Errorf("bouncer: %w", err)
+	}
+
 	// The subject's current granted scopes gate both the dedupe candidate search
 	// and target_fact_id visibility inside ProposeDiff — see that function's doc
 	// comment. Fetched here rather than inside the store layer because Bouncer

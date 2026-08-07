@@ -40,7 +40,7 @@ func testStore(t *testing.T) (*Store, *pgxpool.Pool) {
 
 	// Isolate each test: truncate everything before it runs rather than after, so a
 	// failed run leaves data behind to inspect.
-	_, err = pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys`)
+	_, err = pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys, propose_write_rate_limits`)
 	if err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}

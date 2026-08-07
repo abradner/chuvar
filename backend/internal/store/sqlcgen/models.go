@@ -81,6 +81,12 @@ type GrantScope struct {
 	Scope   string
 }
 
+type ProposeWriteRateLimit struct {
+	Subject     string
+	WindowStart time.Time
+	Count       int32
+}
+
 type ReviewerToken struct {
 	ID            string
 	Label         string
