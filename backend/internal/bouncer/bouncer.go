@@ -118,6 +118,23 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 	if b.Classifier == nil {
 		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Classifier")
 	}
+	if b.Store == nil {
+		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Store")
+	}
+
+	// Rate-limit after the cheap caller-input validation above but before
+	// Classify and Embed: this subject may hold zero grants (propose_write
+	// deliberately requires none, so a brand-new agent can still propose
+	// before it's been granted anything — see the propose_write_rate_limit
+	// migration for the full threat this guards against) and still be able to
+	// flood the human review queue for free. Both Classify and Embed are stubs
+	// today but are meant to become real external, costly calls — checking the
+	// limit only after them would let an over-limit subject keep generating
+	// unbounded provider traffic and cost while every request comes back
+	// RATE_LIMITED and stages nothing. Found in aggregate review.
+	if err := b.Store.CheckProposeWriteRateLimit(ctx, subject, b.RateLimit, b.RateLimitWindow); err != nil {
+		return store.StagedDiff{}, fmt.Errorf("bouncer: %w", err)
+	}
 
 	scopes := proposedScopes
 	classified, err := b.Classifier.Classify(ctx, content)
@@ -162,22 +179,6 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 	scopeStrs := make([]string, len(scopes))
 	for i, sc := range scopes {
 		scopeStrs[i] = string(sc)
-	}
-
-	if b.Store == nil {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Store")
-	}
-
-	// Rate-limit before any further work: this subject may hold zero grants
-	// (propose_write deliberately requires none, so a brand-new agent can
-	// still propose before it's been granted anything — see the
-	// propose_write_rate_limit migration for the full threat this guards
-	// against) and still be able to flood the human review queue for free.
-	// Checked here, after the cheap validation above but before the granted-
-	// scopes lookup and dedupe search below, so a subject already over its
-	// limit doesn't keep paying for those queries on every retry either.
-	if err := b.Store.CheckProposeWriteRateLimit(ctx, subject, b.RateLimit, b.RateLimitWindow); err != nil {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: %w", err)
 	}
 
 	// The subject's current granted scopes gate both the dedupe candidate search

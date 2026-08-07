@@ -64,8 +64,34 @@ func wantNotValidationError(t *testing.T, err error) {
 	}
 }
 
+// integrationStore returns a real *store.Store against DATABASE_URL (or skips),
+// for ProposeWrite paths past the rate-limit check — which runs before
+// Classify/Embed (an over-limit subject must not generate external pipeline
+// cost) and therefore needs a non-nil Store even in tests whose subject is the
+// classifier or embedder.
+func integrationStore(t *testing.T) *store.Store {
+	t.Helper()
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set; skipping bouncer integration test")
+	}
+	if err := db.Migrate(url); err != nil {
+		t.Fatalf("db.Migrate() error = %v", err)
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
+		t.Fatalf("truncating tables: %v", err)
+	}
+	return store.New(pool)
+}
+
 func TestProposeWrite_NoScopesIsError(t *testing.T) {
-	b := New(nil, embed.Stub{}, PassthroughClassifier{})
+	b := New(integrationStore(t), embed.Stub{}, PassthroughClassifier{})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", nil, nil)
 	wantValidationError(t, err)
 }
@@ -111,7 +137,7 @@ func TestProposeWrite_ClassifierNonNilEmptySliceOverridesCaller(t *testing.T) {
 	// A non-nil empty slice is a real classification ("no scopes apply"), distinct
 	// from nil ("defer to caller") — see Classifier's doc comment. It must override
 	// the caller's proposed scopes down to nothing, not be treated as "no opinion."
-	b := New(nil, embed.Stub{}, emptySliceClassifier{})
+	b := New(integrationStore(t), embed.Stub{}, emptySliceClassifier{})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
 	// "No scopes proposed or classified" is still safe/actionable even though the
 	// classifier (not the caller) drove it here — see the ValidationError call
@@ -120,7 +146,7 @@ func TestProposeWrite_ClassifierNonNilEmptySliceOverridesCaller(t *testing.T) {
 }
 
 func TestProposeWrite_ClassifierErrorIsWrapped(t *testing.T) {
-	b := New(nil, embed.Stub{}, fakeClassifier{err: errors.New("classifier unavailable")})
+	b := New(integrationStore(t), embed.Stub{}, fakeClassifier{err: errors.New("classifier unavailable")})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
 	// A Classifier failure isn't caller input — could wrap an external service's
 	// error text — so it must stay masked.
@@ -147,7 +173,7 @@ func TestProposeWrite_EmbedderErrorIsWrapped(t *testing.T) {
 	// Store is nil and must never be reached: the embed error should short-circuit
 	// before ProposeWrite touches the store, or this panics instead of failing
 	// cleanly.
-	b := New(nil, fakeEmbedder{err: errors.New("embedding provider unavailable")}, PassthroughClassifier{})
+	b := New(integrationStore(t), fakeEmbedder{err: errors.New("embedding provider unavailable")}, PassthroughClassifier{})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
 	// An Embedder failure isn't caller input either — same reasoning as the
 	// Classifier failure case above.
@@ -380,4 +406,32 @@ func TestProposeWrite_RateLimitExceededIsDistinguishable(t *testing.T) {
 	if _, err := b.ProposeWrite(ctx, "agent-b", "agent-b's own, unrelated fact", []scope.Scope{"preferences.tea"}, nil); err != nil {
 		t.Fatalf("ProposeWrite() for a different subject: unexpected error = %v (agent-a's limit leaked across subjects)", err)
 	}
+
+	// An over-limit request must be refused BEFORE Classify or Embed run: both
+	// are stubs today but are meant to become real external, costly calls, and
+	// checking the limit only after them would let an over-limit subject keep
+	// generating unbounded provider traffic and cost while every request comes
+	// back RATE_LIMITED and stages nothing. Found in aggregate review.
+	b.Classifier = trippingClassifier{t: t}
+	b.Embedder = trippingEmbedder{t: t}
+	if _, err := b.ProposeWrite(ctx, "agent-a", "still over the limit", []scope.Scope{"preferences.coffee"}, nil); !errors.Is(err, store.ErrRateLimited) {
+		t.Fatalf("ProposeWrite() over the limit with tripping pipeline: err = %v, want errors.Is(err, store.ErrRateLimited)", err)
+	}
+}
+
+// trippingClassifier/trippingEmbedder fail the test if the pipeline reaches
+// them — used to prove an over-limit request never pays for classification or
+// embedding.
+type trippingClassifier struct{ t *testing.T }
+
+func (c trippingClassifier) Classify(context.Context, string) ([]scope.Scope, error) {
+	c.t.Error("Classify was invoked for an over-limit request — the rate limit must run first")
+	return nil, nil
+}
+
+type trippingEmbedder struct{ t *testing.T }
+
+func (e trippingEmbedder) Embed(context.Context, string) ([]float32, error) {
+	e.t.Error("Embed was invoked for an over-limit request — the rate limit must run first")
+	return nil, nil
 }
