@@ -405,13 +405,15 @@ the synthesis session has read agent reports and bot comments, not the diff;
 its aggregate pass is process review wearing a code-review hat, and the bots
 only ever had per-PR context. Nobody has held the whole diff. So the
 aggregate review is delegated too, and it is not optional: spawn **one
-independent reviewer agent over the full aggregate diff**
-(`git diff origin/main...<followup-branch>`, or `git diff
-origin/main...<cap-branch>` before the followup exists — spell the left side
-out every time: `git diff ...<branch>` is *valid* git that silently defaults
-the left side to HEAD, so from any checkout not sitting on origin/main it
-yields a quietly truncated diff, and a fresh-eyes verdict over a truncated
-diff is a confident "cleared" over code nobody read) — fresh context, no authorship, briefed with the §6
+independent reviewer agent over the full aggregate diff**:
+`git diff origin/main...<followup-branch>`
+(or `git diff origin/main...<cap-branch>` before the followup exists).
+Spell the left side out every time, and keep the command on one line:
+`git diff ...<branch>` is *valid* git that silently defaults the left side
+to HEAD, so from any checkout not sitting on origin/main it yields a
+quietly truncated diff — and a fresh-eyes verdict over a truncated diff is
+a confident "cleared" over code nobody read. The reviewer gets fresh
+context, no authorship, is briefed with the §6
 trust-boundary questions and told to *trace* claims rather than trust
 comments, PR bodies, or the orchestrator's summary. Launch it at the start
 of synthesis, in parallel with the comment harvest, so its findings fold
