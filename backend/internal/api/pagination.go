@@ -72,7 +72,39 @@ func parseListCursor(r *http.Request) (*store.ListCursor, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid cursor")
 	}
+	if !isUUID(parts[1]) {
+		// Without this check a malformed ID passes parsing here and then fails
+		// the ::uuid cast inside the List*Page queries — turning a bad cursor
+		// into a 500 instead of the clean 400 this function promises. Same
+		// not-found-vs-real-error discipline as approveStagedDiff's 404/500
+		// split: the status code must say whose fault the failure is.
+		return nil, fmt.Errorf("invalid cursor")
+	}
 	return &store.ListCursor{CreatedAt: createdAt, ID: parts[1]}, nil
+}
+
+// isUUID reports whether s is a canonical 8-4-4-4-12 hex UUID. A hand-rolled
+// check because nothing else in this module needs a uuid dependency: IDs are
+// opaque strings end to end, and Postgres's ::uuid cast is the real parser —
+// this only exists to classify bad input before it reaches the query.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+			if !isHex {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // encodeCursor renders a store.ListCursor as the opaque token handed back to

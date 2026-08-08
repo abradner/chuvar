@@ -127,6 +127,20 @@ func TestAgentRoleCanDoItsActualJob(t *testing.T) {
 		require.NoError(t, agent.QueryRow(ctx, `SELECT count(*) FROM fact_scopes`).Scan(&n))
 	})
 
+	// The provenance join SearchFacts runs at every depth (the full-depth
+	// migration, 20260804000000, granted exactly these two decision columns).
+	// Exercised as the live role because that migration's whole justification
+	// is "the join breaks the moment an operator enforces roles" — a grant
+	// justified by a query shape gets verified in that shape, per the
+	// least-privilege migration's own stated practice. The still-revoked
+	// columns are pinned by TestAgentRoleCannotReadSecretTables.
+	t.Run("read staged-diff decision columns via the provenance join", func(t *testing.T) {
+		var decidedBy, decidedAt int
+		require.NoError(t, agent.QueryRow(ctx,
+			`SELECT count(sd.decided_by), count(sd.decided_at) FROM facts f
+			 LEFT JOIN staged_diffs sd ON sd.id = f.source_staged_diff_id`).Scan(&decidedBy, &decidedAt))
+	})
+
 	// INSERT ... RETURNING over only the generated columns — the shape
 	// ProposeDiff and RequestGrant now use. Column-level SELECT is what makes
 	// this work without granting a table-wide read.
@@ -165,8 +179,16 @@ func TestAgentRoleCanDoItsActualJob(t *testing.T) {
 	// inter-test pollution the fixed-window design (this file's migration
 	// comment) accepts as a tradeoff for tests, not for production.
 	t.Run("increment the propose_write rate limit counter", func(t *testing.T) {
+		// Fixed window_start (not date_trunc('minute', now())) so the two
+		// executions of q below can't straddle a minute boundary and miss the
+		// conflict path — which also means the row survives across runs on a
+		// shared database, so clear it first (as admin: chuvar_agent
+		// deliberately has no DELETE here).
+		_, err := admin.Exec(ctx,
+			`DELETE FROM propose_write_rate_limits WHERE subject = 'roles-test-rate-limit-increment'`)
+		require.NoError(t, err)
 		const q = `INSERT INTO propose_write_rate_limits (subject, window_start, count)
-			 VALUES ('roles-test-rate-limit-increment', date_trunc('minute', now()), 1)
+			 VALUES ('roles-test-rate-limit-increment', TIMESTAMPTZ '2026-01-01 00:00:00+00', 1)
 			 ON CONFLICT (subject, window_start)
 			 DO UPDATE SET count = propose_write_rate_limits.count + 1
 			 RETURNING count`
@@ -195,9 +217,15 @@ func TestAgentRoleCannotRepointRateLimitRowsToAnotherSubjectOrWindow(t *testing.
 	// commonly-reused subject would make this test's outcome depend on
 	// whatever else ran against the shared database in the same minute.
 	const subject = "roles-test-rate-limit-repoint"
+	// Fixed window_start for the same no-minute-boundary reason as the
+	// increment subtest, with the same consequence: the row outlives a run,
+	// so clear it before inserting.
 	_, err := admin.Exec(ctx,
+		`DELETE FROM propose_write_rate_limits WHERE subject = $1`, subject)
+	require.NoError(t, err)
+	_, err = admin.Exec(ctx,
 		`INSERT INTO propose_write_rate_limits (subject, window_start, count)
-		 VALUES ($1, date_trunc('minute', now()), 7)`, subject)
+		 VALUES ($1, TIMESTAMPTZ '2026-01-01 00:00:00+00', 7)`, subject)
 	require.NoError(t, err)
 
 	agent := connectAs(t, admin, "chuvar_agent")

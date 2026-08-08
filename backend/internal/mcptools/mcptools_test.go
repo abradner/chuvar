@@ -610,6 +610,15 @@ func TestReadWithScopeCheck_FullDepthAddsProvenance_FactsDepthDoesNot_ViaMCP(t *
 		if got.Provenance.SourceStagedDiffID != proposed.DiffID {
 			t.Errorf("Provenance.SourceStagedDiffID = %q, want %q", got.Provenance.SourceStagedDiffID, proposed.DiffID)
 		}
+		// Both starts of the bi-temporal window — created_at (system time)
+		// alongside valid_at (real-world time). created_at was missing from the
+		// wire shape entirely; found in review.
+		if got.Provenance.CreatedAt == "" {
+			t.Error("Provenance.CreatedAt is empty, want the fact's system-time start (RFC3339)")
+		}
+		if got.Provenance.ValidAt == "" {
+			t.Error("Provenance.ValidAt is empty, want the fact's real-world validity start (RFC3339)")
+		}
 	})
 }
 
@@ -872,7 +881,7 @@ func TestProposeWrite_RateLimited(t *testing.T) {
 	emb := embed.Stub{}
 	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
 	b.RateLimit = 2
-	b.RateLimitWindow = time.Minute
+	b.RateLimitWindow = time.Hour
 
 	newSession := func(subject string) *mcp.ClientSession {
 		server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
@@ -914,6 +923,20 @@ func TestProposeWrite_RateLimited(t *testing.T) {
 	}
 	if third.DiffID != "" {
 		t.Fatalf("RATE_LIMITED response carried a diff_id (%q); nothing should have been staged", third.DiffID)
+	}
+
+	// The denial must leave attributable evidence the operator can find later —
+	// the counter row alone is lossy (limit+1 and a sustained flood look the
+	// same once the window rolls). Same discipline as insufficient_scope's
+	// audit row in read_with_scope_check. Found in aggregate review.
+	var audited int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_log WHERE event_type = 'rate_limited' AND subject = 'agent-a'`,
+	).Scan(&audited); err != nil {
+		t.Fatalf("querying audit_log for rate_limited rows: %v", err)
+	}
+	if audited != 1 {
+		t.Errorf("audit_log rate_limited rows for agent-a = %d, want exactly 1 (one per denial)", audited)
 	}
 
 	// agent-b's own limit must be untouched by agent-a's activity — a shared

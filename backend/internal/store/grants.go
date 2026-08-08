@@ -23,8 +23,9 @@ import (
 var depthOrder = []string{"summary", "facts", "full"}
 
 // depthRankIndex returns depth's position in depthOrder, or -1 if depth is
-// not in the closed vocabulary. The one place ValidDepth, depthRank, and
-// depthName all read from.
+// not in the closed vocabulary. ValidDepth and depthRank read from it;
+// depthName (the inverse direction, rank → name) indexes depthOrder
+// directly — either way, depthOrder is the single source of truth.
 func depthRankIndex(depth string) int {
 	for i, d := range depthOrder {
 		if d == depth {
