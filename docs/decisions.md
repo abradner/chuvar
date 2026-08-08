@@ -289,12 +289,13 @@ what the mechanism actually delivered, corrected once flagged. TOTP secrets
 are now sealed at rest under a custody-held key (landed 2026-08-02), but the
 underlying gap this stopgap exists to eventually close — real per-reviewer
 hardware-backed authentication (WebAuthn/passkeys) — remains open. This
-entry records the bar TOTP does *not* meet: it raises the cost of a stolen
-bearer token: alone it is not enough to mint a new one and self-enrol once a
-device is already enrolled but it is still a shared-secret code, not a
-possession/biometric-backed factor, and revoking a device does not close the
-enrollment gate (revoked rows still count toward "ever enrolled" precisely
-so an attacker who revokes real devices cannot reopen it).
+entry records both what TOTP buys and the bar it does *not* meet. It raises
+the cost of a stolen bearer token: once any device is enrolled, the token
+alone can no longer mint a new reviewer credential and self-enrol. But it is
+still a shared-secret code, not a possession- or biometric-backed factor —
+and revoking a device never reopens the enrollment gate, because revoked
+rows still count toward "ever enrolled", precisely so an attacker who
+revokes real devices cannot reopen it that way.
 
 **Status:** standing as an interim stopgap; superseded when WebAuthn/passkey
 reviewer authentication ships (tracked, not yet landed as of this log's
