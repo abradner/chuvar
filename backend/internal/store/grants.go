@@ -174,22 +174,22 @@ func (s *Store) ListGrants(ctx context.Context, subject string) ([]Grant, error)
 		return nil, fmt.Errorf("store: list grants: %w", err)
 	}
 
-	var grants []Grant
-	for _, r := range rows {
-		scopes, err := s.q.ListGrantScopes(ctx, r.ID)
-		if err != nil {
-			return nil, fmt.Errorf("store: list grant scopes: %w", err)
-		}
-		grants = append(grants, Grant{
+	// Scopes come back from the query itself (an array_agg subquery, mirroring
+	// ListGrantsNearingExpiry) rather than a per-grant ListGrantScopes call —
+	// same fix, same reason: needless N+1 drift between two adjacent functions
+	// solving the identical problem two different ways. Found in review.
+	grants := make([]Grant, len(rows))
+	for i, r := range rows {
+		grants[i] = Grant{
 			ID:        r.ID,
 			Subject:   r.Subject,
-			Scopes:    scopes,
+			Scopes:    r.Scopes,
 			Kind:      GrantKind(r.Kind),
 			Depth:     depthOrEmpty(r.Depth),
 			CreatedAt: r.CreatedAt,
 			ExpiresAt: r.ExpiresAt,
 			RevokedAt: r.RevokedAt,
-		})
+		}
 	}
 	return grants, nil
 }

@@ -109,6 +109,74 @@ func TestGrants_CreateListRevoke(t *testing.T) {
 	}
 }
 
+// TestListGrants_ScopesPerGrant guards the array_agg subquery that replaced
+// ListGrants' per-grant ListGrantScopes N+1 call (mirroring
+// ListGrantsNearingExpiry's identical fix): with several grants for the same
+// subject carrying different scope counts, a join gone wrong (e.g. a plain
+// JOIN instead of a scalar subquery cross-multiplying rows, or scopes
+// attached to the wrong grant) would either change the returned grant count,
+// duplicate/drop scopes, or mix scopes across grants — none of which the
+// single-grant assertion in TestGrants_CreateListRevoke would catch.
+func TestListGrants_ScopesPerGrant(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	single, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() (single-scope) error = %v", err)
+	}
+	triple, err := s.CreateGrant(ctx, "agent-a",
+		[]string{"projects.spritz.read", "projects.spritz.write", "identity.basic"},
+		"memory", "facts", nil, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() (triple-scope) error = %v", err)
+	}
+
+	grants, err := s.ListGrants(ctx, "agent-a")
+	if err != nil {
+		t.Fatalf("ListGrants() error = %v", err)
+	}
+	if len(grants) != 2 {
+		t.Fatalf("ListGrants() = %+v, want 2 grants", grants)
+	}
+
+	byID := make(map[string][]string, len(grants))
+	for _, g := range grants {
+		byID[g.ID] = g.Scopes
+	}
+
+	wantSingle := []string{"identity.basic"}
+	if got := byID[single.ID]; !scopeSetsEqual(got, wantSingle) {
+		t.Fatalf("ListGrants() scopes for single-scope grant %s = %v, want %v", single.ID, got, wantSingle)
+	}
+	wantTriple := []string{"projects.spritz.read", "projects.spritz.write", "identity.basic"}
+	if got := byID[triple.ID]; !scopeSetsEqual(got, wantTriple) {
+		t.Fatalf("ListGrants() scopes for triple-scope grant %s = %v, want %v", triple.ID, got, wantTriple)
+	}
+}
+
+// scopeSetsEqual compares two scope slices as sets, since array_agg over
+// grant_scopes (a table with no secondary ordering column) makes no promise
+// about element order — only about which scopes belong to which grant.
+func scopeSetsEqual(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	counts := make(map[string]int, len(want))
+	for _, s := range want {
+		counts[s]++
+	}
+	for _, s := range got {
+		counts[s]--
+	}
+	for _, c := range counts {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func TestRenewGrant_ExtendsExpiry(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()

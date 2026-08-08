@@ -73,7 +73,11 @@ type Querier interface {
 	InsertStagedDiff(ctx context.Context, arg InsertStagedDiffParams) (InsertStagedDiffRow, error)
 	ListGrantRequests(ctx context.Context, status string) ([]GrantRequest, error)
 	ListGrantScopes(ctx context.Context, grantID string) ([]string, error)
-	ListGrants(ctx context.Context, subject string) ([]Grant, error)
+	// Scopes come back via an array_agg subquery (same shape as
+	// ListGrantsNearingExpiry and GetFact/SearchFacts' fact_scopes aggregation in
+	// facts.sql) rather than a separate ListGrantScopes call per row, to avoid an
+	// N+1 query per returned grant. Found in review.
+	ListGrants(ctx context.Context, subject string) ([]ListGrantsRow, error)
 	// Subject-agnostic by design, like ListStagedDiffs/ListGrantRequests — v0 is a
 	// single-operator system (AGENTS.md), so the expiry-warning SSE stream isn't
 	// scoped per subject either.
