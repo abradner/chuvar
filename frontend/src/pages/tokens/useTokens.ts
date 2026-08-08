@@ -69,14 +69,18 @@ export function useTokens({ onRevealChange }: UseTokensOptions = {}) {
   }, [refreshKey]);
 
   // Reload/close is the one destroyer the page cannot intercept itself, so hand
-  // it to the browser. Registered only while a reveal is pending, so ordinary
-  // navigation is never nagged.
+  // it to the browser. Registered only while a reveal is pending or a create is
+  // in flight, so ordinary navigation is never nagged. Covers `creating` too,
+  // not just `justCreated`: reloading mid-request previously discarded the
+  // response after the server had already committed the credential, the same
+  // gap the tab-navigation guard above had before it was widened. Found in
+  // review (Copilot).
   useEffect(() => {
-    if (!justCreated) return;
+    if (!creating && !justCreated) return;
     const warn = (e: BeforeUnloadEvent) => e.preventDefault();
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [justCreated]);
+  }, [creating, justCreated]);
 
   // Tab switches unmount the page outright, taking justCreated (and any
   // in-flight create) with it, so the shell has to do the blocking. Reported
@@ -92,14 +96,19 @@ export function useTokens({ onRevealChange }: UseTokensOptions = {}) {
 
   const create = useCallback(
     async (label: string) => {
-      // TokensView also disables its submit button while a reveal is
-      // pending, but that is UX, not enforcement — it protects only clicks
-      // on that one button. This is the actual chokepoint: any caller of
-      // this hook (a future view, a script, a different control) must be
-      // refused here too, or it silently overwrites an uncopied, unrecoverable
-      // credential. Found in review (Copilot) against AGENTS.md §6's own
-      // rule that guard ceremonies live in the hook so future views inherit
-      // them.
+      // TokensView also disables its submit button while a reveal is pending
+      // or a create is in flight, but that is UX, not enforcement — it
+      // protects only clicks on that one button. This is the actual
+      // chokepoint: any caller of this hook (a future view, a script, a
+      // different control) must be refused here too, or it silently
+      // overwrites an uncopied, unrecoverable credential (justCreated) or
+      // fires a second concurrent request (creating). Found in review
+      // (Copilot) against AGENTS.md §6's own rule that guard ceremonies live
+      // in the hook so future views inherit them.
+      if (creating) {
+        setError("A create request is already in flight.");
+        return false;
+      }
       if (justCreated) {
         setError("A credential is already pending — dismiss it before creating another.");
         return false;
@@ -146,7 +155,7 @@ export function useTokens({ onRevealChange }: UseTokensOptions = {}) {
         setCreating(false);
       }
     },
-    [justCreated],
+    [creating, justCreated],
   );
 
   const dismissReveal = useCallback(() => {

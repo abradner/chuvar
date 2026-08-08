@@ -250,6 +250,27 @@ describe("TokensPage", () => {
     expect(onRevealChange).toHaveBeenLastCalledWith(true);
   });
 
+  it("prevents reload/close from the moment creation is submitted, not only once it resolves", async () => {
+    // Mirrors the tab-navigation gap above: this guard was gated on
+    // justCreated alone, so a reload mid-request discarded the response after
+    // the server had already committed the credential. Found in review
+    // (Copilot).
+    let resolveCreate!: (token: CreatedReviewerToken) => void;
+    vi.mocked(api.listTokens).mockResolvedValue([]);
+    vi.mocked(api.createToken).mockReturnValue(new Promise((resolve) => (resolveCreate = resolve)));
+
+    render(<TokensPage />);
+    await screen.findByText("No reviewer tokens yet.");
+    await userEvent.type(screen.getByPlaceholderText("alex-laptop"), "alex-phone");
+    await userEvent.click(screen.getByRole("button", { name: "Create token" }));
+
+    const unloadEvent = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(unloadEvent);
+    expect(unloadEvent.defaultPrevented).toBe(true);
+
+    await act(async () => resolveCreate(sampleCreated));
+  });
+
   it("prevents reload/close while a reveal is pending, and stops once it is dismissed", async () => {
     vi.mocked(api.listTokens).mockResolvedValue([]);
     vi.mocked(api.createToken).mockResolvedValue(sampleCreated);

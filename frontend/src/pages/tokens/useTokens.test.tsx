@@ -40,7 +40,11 @@ const second: CreatedReviewerToken = {
 
 describe("useTokens", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    // resetAllMocks, not clearAllMocks: a test whose guard refuses a second
+    // create leaves an unconsumed queued mockResolvedValueOnce/mockReturnValueOnce
+    // behind, which clearAllMocks does not drop — it would otherwise leak into
+    // the next test's first createToken call.
+    vi.resetAllMocks();
     vi.mocked(api.listTokens).mockResolvedValue([]);
     vi.spyOn(window, "prompt").mockReturnValue("");
   });
@@ -62,5 +66,37 @@ describe("useTokens", () => {
     expect(result.current.justCreated?.token).toBe("first-token");
     expect(api.createToken).toHaveBeenCalledTimes(1);
     expect(result.current.error).toMatch(/already pending/);
+  });
+
+  it("refuses a second create while one is already in flight, even called directly", async () => {
+    // The disabled button covers this in the UI, but a second caller of the
+    // hook itself — not gated by that button — could otherwise fire a
+    // concurrent request before justCreated is even set. Found in review
+    // (Copilot).
+    let resolveCreate!: (token: CreatedReviewerToken) => void;
+    vi.mocked(api.createToken).mockReturnValueOnce(new Promise((resolve) => (resolveCreate = resolve)));
+
+    const { result } = renderHook(() => useTokens());
+
+    // A plain (sync) act callback still flushes the setCreating(true) React
+    // runs before create's first await, even though the async function
+    // itself is still in flight — that's what lets the second call below
+    // observe creating=true through a fresh closure.
+    let firstCall!: Promise<boolean>;
+    act(() => {
+      firstCall = result.current.create("alex-phone");
+    });
+    expect(result.current.creating).toBe(true);
+
+    const secondResult = await result.current.create("alex-laptop");
+    expect(secondResult).toBe(false);
+
+    await act(async () => {
+      resolveCreate(first);
+      await firstCall;
+    });
+
+    expect(result.current.justCreated?.token).toBe("first-token");
+    expect(api.createToken).toHaveBeenCalledTimes(1);
   });
 });
