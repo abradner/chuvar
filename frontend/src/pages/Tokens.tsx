@@ -20,17 +20,28 @@ function enrollmentSecret(uri: string): string {
   }
 }
 
-export function TokensPage() {
+export interface TokensPageProps {
+  // Lets the shell block navigation while an unrecoverable credential is on
+  // screen. This page's state dies with the component, and App unmounts it on
+  // every tab change — see the reveal-retention comment below.
+  onRevealChange?: (pending: boolean) => void;
+}
+
+export function TokensPage({ onRevealChange }: TokensPageProps = {}) {
   const [tokens, setTokens] = useState<ReviewerToken[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [newLabel, setNewLabel] = useState("");
-  // Shown once, immediately after creation — never re-fetchable (see
-  // CreatedReviewerToken's doc comment) — so this page is the only place it's
-  // ever displayed, and clearing it (dismiss button, or creating another
-  // token) is a one-way trip.
+  // Shown once, immediately after creation, and never re-fetchable — the server
+  // kept only a hash (see CreatedReviewerToken). Losing it before the operator
+  // copies it is the worst outcome this page can produce: on a *first* device,
+  // the enrollment gate has already latched (the ever-enrolled count includes
+  // revoked rows), so the next create demands a code no surviving credential
+  // can generate, and recovery is direct DB surgery. Every path that can clear
+  // this state is therefore guarded — see dismiss, the beforeunload effect, and
+  // onRevealChange.
   const [justCreated, setJustCreated] = useState<CreatedReviewerToken | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -49,19 +60,26 @@ export function TokensPage() {
     return () => controller.abort();
   }, [refreshKey]);
 
+  // Reload/close is the one destroyer the page cannot intercept itself, so hand
+  // it to the browser. Registered only while a reveal is pending, so ordinary
+  // navigation is never nagged.
+  useEffect(() => {
+    if (!justCreated) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [justCreated]);
+
+  // Tab switches unmount this component outright, taking justCreated with it,
+  // so the shell has to do the blocking. Reported rather than handled here
+  // because the nav lives in App.
+  useEffect(() => {
+    onRevealChange?.(justCreated !== null);
+  }, [justCreated, onRevealChange]);
+
   const createToken = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
-
-    // Creating again while a reveal is still on screen would overwrite
-    // justCreated and destroy a credential that cannot be recovered from
-    // anywhere — the server only ever kept its hash. Dismissing is an explicit
-    // "I've copied it", so require that first. Checked here as well as via the
-    // disabled button because a form still submits on Enter.
-    if (justCreated) {
-      setError("Copy and dismiss the token above before creating another — it cannot be shown again.");
-      return;
-    }
 
     const label = newLabel.trim();
     if (!label) {
@@ -72,14 +90,21 @@ export function TokensPage() {
     // TOTP is only required once a device has ever been enrolled (backend's
     // createToken doc comment), and this page can't know that in advance — so
     // unlike Grants.tsx's mandatory prompts, an empty code is a legitimate
-    // answer here (the first-ever, bootstrap enrollment).
+    // answer here (a genuinely fresh install).
     //
     // Cancel and empty are therefore NOT equivalent, and prompt() distinguishes
     // them: null means cancelled, "" means submitted-blank. Cancel aborts;
     // blank proceeds with no code and lets the server decide whether one was
     // required. Collapsing the two would make cancelling a create still create.
+    //
+    // The wording says "never enrolled", not "first device": the backend counts
+    // ever-enrolled *including revoked* rows, so an operator who has revoked
+    // every device would otherwise read "first device" as true, leave it blank,
+    // and get a bare 401 they cannot act on.
     // Trimmed for the same paste-adds-whitespace reason as Grants.tsx.
-    const totpInput = window.prompt("Enter TOTP code from an already-enrolled device (leave blank if this is the first device)");
+    const totpInput = window.prompt(
+      "Enter a TOTP code from an already-enrolled device (leave blank only on a new install that has never enrolled one)",
+    );
     if (totpInput === null) return;
     const totpCode = totpInput.trim();
 
@@ -96,7 +121,25 @@ export function TokensPage() {
     }
   };
 
-  const revoke = async (id: string) => {
+  const dismiss = () => {
+    if (!window.confirm("Dismiss? The bearer token and TOTP setup key above cannot be shown again.")) return;
+    setJustCreated(null);
+  };
+
+  // Revoking is not reversible and the API exposes no "this token is the one
+  // you are authenticated with" marker, so the UI genuinely cannot warn
+  // precisely — it can only make sure the click was deliberate. Revoking the
+  // browser's own token (VITE_API_AUTH_TOKEN) locks this UI out, and because
+  // the enrollment gate counts revoked rows, minting a replacement then needs a
+  // code from the device just revoked. Recovery is DB surgery.
+  const revoke = async (id: string, label: string) => {
+    if (
+      !window.confirm(
+        `Revoke "${label}"? This cannot be undone. If it is the token this browser is using, you will be locked out and recovery requires direct database access.`,
+      )
+    ) {
+      return;
+    }
     setBusyId(id);
     setError(null);
     try {
@@ -118,11 +161,22 @@ export function TokensPage() {
       {justCreated && (
         <div className="grant-card token-reveal">
           <p>
-            <strong>{justCreated.label}</strong> created. Copy these now — neither is shown again.
+            <strong>{justCreated.label}</strong> created. Copy both now — neither is shown again, and a lost setup key
+            on a first device can only be recovered from the database.
           </p>
           <label>
             Bearer token
-            <input readOnly value={justCreated.token} onFocus={(e) => e.currentTarget.select()} />
+            {/* autoComplete/spellCheck off: these hold a live credential, and
+                neither a password manager's save prompt nor a spellchecker
+                should ever see it. Both inputs sit outside the <form>, so
+                form-submit capture does not apply. */}
+            <input
+              readOnly
+              autoComplete="off"
+              spellCheck={false}
+              value={justCreated.token}
+              onFocus={(e) => e.currentTarget.select()}
+            />
           </label>
           <label>
             TOTP setup key
@@ -131,12 +185,14 @@ export function TokensPage() {
                 action — see enrollmentSecret above. */}
             <input
               readOnly
+              autoComplete="off"
+              spellCheck={false}
               value={enrollmentSecret(justCreated.totp_enroll_uri)}
               onFocus={(e) => e.currentTarget.select()}
             />
           </label>
           <div className="actions">
-            <button onClick={() => setJustCreated(null)}>Dismiss</button>
+            <button onClick={dismiss}>Dismiss</button>
           </div>
         </div>
       )}
@@ -151,7 +207,7 @@ export function TokensPage() {
             </p>
             {t.active && (
               <div className="actions">
-                <button disabled={busyId === t.id} onClick={() => revoke(t.id)} className="secondary">
+                <button disabled={busyId === t.id} onClick={() => revoke(t.id, t.label)} className="secondary">
                   Revoke
                 </button>
               </div>
@@ -162,9 +218,7 @@ export function TokensPage() {
             bare <p> here is invalid HTML and reads poorly to a screen reader.
             The sibling Grants/StagedDiffs pages still have the unwrapped
             shape; not fixed here to keep this PR to its own surface. */}
-        {tokens.length === 0 && (
-          <li className="empty">No reviewer tokens yet.</li>
-        )}
+        {tokens.length === 0 && <li className="empty">No reviewer tokens yet.</li>}
       </ul>
 
       <form onSubmit={createToken} className="new-grant-form">
@@ -173,6 +227,15 @@ export function TokensPage() {
           Label
           <input value={newLabel} onChange={(e) => setNewLabel(e.target.value)} placeholder="alex-laptop" />
         </label>
+        {/* Disabling this while a reveal is pending is the *single* guard
+            against a second create overwriting an uncopied credential.
+            An earlier revision also re-checked justCreated inside the submit
+            handler, justified as "a form still submits on Enter" — that is
+            false (HTML implicit submission does not fire when the only submit
+            button is disabled), so the branch was unreachable and its comment
+            was an aspirational claim of a layer that did not exist. Removed:
+            it failed the deletion test (CLAUDE.md principle 7 — enforcement
+            exists exactly once). Found by independent review. */}
         <button type="submit" disabled={creating || justCreated !== null}>
           Create token
         </button>

@@ -33,12 +33,23 @@ const sampleCreated: CreatedReviewerToken = {
   totp_enroll_uri: "otpauth://totp/Chuvar:alex-phone?secret=JBSWY3DPEHPK3PXP&issuer=Chuvar",
 };
 
+// Walks the create form from an empty list to a rendered reveal panel.
+async function createAndReveal() {
+  await screen.findByText("No reviewer tokens yet.");
+  await userEvent.type(screen.getByPlaceholderText("alex-laptop"), "alex-phone");
+  await userEvent.click(screen.getByRole("button", { name: "Create token" }));
+  await screen.findByDisplayValue("plaintext-bearer-token");
+}
+
 describe("TokensPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // createToken's TOTP prompt is optional (unlike Grants.tsx's TOTP
-    // prompts) — default to "no code entered", the bootstrap-enrollment path.
+    // prompts) — default to "no code entered", the fresh-install path.
     vi.spyOn(window, "prompt").mockReturnValue("");
+    // Dismiss and Revoke both confirm; default to "operator said yes" so each
+    // test only has to override the case it is actually about.
+    vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
   it("renders existing tokens", async () => {
@@ -63,23 +74,19 @@ describe("TokensPage", () => {
     vi.mocked(api.createToken).mockResolvedValue(sampleCreated);
 
     render(<TokensPage />);
-    await screen.findByText("No reviewer tokens yet.");
+    await createAndReveal();
 
-    await userEvent.type(screen.getByPlaceholderText("alex-laptop"), "alex-phone");
-    await userEvent.click(screen.getByRole("button", { name: "Create token" }));
-
-    expect(await screen.findByDisplayValue("plaintext-bearer-token")).toBeInTheDocument();
     expect(screen.getByDisplayValue("JBSWY3DPEHPK3PXP")).toBeInTheDocument();
-    // createToken is called with the bootstrap path's undefined totpCode, not
-    // an empty string — window.prompt's mocked "" return must be normalized,
-    // since the backend distinguishes "no code sent" from "empty code sent".
+    // Shape check only: a blank prompt sends no code. (The backend treats an
+    // absent and an empty X-Chuvar-TOTP-Code header identically — verifyTOTPCode
+    // trims then compares to "" — so this is not a security boundary, and
+    // client.ts omits the header for "" anyway.)
     expect(api.createToken).toHaveBeenCalledWith("alex-phone", undefined);
   });
 
   it("falls back to the raw URI when the enrollment URI cannot be parsed", async () => {
     // A parse failure during render would blank the page rather than degrade,
-    // and the secret is unrecoverable after this one render — so the fallback
-    // shows something enrollable instead of throwing. See enrollmentSecret.
+    // and the secret is unrecoverable after this one render. See enrollmentSecret.
     vi.mocked(api.listTokens).mockResolvedValue([]);
     vi.mocked(api.createToken).mockResolvedValue({ ...sampleCreated, totp_enroll_uri: "not a valid uri" });
 
@@ -111,19 +118,89 @@ describe("TokensPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("dismisses the revealed token without re-showing it after dismiss", async () => {
+  it("aborts creation when the TOTP prompt is cancelled", async () => {
+    // Cancel (null) and submitted-blank ("") are different answers: blank is a
+    // legitimate fresh-install enrollment, cancel means don't create at all.
     vi.mocked(api.listTokens).mockResolvedValue([]);
-    vi.mocked(api.createToken).mockResolvedValue(sampleCreated);
+    vi.spyOn(window, "prompt").mockReturnValue(null);
 
     render(<TokensPage />);
     await screen.findByText("No reviewer tokens yet.");
     await userEvent.type(screen.getByPlaceholderText("alex-laptop"), "alex-phone");
     await userEvent.click(screen.getByRole("button", { name: "Create token" }));
-    await screen.findByDisplayValue("plaintext-bearer-token");
+
+    expect(api.createToken).not.toHaveBeenCalled();
+  });
+
+  it("disables the create button while a reveal is pending, so a second create cannot overwrite it", async () => {
+    // The disabled attribute is the *only* guard here, so this asserts it
+    // directly rather than trying to drive a second submit. An earlier version
+    // of this test claimed Enter could still submit past it; that is false per
+    // HTML implicit submission (the sole submit button is disabled), which made
+    // the test vacuous and the handler-side guard it claimed to pin dead code.
+    // Found by independent review.
+    vi.mocked(api.listTokens).mockResolvedValue([]);
+    vi.mocked(api.createToken).mockResolvedValue(sampleCreated);
+
+    render(<TokensPage />);
+    await createAndReveal();
+
+    expect(screen.getByRole("button", { name: "Create token" })).toBeDisabled();
+    expect(api.createToken).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the revealed credential when the dismiss confirmation is declined", async () => {
+    vi.mocked(api.listTokens).mockResolvedValue([]);
+    vi.mocked(api.createToken).mockResolvedValue(sampleCreated);
+
+    render(<TokensPage />);
+    await createAndReveal();
+
+    vi.mocked(window.confirm).mockReturnValue(false);
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+
+    expect(screen.getByDisplayValue("plaintext-bearer-token")).toBeInTheDocument();
+  });
+
+  it("dismisses the revealed token once the confirmation is accepted", async () => {
+    vi.mocked(api.listTokens).mockResolvedValue([]);
+    vi.mocked(api.createToken).mockResolvedValue(sampleCreated);
+
+    render(<TokensPage />);
+    await createAndReveal();
 
     await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
 
     expect(screen.queryByDisplayValue("plaintext-bearer-token")).not.toBeInTheDocument();
+  });
+
+  it("reports reveal state so the shell can block navigation away from it", async () => {
+    // The page cannot veto its own unmount, and a tab switch would discard the
+    // only copy of the credential — App blocks on this signal.
+    const onRevealChange = vi.fn();
+    vi.mocked(api.listTokens).mockResolvedValue([]);
+    vi.mocked(api.createToken).mockResolvedValue(sampleCreated);
+
+    render(<TokensPage onRevealChange={onRevealChange} />);
+    await createAndReveal();
+
+    expect(onRevealChange).toHaveBeenLastCalledWith(true);
+
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(onRevealChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("does not revoke when the confirmation is declined", async () => {
+    vi.mocked(api.listTokens).mockResolvedValue([sampleToken]);
+
+    render(<TokensPage />);
+    await screen.findByText("alex-laptop");
+
+    vi.mocked(window.confirm).mockReturnValue(false);
+    await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
+
+    expect(api.revokeToken).not.toHaveBeenCalled();
+    expect(screen.getByText("active")).toBeInTheDocument();
   });
 
   it("reflects the revoked state after revoking, not just calling the API", async () => {
@@ -143,40 +220,5 @@ describe("TokensPage", () => {
     expect(await screen.findByText("revoked")).toBeInTheDocument();
     expect(api.revokeToken).toHaveBeenCalledWith("token-1");
     expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
-  });
-
-  it("aborts creation when the TOTP prompt is cancelled", async () => {
-    // Cancel (null) and submitted-blank ("") are different answers: blank is a
-    // legitimate bootstrap enrollment, cancel means don't create at all.
-    vi.mocked(api.listTokens).mockResolvedValue([]);
-    vi.spyOn(window, "prompt").mockReturnValue(null);
-
-    render(<TokensPage />);
-    await screen.findByText("No reviewer tokens yet.");
-    await userEvent.type(screen.getByPlaceholderText("alex-laptop"), "alex-phone");
-    await userEvent.click(screen.getByRole("button", { name: "Create token" }));
-
-    expect(api.createToken).not.toHaveBeenCalled();
-  });
-
-  it("refuses to create another token until the revealed one is dismissed", async () => {
-    // The revealed secret is unrecoverable, so a second create must not be
-    // able to overwrite it before the operator has copied it.
-    vi.mocked(api.listTokens).mockResolvedValue([]);
-    vi.mocked(api.createToken).mockResolvedValue(sampleCreated);
-
-    render(<TokensPage />);
-    await screen.findByText("No reviewer tokens yet.");
-    await userEvent.type(screen.getByPlaceholderText("alex-laptop"), "alex-phone");
-    await userEvent.click(screen.getByRole("button", { name: "Create token" }));
-    await screen.findByDisplayValue("plaintext-bearer-token");
-
-    expect(screen.getByRole("button", { name: "Create token" })).toBeDisabled();
-    expect(api.createToken).toHaveBeenCalledTimes(1);
-
-    // Still reachable via Enter on the form even with the button disabled.
-    await userEvent.type(screen.getByPlaceholderText("alex-laptop"), "second-device{Enter}");
-    expect(api.createToken).toHaveBeenCalledTimes(1);
-    expect(screen.getByDisplayValue("plaintext-bearer-token")).toBeInTheDocument();
   });
 });
