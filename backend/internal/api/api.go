@@ -124,6 +124,12 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("GET /api/tokens", a.listTokens)
 	mux.HandleFunc("POST /api/tokens", a.createToken)
 	mux.HandleFunc("POST /api/tokens/{id}/revoke", a.revokeToken)
+	// {repo...} (not {repo}), and registered after every fixed-segment route
+	// above: a repo identifier like "github.com/abradner/chuvar" contains
+	// slashes, so this wildcard-suffix pattern is the only one of the two
+	// that can capture it whole — see getSigningPolicy's doc comment.
+	mux.HandleFunc("GET /api/signing-policies/{repo...}", a.getSigningPolicy)
+	mux.HandleFunc("POST /api/signing-policies", a.requireTOTP(a.upsertSigningPolicy))
 
 	// /api/events (events.go) is mounted outside withRequestTimeout deliberately:
 	// every other route is a quick request/response and benefits from a bounded

@@ -97,6 +97,14 @@ type ReviewerToken struct {
 	TotpSecretEnc []byte
 }
 
+type SigningPolicy struct {
+	Repo      string
+	Policy    string
+	SetBy     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type StagedDiff struct {
 	ID                    string
 	Subject               string
