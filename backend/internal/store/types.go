@@ -141,3 +141,19 @@ type GrantedScope struct {
 	Scope string
 	Depth string
 }
+
+// ListCursor is a page boundary for the cursor-paginated listing methods
+// (ListStagedDiffsPage, ListGrantsPage): the (created_at, id) of the last row
+// the caller has already seen. nil means "first page." Keyed on created_at/id
+// together, not an offset — the tables these methods page over gain and lose
+// rows continuously while a reviewer is working (new staged diffs/grants
+// arriving, an existing one being approved/rejected/revoked), and offset
+// pagination silently skips or repeats rows across that churn; a keyset
+// comparison against the last row actually returned doesn't, since it isn't a
+// row count. id breaks ties between rows sharing a created_at — see
+// ListStagedDiffsPage's doc comment (staged_diffs.go) for why created_at
+// alone isn't a safe total order here.
+type ListCursor struct {
+	CreatedAt time.Time
+	ID        string
+}

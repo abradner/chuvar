@@ -221,6 +221,56 @@ func (s *Store) ListGrants(ctx context.Context, subject string) ([]Grant, error)
 	return grants, nil
 }
 
+// ListGrantsPage returns up to limit of subject's grants (active or not),
+// most recent first (matches ListGrants' own ORDER BY), starting strictly
+// before cursor — nil cursor means "first page." The bool return reports
+// whether further rows exist past this page. Used by GET /api/grants
+// (internal/api/grants.go); ListGrants above stays the unpaginated call
+// internal/mcptools/list_grants.go uses for an agent's own (naturally small)
+// grant list. See queries/grants.sql's ListGrantsPage for the keyset-vs-
+// offset rationale.
+func (s *Store) ListGrantsPage(ctx context.Context, subject string, limit int, cursor *ListCursor) ([]Grant, bool, error) {
+	if limit <= 0 {
+		return nil, false, fmt.Errorf("store: limit must be positive")
+	}
+	params := sqlcgen.ListGrantsPageParams{
+		Subject: subject,
+		// Requesting limit+1, not limit, is what lets hasMore below be
+		// answered from this one query instead of a second COUNT — same
+		// trick as ListStagedDiffsPage.
+		Lim: int64(limit) + 1,
+	}
+	if cursor != nil {
+		createdAt := cursor.CreatedAt
+		id := cursor.ID
+		params.CursorCreatedAt = &createdAt
+		params.CursorID = &id
+	}
+	rows, err := s.q.ListGrantsPage(ctx, params)
+	if err != nil {
+		return nil, false, fmt.Errorf("store: list grants page: %w", err)
+	}
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+
+	grants := make([]Grant, len(rows))
+	for i, r := range rows {
+		grants[i] = Grant{
+			ID:        r.ID,
+			Subject:   r.Subject,
+			Scopes:    r.Scopes,
+			Kind:      GrantKind(r.Kind),
+			Depth:     depthOrEmpty(r.Depth),
+			CreatedAt: r.CreatedAt,
+			ExpiresAt: r.ExpiresAt,
+			RevokedAt: r.RevokedAt,
+		}
+	}
+	return grants, hasMore, nil
+}
+
 // GrantedScopes returns the union of scopes granted to subject across all currently
 // active (non-revoked, unexpired) memory-kind grants. This is what read-with-scope-
 // check checks requested scopes against, and what the bouncer's dedupe/target-fact

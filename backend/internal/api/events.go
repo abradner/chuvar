@@ -42,6 +42,27 @@ var eventPollInterval = 2 * time.Second
 // reason about than one that silently varies per grant.
 var grantExpiryWarningWindow = 24 * time.Hour
 
+// eventPollListLimit bounds how many pending staged diffs / grant requests
+// this poll loop asks for on every tick (ListStagedDiffsBounded/
+// ListGrantRequestsBounded below) — see those methods' doc comments for why
+// this is a bound, not a cursor: streamEvents re-runs the query every
+// eventPollInterval per connected client, so an unbounded result set here
+// multiplies by poll rate and client count, the same class of cost the
+// ListGrantsNearingExpiry N+1 was already fixed for. Deliberately reuses
+// maxListLimit (the REST endpoints' own upper bound on a single page) rather
+// than defaultListLimit: a live feed and a UI page have different tradeoffs
+// — defaultListLimit is sized for what a human comfortably scrolls, while
+// this just needs to be "large enough that a realistic backlog is still
+// fully visible over SSE without paging" while staying capped against a
+// pathological one. A backlog beyond this bound simply doesn't appear on the
+// live stream until something ahead of it resolves — the reviewer still sees
+// it via GET /api/staged-diffs (paginated) or GET /api/grant-requests, just
+// not pushed. Acceptable for a backlog this large specifically because it's
+// the same scenario motivating pagination in the first place: once the queue
+// is that deep, the SSE feed's job is "what's newly actionable," not "everything
+// that has ever been pending."
+const eventPollListLimit = maxListLimit
+
 // streamEvents handles GET /api/events. Sends an "added" event for each staged
 // diff / grant request that's newly pending, and a "resolved" event (carrying its
 // final status) for each that's no longer pending — all relative to what this
@@ -149,7 +170,7 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 		pollCtx, cancel := context.WithTimeout(ctx, a.RequestTimeout)
 		defer cancel()
 
-		diffs, err := a.Store.ListStagedDiffs(pollCtx, store.DiffPending)
+		diffs, err := a.Store.ListStagedDiffsBounded(pollCtx, store.DiffPending, eventPollListLimit)
 		if err != nil {
 			logPollError("api: streamEvents: listing staged diffs", err)
 			return false
@@ -189,7 +210,7 @@ func (a *API) streamEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		seenDiffs = currentDiffs
 
-		reqs, err := a.Store.ListGrantRequests(pollCtx, store.GrantRequestPending)
+		reqs, err := a.Store.ListGrantRequestsBounded(pollCtx, store.GrantRequestPending, eventPollListLimit)
 		if err != nil {
 			logPollError("api: streamEvents: listing grant requests", err)
 			return false

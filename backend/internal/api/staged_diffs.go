@@ -89,7 +89,11 @@ var validStatuses = map[store.DiffStatus]bool{
 	store.DiffCommitted: true,
 }
 
-// listStagedDiffs handles GET /api/staged-diffs?status=pending (default: pending).
+// listStagedDiffs handles GET /api/staged-diffs?status=pending&limit=50&cursor=...
+// (status default: pending, limit default: defaultListLimit). Cursor-paginated,
+// oldest first (review-queue order) — see store.ListStagedDiffsPage's doc
+// comment for the keyset-vs-offset rationale, and pagination.go for the
+// limit/cursor parsing shared with listGrants.
 func (a *API) listStagedDiffs(w http.ResponseWriter, r *http.Request) {
 	status := store.DiffStatus(r.URL.Query().Get("status"))
 	if status == "" {
@@ -99,18 +103,34 @@ func (a *API) listStagedDiffs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("status must be one of pending, approved, rejected, committed (got %q)", status))
 		return
 	}
+	limit, err := parseListLimit(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	cursor, err := parseListCursor(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 
-	diffs, err := a.Store.ListStagedDiffs(r.Context(), status)
+	diffs, hasMore, err := a.Store.ListStagedDiffsPage(r.Context(), status, limit, cursor)
 	if err != nil {
 		writeStoreError(w, http.StatusInternalServerError, "listStagedDiffs", "could not list staged diffs", err)
 		return
+	}
+
+	var next *string
+	if len(diffs) > 0 {
+		last := diffs[len(diffs)-1]
+		next = nextCursorFor(hasMore, last.CreatedAt, last.ID)
 	}
 
 	views := make([]stagedDiffView, len(diffs))
 	for i, d := range diffs {
 		views[i] = toStagedDiffView(d)
 	}
-	writeJSON(w, http.StatusOK, views)
+	writeJSON(w, http.StatusOK, page[stagedDiffView]{Items: views, NextCursor: next})
 }
 
 // approveStagedDiff handles POST /api/staged-diffs/{id}/approve. This is the only

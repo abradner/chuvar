@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -721,6 +722,149 @@ func TestStagedDiffs_Get(t *testing.T) {
 
 	if _, err := s.GetStagedDiff(ctx, "00000000-0000-0000-0000-000000000000"); err == nil {
 		t.Fatal("GetStagedDiff() for nonexistent ID: want error, got nil")
+	}
+}
+
+// TestStagedDiffs_ListPage_WalksEveryRowExactlyOnce is the boundary-case test
+// the pagination ticket's self-review calls out explicitly: walk a full
+// keyset-paginated listing with a page size smaller than the total row
+// count, and confirm every row is seen exactly once — no skips (which an
+// offset-based scheme would show if a row were removed from an earlier page
+// mid-walk) and no duplicates (which a naive "created_at only" cursor could
+// show for same-timestamp rows). It also exercises the "a row arrives
+// between two poll ticks, right at the cursor" case: a new diff is proposed
+// after the first page is fetched but before the walk finishes, and must
+// show up only once — after every row that already existed when its own
+// cursor position was captured, never skipped, never duplicated into an
+// earlier page.
+func TestStagedDiffs_ListPage_WalksEveryRowExactlyOnce(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(0)
+	const total = 5
+	ids := make([]string, 0, total+1)
+	for i := 0; i < total; i++ {
+		d, err := s.ProposeDiff(ctx, "agent-a", fmt.Sprintf("fact number %d", i), []string{"identity.basic"}, vec, nil, nil)
+		if err != nil {
+			t.Fatalf("ProposeDiff() error = %v", err)
+		}
+		ids = append(ids, d.ID)
+	}
+
+	seen := map[string]bool{}
+	var cursor *ListCursor
+	insertedMidWalk := false
+	for page := 0; ; page++ {
+		diffs, hasMore, err := s.ListStagedDiffsPage(ctx, DiffPending, 2, cursor)
+		if err != nil {
+			t.Fatalf("ListStagedDiffsPage() page %d error = %v", page, err)
+		}
+		for _, d := range diffs {
+			if seen[d.ID] {
+				t.Fatalf("ListStagedDiffsPage() returned id %s twice across pages", d.ID)
+			}
+			seen[d.ID] = true
+		}
+
+		// Simulate a diff proposed concurrently with the walk, right after the
+		// first page was captured — it must not retroactively appear in a page
+		// already returned, and must not be skipped once the walk reaches it.
+		if page == 0 && !insertedMidWalk {
+			nd, err := s.ProposeDiff(ctx, "agent-a", "fact proposed mid-walk", []string{"identity.basic"}, vec, nil, nil)
+			if err != nil {
+				t.Fatalf("ProposeDiff() (mid-walk) error = %v", err)
+			}
+			ids = append(ids, nd.ID)
+			insertedMidWalk = true
+		}
+
+		if !hasMore {
+			break
+		}
+		last := diffs[len(diffs)-1]
+		cursor = &ListCursor{CreatedAt: last.CreatedAt, ID: last.ID}
+
+		if page > total+2 {
+			t.Fatal("ListStagedDiffsPage() walk did not terminate — hasMore stuck true")
+		}
+	}
+
+	if len(seen) != len(ids) {
+		t.Fatalf("ListStagedDiffsPage() walk saw %d distinct rows, want %d (ids=%v, seen=%v)", len(seen), len(ids), ids, seen)
+	}
+	for _, id := range ids {
+		if !seen[id] {
+			t.Errorf("ListStagedDiffsPage() walk never returned id %s", id)
+		}
+	}
+}
+
+// TestStagedDiffs_ListPage_LimitZeroOrNegativeRejected guards the same input
+// contract internal/api's parseListLimit already enforces at the HTTP
+// boundary — checked again here since ListStagedDiffsPage is a public Store
+// method any future caller could reach directly with a bad limit.
+func TestStagedDiffs_ListPage_LimitZeroOrNegativeRejected(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, _, err := s.ListStagedDiffsPage(ctx, DiffPending, 0, nil); err == nil {
+		t.Error("ListStagedDiffsPage() with limit=0: want error, got nil")
+	}
+	if _, _, err := s.ListStagedDiffsPage(ctx, DiffPending, -1, nil); err == nil {
+		t.Error("ListStagedDiffsPage() with limit=-1: want error, got nil")
+	}
+}
+
+// TestGrants_ListPage_WalksEveryRowExactlyOnce is ListStagedDiffsPage's
+// sibling test for the newest-first, subject-scoped grants listing —
+// confirming the same no-skip/no-duplicate property holds when the cursor
+// comparison runs the opposite direction (created_at DESC).
+func TestGrants_ListPage_WalksEveryRowExactlyOnce(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	const total = 5
+	ids := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		g, err := s.CreateGrant(ctx, "agent-a", []string{fmt.Sprintf("scope.%d", i)}, "memory", "facts", nil, "human-reviewer")
+		if err != nil {
+			t.Fatalf("CreateGrant() error = %v", err)
+		}
+		ids = append(ids, g.ID)
+	}
+
+	seen := map[string]bool{}
+	var cursor *ListCursor
+	for page := 0; ; page++ {
+		grants, hasMore, err := s.ListGrantsPage(ctx, "agent-a", 2, cursor)
+		if err != nil {
+			t.Fatalf("ListGrantsPage() page %d error = %v", page, err)
+		}
+		for _, g := range grants {
+			if seen[g.ID] {
+				t.Fatalf("ListGrantsPage() returned id %s twice across pages", g.ID)
+			}
+			seen[g.ID] = true
+		}
+		if !hasMore {
+			break
+		}
+		last := grants[len(grants)-1]
+		cursor = &ListCursor{CreatedAt: last.CreatedAt, ID: last.ID}
+
+		if page > total+2 {
+			t.Fatal("ListGrantsPage() walk did not terminate — hasMore stuck true")
+		}
+	}
+
+	if len(seen) != total {
+		t.Fatalf("ListGrantsPage() walk saw %d distinct rows, want %d", len(seen), total)
+	}
+	for _, id := range ids {
+		if !seen[id] {
+			t.Errorf("ListGrantsPage() walk never returned id %s", id)
+		}
 	}
 }
 
