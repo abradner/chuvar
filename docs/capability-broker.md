@@ -317,7 +317,7 @@ where one exists, so the agent does not have to invent a degradation path.
 | Code | Meaning | Correct agent response |
 |---|---|---|
 | `OK` | Signature returned | Proceed |
-| `NO_GRANT` | Never granted, expired, or revoked | Request grant; check whether a bypass policy applies |
+| `NO_GRANT` | Never granted, expired, or revoked | Request grant; consult the repo's signing policy (under `preferred`, proceeding unsigned emits an exception record) |
 | `SCOPE_DENIED` | Grant exists but does not cover this scope | Do not retry; escalate |
 | `LOCKED` | Custody backend needs human unlock | Request renewal; do not retry blindly |
 | `CONTENDED` | Held by another session; includes `retry_after` | Bounded wait |
@@ -381,7 +381,10 @@ where one exists, so the agent does not have to invent a degradation path.
 4. **Scope vocabulary.** Reuse the dotted-string convention verbatim (e.g.
    `git.sign:github.com/<org>/<repo>`, `fs.write:~/code/worktrees/**`,
    `ssh.auth:<host-alias>`)? Same `TEXT` column, same prefix matching, same "don't hardcode
-   the taxonomy" rule.
+   the taxonomy" rule. Note the tension these examples deliberately expose: the current
+   validator (`scope.Validate`) accepts only dot-delimited lowercase segments, so capability
+   targets carrying `:`, path, or glob syntax need the grammar extended — that extension is
+   part of this question, not an oversight in the examples.
 5. **Count-bounded grants.** Proposed position: TTL is the control, count is an anomaly
    tripwire. Hundreds of signatures in a minute is a signal; a dozen over a night is normal.
 6. **Expiry mid-operation.** Proposed position: fail closed, but make it never bite via
