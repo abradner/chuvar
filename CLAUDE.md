@@ -2,8 +2,9 @@
 
 > Auto-loaded every session. This file says *why* and *which way to lean*.
 > **AGENTS.md says how to work here — read it before touching anything.**
-> Notion is canonical for architecture and decisions; when in doubt, pointers
-> over restatement.
+> `docs/` is canonical for architecture and decisions (`architecture.md`,
+> `capability-broker.md`, `decisions.md`); when in doubt, pointers over
+> restatement.
 
 ## Purpose
 
@@ -33,8 +34,8 @@ attributable. Borrowed, never owned.
    authority is audited; exceptions self-report.
 7. **One chokepoint per property.** Enforcement exists exactly once; any layer
    on top must pass the deletion test (removing it changes politeness, never
-   possibility). Decisions are made once, dated, in Notion, with rejected
-   alternatives and accepted costs.
+   possibility). Decisions are made once, dated, in `docs/decisions.md`, with
+   rejected alternatives and accepted costs.
 8. **Claims name their adversary — and must hold.** Interim states are stated
    ("stated, not enforced"); stopgaps record the bar they miss. An
    aspirational security comment is a bug.

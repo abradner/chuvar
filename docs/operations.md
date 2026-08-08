@@ -225,8 +225,9 @@ From then on the enrolment gate is closed permanently: minting any further
 token requires a valid code from an already-enrolled device. The count it
 checks includes revoked rows, so revoking devices cannot reopen it.
 
-> There is no UI for this yet — it is a deliberate one-time operator action.
-> Tracked in Notion as a gap.
+> The Tokens page in the approval UI (PR #56) now provides this flow,
+> including the first (bootstrap) enrolment; the curl calls above document
+> the underlying API and remain valid as a UI-less fallback.
 
 ### Adding another device
 
