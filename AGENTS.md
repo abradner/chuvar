@@ -1,17 +1,18 @@
 # Chuvar — Agent Onboarding Guide
 
 > Read this file first. It is the source of truth for AI agents working in this codebase.
-> Design log / decisions: the "Brainstorm & Architecture Notes" page in the (still Memory-Vault-
-> titled, not yet renamed) Notion space is the canonical design doc, not this file. This file is
-> operational — how to build, run, and write code here. When the two disagree on architecture,
-> Notion wins; update this file to match rather than the reverse.
+> Design log / decisions: `docs/architecture.md` (design rationale), `docs/capability-broker.md`
+> (broker workstream and its decision log), and `docs/decisions.md` (project-wide decision log)
+> are the canonical design docs, not this file. This file is operational — how to build, run, and
+> write code here. When the two disagree on architecture, `docs/` wins; update this file to match
+> rather than the reverse.
 
 ## 1. What Is This?
 
 **Chuvar** — the name has landed (Jul 2026). Earlier design docs and this repo's git history
 refer to it as "Memory Vault," a working title used before the name was decided; that's historical
-context, not a naming inconsistency to fix retroactively. The Notion workspace still uses the old
-title pending its own rename (tracked separately).
+context, not a naming inconsistency to fix retroactively. The private design log that carried the
+old title was migrated into `docs/` and GitHub Issues in Aug 2026 and is archive-only now.
 
 Consent-based memory management for arbitrary agent ecosystems — "1Password meets OAuth scopes"
 for personal/organisational knowledge fed into AI agents on demand. Memories are broken into
@@ -44,7 +45,7 @@ need driving it.
 | Database | PostgreSQL + pgvector | Sole canonical store — facts, scopes, grants, audit log, embeddings, all transactionally atomic. Local dev via `docker-compose.yml`. **No dedicated vector DB as source of truth in CE** — see §3.2. |
 | Data access | [sqlc](https://sqlc.dev), `pgx/v5` | `internal/store` — hand-written SQL in `queries/*.sql`, typed Go generated into `sqlcgen/`. Chosen over an ORM specifically to keep the hand-tuned queries (RRF fusion, scope-visibility CTEs) under our control. |
 | MCP transport | `modelcontextprotocol/go-sdk` | stdio for v0 |
-| Write path | Postgres-backed staged-diff state machine | Temporal is the intended long-term engine for the bouncer pipeline (see Notion §4) but is deliberately deferred — don't stand up a Temporal cluster for v0 work, see §3.3 |
+| Write path | Postgres-backed staged-diff state machine | Temporal is the intended long-term engine for the bouncer pipeline (see `docs/architecture.md`) but is deliberately deferred — don't stand up a Temporal cluster for v0 work, see §3.3 |
 | Testing | Go: stdlib `testing` + `testify/require` where assertions get noisy. TS: Vitest + React Testing Library. | |
 | Deployment | Not yet decided | CI exists (§5); don't build container publishing or a prod deploy until asked |
 
@@ -55,7 +56,7 @@ The enforcement boundary is the **process boundary of chuvar's services, rooted 
 human-present custody unlock** — not the API alone, and not an OS-user split. The API is the sole
 legitimate control surface; the database is *inside* the boundary, so reaching it directly from
 agent context is by definition an attack, not a supported path. Full statement and rationale:
-the Agent Capability Broker page's decision log (2026-08-01 entries) in Notion.
+the decision log in `docs/capability-broker.md` (2026-08-01 entries).
 
 Two rules fall out of it, operationally:
 
@@ -71,11 +72,11 @@ Two rules fall out of it, operationally:
   outage — zeroize data-keys, seal, halt, require human re-unlock — never just a log line.
 
 ### 3.1 No Direct Writes, Ever
-The MCP server exposes no deterministic write endpoint. `propose-write` stages a diff in
+The MCP server exposes no deterministic write endpoint. `propose_write` stages a diff in
 `staged_diffs`; only a human approval (via the REST API used by the frontend, or a direct DB
 action in v0) moves a diff to `committed` and materializes rows in `facts`/`fact_scopes`. If
 you're tempted to add a tool or endpoint that writes directly to `facts`, stop — that defeats the
-entire premise of the project (see the Notion competitive-mining writeup: every prior-art memory
+entire premise of the project (see the competitive-mining writeup in `docs/architecture.md`: every prior-art memory
 project we studied skips this gate, and it's our actual differentiator, not incidental design).
 
 ### 3.2 Postgres + pgvector Is the Only Source of Truth (in CE)
@@ -84,7 +85,7 @@ an optional pluggable `RetrievalBackend` implementation behind an interface — 
 vanilla Postgres. When writing retrieval queries: **scope-filter in the `WHERE` clause before
 ranking**, never after. This is a security property (ungranted facts must never enter the
 candidate set), not just a performance detail — a competitor's rewrite (CaviraOSS/OpenMemory,
-see Notion) regressed exactly this property when delegating to an external vector store as a
+see `docs/architecture.md`) regressed exactly this property when delegating to an external vector store as a
 cautionary tale. The invariant is *scope-filter before ranking wherever ranking happens* — it is
 not a property of SQL. If/when the retrieval engine moves into service memory (the sealed-vault
 direction, §3.5), the invariant moves with it: filter the candidate set by granted scopes before
@@ -94,14 +95,14 @@ scoring, same rule, new layer.
 `ingest → classify → dedupe → stage → approve → commit` is real code today, running as a plain
 Go state machine over `staged_diffs`, not a Temporal workflow. The `Classifier` and `Embedder`
 are interfaces with a naive/deterministic stub implementation, because we already know we need a
-second implementation later (Bedrock in production, per the Notion doc) — that's why they're
+second implementation later (Bedrock in production, per `docs/architecture.md`) — that's why they're
 interfaces and not a bare function; it's not speculative abstraction, the second caller is already
 decided. Don't wire in a real Temporal cluster or a real embedding provider without checking with
 the user first — both are explicit two-way doors, deliberately left open per current direction.
 
 ### 3.4 Scope Taxonomy Is Unsettled — Don't Hardcode It
 Whether default scopes need to be granular out of the box vs. user-defined is an open question
-(Notion §6). Scopes are stored as plain `TEXT` (dotted strings), not a fixed enum/lookup table.
+(`docs/architecture.md`, Open questions). Scopes are stored as plain `TEXT` (dotted strings), not a fixed enum/lookup table.
 Don't add a hardcoded scope registry or CHECK constraint that bakes in a specific taxonomy.
 
 ### 3.5 Sealed at Rest Is Committed
@@ -264,10 +265,10 @@ should trigger from it.
 - Work in small, atomic commits — guideline is **under ~1k lines of diff per commit**, each one a
   coherent, reviewable unit (one migration, one package, one tool, one UI page — not "backend
   scaffold" as a single 3000-line commit). Write commit messages that explain **what** changed,
-  **why** (tie back to the relevant Notion ticket/decision when there is one), and **how** if the
+  **why** (tie back to the relevant GitHub issue or `docs/decisions.md` entry when there is one), and **how** if the
   approach isn't obvious from the diff.
 - For anything genuinely ambiguous or not yet decided by the user, prefer the reversible option
-  and leave a clear marker (comment, or a note in the relevant Notion task) rather than picking
+  and leave a clear marker (comment, or a note on the relevant GitHub issue) rather than picking
   silently and moving on. Two-way doors over one-way doors when direction is unclear.
 - **Ground decisions in the real system** — check the actual schema, hardware, and code before
   arguing from theory. Recent example: the sealed-vault decision (2026-08-01) turned on two
@@ -275,8 +276,8 @@ should trigger from it.
   deployment host), both of which overturned the on-paper plan. A feasibility argument that
   hasn't touched the schema is a guess.
 - Use proper file-reading/editing tools rather than `cat`/`sed` for inspecting or modifying files.
-- Keep the Notion Tasks Tracker roughly in sync with real progress (status transitions) as you
-  complete tickets — it's the team's actual view of what's done.
+- Keep GitHub Issues roughly in sync with real progress (close, label, and comment as you
+  complete work) — it's the team's actual view of what's done.
 - **Once the repo is pushed publicly: substantial work lands as a PR, not a direct commit to
   main** — branch, push, open a PR, even for solo-authored work. Initial repo boilerplate (LICENSE,
   README, CI scaffolding, the first push of pre-existing history) is the one exception and can go
@@ -386,8 +387,8 @@ the deletion test above), but politeness that shouldn't silently vanish in a red
 Split further (separate layout component, shared `components/` primitives) only when a second
 consumer actually exists — same "second caller is decided, not speculative" bar as §3.3.
 Behavioral tests exercise the page (hook+view integrated); view tests cover rendering given
-props. `Grants.tsx`/`StagedDiffs.tsx` predate this standard and are tracked in Notion for
-retrofit — don't copy their single-blob shape into new work.
+props. `Grants.tsx`/`StagedDiffs.tsx` predate this standard and are tracked for retrofit in
+issue #90 — don't copy their single-blob shape into new work.
 
 - UI-affecting PRs include a screenshot (or before/after pair) in the description — reviewers
   shouldn't have to run the branch to see what changed.
@@ -398,8 +399,8 @@ retrofit — don't copy their single-blob shape into new work.
 - Prefer additive, backwards-compatible migrations. Ask before anything destructive (dropping
   columns/tables) once there's any real data to lose.
 - Bi-temporal columns on `facts` (`valid_at`/`invalid_at`/`expired_at`/`created_at`): superseding
-  a fact means soft-invalidating the old row, never deleting it — see the Notion mining writeup
-  (§7) for why (audit trail, provenance, matches the pattern Graphiti uses).
+  a fact means soft-invalidating the old row, never deleting it — see the mining writeup in
+  `docs/architecture.md` for why (audit trail, provenance, matches the pattern Graphiti uses).
 
 ---
 

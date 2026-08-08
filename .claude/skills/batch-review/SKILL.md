@@ -128,26 +128,23 @@ squash — which is why the manual flavour here does not squash interstitials.
   every retrieval path — a security property), §6 (trust-boundary questions,
   secure-by-default network settings, closed-vocabulary validation,
   regression-tested fixes seen to fail first).
-- **Deferrals go to a Notion task** in the *Memory Vault Tasks Tracker*
-  (AGENTS.md §6 already makes that the team's real view of progress), **with
-  its metadata set** — a bare title in the tracker is barely better than a
+- **Deferrals go to a GitHub issue** (AGENTS.md §6 makes GitHub Issues the
+  team's real view of progress — the tracker migrated out of Notion in
+  Aug 2026), **with labels set** — a bare title is barely better than a
   PR-body table:
 
-  | Property | Set it to |
+  | Field | Set it to |
   |---|---|
-  | Task name | The finding, not the symptom |
-  | Status | `Not started` |
-  | Impact | `High` / `Medium` / `Low` — a deferred correctness bug is not Low |
-  | Effort level | `Small` / `Medium` / `Large` |
-  | Format | `🐞 Bug`, `💻 Tech Debt`, `🚧 KTLO`, `🔬 Research/Spike`, … (multi) |
-  | Function | usually `Code/Tech`; `Docs/Ops` for tooling and workflow |
-  | Project | relate it to the Chuvar project row |
+  | Title | The finding, not the symptom |
+  | Area label | one of `enforcement-boundary` / `capability-broker` / `consent-surfaces` / `core-engine` / `frontend` / `research` |
+  | Type label | one or two of `bug` / `tech-debt` / `feature` / `research-spike` / `known-gap` / `design` |
 
   The body carries the finding, the reasoning, and acceptance criteria.
-  **Not a GitHub issue** — an earlier revision of this skill said issue #12
-  was the shape to follow; #12 was a one-off, not the convention, and the
-  rule was wrong. **Not a PR-body table** either: that goes stale between
-  rounds and vanishes on merge.
+  (History of this rule, superseded in place twice: an early revision pointed
+  at issue #12 as the shape to follow; a later one reversed that to "Notion,
+  not GitHub issues"; with the Aug 2026 tracker migration it is GitHub Issues
+  for good.) **Not a PR-body table**: that goes stale between rounds and
+  vanishes on merge.
 - Release: `bin/release-tag` cuts a `v<UTC yyyymmddHHMM>` tag at main's tip
   and refuses a main that isn't green. There is **no image build yet**
   (deployment undecided, AGENTS.md §5), so today the tag marks a release
@@ -531,8 +528,8 @@ the cap arriving** — regardless of how few files are in play.
 At the cap, or once findings stop being correctness regressions:
 
 - Fix only genuine defects in shipped behaviour.
-- Everything else becomes a **Notion task** with the finding, reasoning, and
-  acceptance criteria — metadata set, per Repo specifics.
+- Everything else becomes a **GitHub issue** with the finding, reasoning, and
+  acceptance criteria — labels set, per Repo specifics.
 - If one small change draws three or more findings, **revert and ticket it**.
   It needs design time, not another patch.
 
@@ -733,8 +730,8 @@ followup degrades independently of the interstitials.
   pre-emptively rebase someone else's branch.
 - Never trust an aggregate review signal.
 - A merge is not a release.
-- Write every deferral down as a Notion task in the Memory Vault Tasks
-  Tracker, metadata set — not a GitHub issue, not a PR-body table.
+- Write every deferral down as a GitHub issue, labels set — not a PR-body
+  table.
 
 ## Evidence
 

@@ -200,8 +200,8 @@ why that's an interface, not a shortcut).
 
 ## Competitive codebase mining
 
-*(Jul 2026 — the writeup `AGENTS.md` refers to as "the Notion mining
-writeup"; this section is that writeup, migrated in place.)*
+*(Jul 2026 — the competitive-mining writeup `AGENTS.md` §3.1/§3.2 cite;
+this section is that writeup, migrated here from the private design log.)*
 
 Before writing v0, six related codebases were shallow-cloned and actually
 read — as temporary, gitignored working copies, never vendored into this
