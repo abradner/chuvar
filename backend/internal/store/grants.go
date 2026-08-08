@@ -8,41 +8,68 @@ import (
 	"github.com/abradner/chuvar/backend/internal/store/sqlcgen"
 )
 
-// ValidDepth mirrors the CHECK constraint on grants.depth/grant_requests.depth in
-// the schema — kept in sync by hand, not queried from the DB, since it changes
-// about as often as the migration itself. The single copy every layer that
-// accepts external input (this package, internal/api, internal/mcptools) now
-// calls, replacing three independently hand-synced maps that carried the
-// identical drift risk. Checking here means a bad value comes back as a clear
-// validation error instead of a raw Postgres check-constraint violation leaking
-// out.
-func ValidDepth(depth string) bool {
-	switch depth {
-	case "summary", "facts", "full":
-		return true
-	default:
-		return false
+// depthOrder is the single closed vocabulary for grant depths, ordered from
+// least to most permissive, and mirrors the CHECK constraint on
+// grants.depth/grant_requests.depth in the schema — kept in sync by hand, not
+// queried from the DB, since it changes about as often as the migration
+// itself. ValidDepth, depthRank, and depthName all derive from this one list
+// instead of each encoding the vocabulary in their own switch statement:
+// validity is membership, rank is index, name is the reverse lookup. PR #24
+// already consolidated three hand-synced validDepths maps (store/api/mcptools)
+// into ValidDepth for exactly this reason; PR #26 then reintroduced the same
+// drift risk in a different shape (ValidDepth, depthRank, and facts.go's
+// depthName each separately hard-coding the set and, for the latter two, its
+// ordering). This is the one place that changes when a depth is added.
+var depthOrder = []string{"summary", "facts", "full"}
+
+// depthRankIndex returns depth's position in depthOrder, or -1 if depth is
+// not in the closed vocabulary. The one place ValidDepth, depthRank, and
+// depthName all read from.
+func depthRankIndex(depth string) int {
+	for i, d := range depthOrder {
+		if d == depth {
+			return i
+		}
 	}
+	return -1
+}
+
+// ValidDepth reports whether depth is one of the closed vocabulary's values.
+// The single copy every layer that accepts external input (this package,
+// internal/api, internal/mcptools) calls. Checking here means a bad value
+// comes back as a clear validation error instead of a raw Postgres
+// check-constraint violation leaking out.
+func ValidDepth(depth string) bool {
+	return depthRankIndex(depth) >= 0
 }
 
 // depthRank orders depths by permissiveness, for computing an effective depth
 // across multiple covering grants (facts.go's effectiveDepth) — not derivable
 // by sorting the strings themselves, since "facts" < "full" < "summary"
-// alphabetically is not the permissiveness order. Panics on an invalid depth:
-// every caller is expected to have already passed depth through ValidDepth
-// (at write time) or to be reading it back from a column the DB CHECK
-// constraint already restricts to these three values.
-func depthRank(depth string) int {
-	switch depth {
-	case "summary":
-		return 0
-	case "facts":
-		return 1
-	case "full":
-		return 2
-	default:
-		panic(fmt.Sprintf("store: depthRank: invalid depth %q", depth))
+// alphabetically is not the permissiveness order. Returns an error instead of
+// panicking on an unrecognised depth: this is read back from a DB column on a
+// read path inside a request handler, and even though the CHECK constraint
+// makes an invalid value unreachable today, a validation failure on this input
+// must deny rather than crash the process.
+func depthRank(depth string) (int, error) {
+	r := depthRankIndex(depth)
+	if r < 0 {
+		return 0, fmt.Errorf("store: invalid depth %q", depth)
 	}
+	return r, nil
+}
+
+// depthName is depthRank's inverse: given a rank (an index into depthOrder),
+// returns the depth name. Returns an error on an out-of-range rank rather than
+// defaulting to "full" — the most permissive value — which would silently
+// widen disclosure on exactly the input this is meant to reject; see
+// depthRank's doc comment for why this must fail closed even though it's not
+// reachable today.
+func depthName(rank int) (string, error) {
+	if rank < 0 || rank >= len(depthOrder) {
+		return "", fmt.Errorf("store: invalid depth rank %d", rank)
+	}
+	return depthOrder[rank], nil
 }
 
 // ValidKind mirrors the CHECK constraint on grants.kind/grant_requests.kind.
