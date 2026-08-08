@@ -2,6 +2,7 @@ package mcptools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -110,7 +111,7 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 
 		if missing := scope.Missing(requested, toScopes(grantedStrs)); len(missing) > 0 {
 			missingStrs := fromScopes(missing)
-			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, nil, missingStrs); err != nil {
+			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, nil, missingStrs, nil); err != nil {
 				return nil, readOutput{}, toolError("read_with_scope_check", err)
 			}
 			return nil, readOutput{Status: "insufficient_scope", MissingScopes: missingStrs}, nil
@@ -151,7 +152,7 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 		grantedStrs = grantedScopeStrs(grantedDepths)
 		if missing := scope.Missing(requested, toScopes(grantedStrs)); len(missing) > 0 {
 			missingStrs := fromScopes(missing)
-			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, nil, missingStrs); err != nil {
+			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, nil, missingStrs, nil); err != nil {
 				return nil, readOutput{}, toolError("read_with_scope_check", err)
 			}
 			return nil, readOutput{Status: "insufficient_scope", MissingScopes: missingStrs}, nil
@@ -179,7 +180,22 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 			}
 			out.Facts = append(out.Facts, fv)
 		}
-		if err := st.LogAudit(ctx, "read", subject, nil, nil, nil, nil, grantedStrs); err != nil {
+		// Record what was actually disclosed (fact ID + the depth it was disclosed
+		// at), not just which scopes the subject held — granted scopes alone answer
+		// "what was this agent allowed to see," not "what did it actually see, and
+		// at what fidelity," which is the question that matters after a suspected
+		// compromise. One row per read call: depth is computed per fact (see
+		// ReadAuditDetail's doc comment), so this is a per-fact list, not a single
+		// value for the whole call.
+		detail := store.ReadAuditDetail{Facts: make([]store.ReadFactDisclosure, 0, len(out.Facts))}
+		for _, f := range out.Facts {
+			detail.Facts = append(detail.Facts, store.ReadFactDisclosure{FactID: f.ID, Depth: f.Depth})
+		}
+		detailJSON, err := json.Marshal(detail)
+		if err != nil {
+			return nil, readOutput{}, toolError("read_with_scope_check", err)
+		}
+		if err := st.LogAudit(ctx, "read", subject, nil, nil, nil, nil, grantedStrs, detailJSON); err != nil {
 			return nil, readOutput{}, toolError("read_with_scope_check", err)
 		}
 		return nil, out, nil
