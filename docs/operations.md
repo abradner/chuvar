@@ -226,7 +226,7 @@ token requires a valid code from an already-enrolled device. The count it
 checks includes revoked rows, so revoking devices cannot reopen it.
 
 > The Tokens page in the approval UI (PR #56) now provides this flow,
-> including the first (bootstrap) enrollment; the curl calls above document
+> including the first (bootstrap) enrolment; the curl calls above document
 > the underlying API and remain valid as a UI-less fallback.
 
 ### Adding another device
