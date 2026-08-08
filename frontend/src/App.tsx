@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { StagedDiffsPage } from "./pages/StagedDiffs";
 import { GrantsPage } from "./pages/Grants";
-import { TokensPage } from "./pages/Tokens";
+import { TokensPage } from "./pages/tokens/Tokens";
 
 type Tab = "staged-diffs" | "grants" | "tokens";
 

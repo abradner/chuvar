@@ -2,11 +2,11 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TokensPage } from "./Tokens";
-import { api } from "../api/client";
-import type { CreatedReviewerToken, ReviewerToken } from "../api/client";
+import { api } from "../../api/client";
+import type { CreatedReviewerToken, ReviewerToken } from "../../api/client";
 
-vi.mock("../api/client", async () => {
-  const actual = await vi.importActual<typeof import("../api/client")>("../api/client");
+vi.mock("../../api/client", async () => {
+  const actual = await vi.importActual<typeof import("../../api/client")>("../../api/client");
   return {
     ...actual,
     api: {
