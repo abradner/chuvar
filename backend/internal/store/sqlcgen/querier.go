@@ -120,6 +120,9 @@ type Querier interface {
 	// under the DEK itself. The DEK's plaintext bytes are unchanged by definition,
 	// so no data is re-encrypted.
 	RewrapDataKey(ctx context.Context, arg RewrapDataKeyParams) (int64, error)
+	// LEFT JOIN, not JOIN: source_staged_diff_id is NOT NULL and FK-enforced today,
+	// so this always matches, but a provenance projection shouldn't be able to drop
+	// an otherwise-visible fact from the result set if that ever changes.
 	SearchFacts(ctx context.Context, arg SearchFactsParams) ([]SearchFactsRow, error)
 	SupersedeFact(ctx context.Context, arg SupersedeFactParams) error
 	TouchReviewerToken(ctx context.Context, id string) error

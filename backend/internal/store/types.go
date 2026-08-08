@@ -90,6 +90,40 @@ type Fact struct {
 	Scopes    []string
 	CreatedAt time.Time
 	ValidAt   time.Time
+	// Provenance is set only when Depth == "full" (see facts.go's SearchFacts
+	// loop) — nil at "summary" or "facts" depth, mirroring how Content/Summary
+	// are already mutually exclusive by Depth above. GetFact never sets it,
+	// same reason its Depth is always empty.
+	Provenance *FactProvenance
+}
+
+// FactProvenance is a fact's approval trail, supersession pointer, and
+// bi-temporal validity window — the content this codebase means by "full
+// provenance" (init migration's "progressive disclosure per Notion §3":
+// summary -> facts -> full provenance). Every field here already exists on
+// facts/staged_diffs; this struct just names the projection of it that "full"
+// depth is meant to add on top of a fact's content. Disclosing DecidedBy is
+// exactly why this is its own depth level above "facts": it names a human,
+// which the fact's content alone never does.
+type FactProvenance struct {
+	// SourceStagedDiffID traces to the staged_diffs row whose approval produced
+	// this fact (facts.source_staged_diff_id — NOT NULL on every committed fact).
+	SourceStagedDiffID string
+	// DecidedBy/DecidedAt are that staged diff's approval trail. Nil only if
+	// the source diff is somehow undecided, which shouldn't happen for a
+	// committed fact but isn't assumed impossible by this type.
+	DecidedBy *string
+	DecidedAt *time.Time
+	// SupersededBy points at the fact that replaced this one, if any — part of
+	// the append-only supersession chain (CLAUDE.md principle 12).
+	SupersededBy *string
+	// InvalidAt/ExpiredAt complete the bi-temporal pair alongside the Fact's own
+	// CreatedAt/ValidAt: InvalidAt is when the fact stopped being true in the
+	// world (event time), ExpiredAt is when Chuvar recorded that (system time).
+	// Both nil for a still-current fact — facts_supersession_consistency (init
+	// migration) guarantees they're set together with SupersededBy.
+	InvalidAt *time.Time
+	ExpiredAt *time.Time
 }
 
 // GrantedScope pairs a granted scope with the depth of the grant that covers

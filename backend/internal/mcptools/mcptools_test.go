@@ -542,6 +542,75 @@ func TestReadWithScopeCheck_SummaryDepthRedactsContent_ViaMCP(t *testing.T) {
 	}
 }
 
+// The security property the self-review in this ticket asked for: a caller
+// granted only "facts" depth must never see provenance over the wire, even
+// though "full" depth (a different grant, same subject/scope) does. Exercised
+// through callTool's real JSON marshal/unmarshal, not just the Go struct, so
+// an accidental non-omitempty field or a forgotten nil-check would show up
+// here exactly as it would to a real MCP client.
+func TestReadWithScopeCheck_FullDepthAddsProvenance_FactsDepthDoesNot_ViaMCP(t *testing.T) {
+	session, st := testSession(t, "agent-a")
+	ctx := context.Background()
+
+	proposed := callTool[proposeWriteOutput](t, session, "propose_write", proposeWriteArgs{
+		Content:        "user's favorite editor is neovim",
+		ProposedScopes: []string{"preferences.tools"},
+	})
+
+	commitVec, err := embed.Stub{}.Embed(ctx, "user's favorite editor is neovim")
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	if _, err := st.CommitDiff(ctx, proposed.DiffID, "human-reviewer", commitVec, "editor preference summary"); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	t.Run("facts depth", func(t *testing.T) {
+		if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.tools"}, "memory", "facts", nil, "human-reviewer"); err != nil {
+			t.Fatalf("CreateGrant() error = %v", err)
+		}
+		out := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
+			Query:           "editor",
+			RequestedScopes: []string{"preferences.tools"},
+		})
+		if out.Status != "ok" || len(out.Facts) != 1 {
+			t.Fatalf("read = %+v, want status ok with 1 fact", out)
+		}
+		if out.Facts[0].Depth != "facts" {
+			t.Fatalf("Depth = %q, want %q", out.Facts[0].Depth, "facts")
+		}
+		if out.Facts[0].Provenance != nil {
+			t.Errorf("Provenance at facts depth = %+v, want nil — decided_by must not reach a facts-depth caller", out.Facts[0].Provenance)
+		}
+	})
+
+	t.Run("full depth", func(t *testing.T) {
+		if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.tools"}, "memory", "full", nil, "human-reviewer"); err != nil {
+			t.Fatalf("CreateGrant() error = %v", err)
+		}
+		out := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
+			Query:           "editor",
+			RequestedScopes: []string{"preferences.tools"},
+		})
+		if out.Status != "ok" || len(out.Facts) != 1 {
+			t.Fatalf("read = %+v, want status ok with 1 fact", out)
+		}
+		got := out.Facts[0]
+		if got.Depth != "full" {
+			t.Fatalf("Depth = %q, want %q", got.Depth, "full")
+		}
+		if got.Provenance == nil {
+			t.Fatalf("Provenance at full depth = nil, want the approval trail")
+		}
+		if got.Provenance.DecidedBy == nil || *got.Provenance.DecidedBy != "human-reviewer" {
+			t.Errorf("Provenance.DecidedBy = %v, want \"human-reviewer\"", got.Provenance.DecidedBy)
+		}
+		if got.Provenance.SourceStagedDiffID != proposed.DiffID {
+			t.Errorf("Provenance.SourceStagedDiffID = %q, want %q", got.Provenance.SourceStagedDiffID, proposed.DiffID)
+		}
+	})
+}
+
 func TestGrantedScopeStrs_DedupesWhenSameScopeAtDifferentDepths(t *testing.T) {
 	// GrantedScopeDepths (its query is DISTINCT on (scope, depth), not scope
 	// alone) can legitimately return the same scope twice when two active
