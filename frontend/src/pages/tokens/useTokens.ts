@@ -10,6 +10,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, type CreatedReviewerToken, type ReviewerToken } from "../../api/client";
 
+// Re-exported so the view can type its props without importing from api/
+// itself (AGENTS.md §6: "View ... Must not: Import from api/").
+export type { CreatedReviewerToken, ReviewerToken };
+
 export interface UseTokensOptions {
   // Lets the shell block navigation while an unrecoverable credential is on
   // screen. The page's state dies with the component, and App unmounts pages
@@ -19,19 +23,31 @@ export interface UseTokensOptions {
 
 export function useTokens({ onRevealChange }: UseTokensOptions = {}) {
   const [tokens, setTokens] = useState<ReviewerToken[]>([]);
+  // True only until the *first* fetch attempt settles. tokens starts empty
+  // regardless of whether that first attempt succeeds, fails, or is still in
+  // flight, so the view needs this to tell "confirmed empty" apart from
+  // "haven't heard back yet" and "the fetch failed" — both of which used to
+  // render identically to an empty inventory. Not reset on later refreshes
+  // (after create/revoke): those already have a list on screen and should
+  // update it quietly rather than flash back to a loading state. Found in
+  // review (Copilot).
+  const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  // Shown once, immediately after creation, and never re-fetchable — the server
-  // kept only a hash (see CreatedReviewerToken). Losing it before the operator
-  // copies it is the worst outcome this feature can produce: on a *first*
-  // device, the enrollment gate has already latched (the ever-enrolled count
-  // includes revoked rows), so the next create demands a code no surviving
-  // credential can generate, and recovery is direct DB surgery. Every path
-  // that can clear this state is guarded — dismiss confirms, the beforeunload
-  // effect covers reload/close, and onRevealChange lets the shell block tab
-  // switches.
+  // Shown once, immediately after creation, and never re-fetchable — the
+  // server hashes the bearer token and keeps the TOTP secret only as sealed
+  // ciphertext (see CreatedReviewerToken), and no API exposes either again
+  // after this response. Losing it before the operator copies it is the
+  // worst outcome this feature can produce: on a *first* device, the
+  // enrollment gate has already latched (the ever-enrolled count includes
+  // revoked rows), so the next create demands a code no surviving credential
+  // can generate, and recovery is direct DB surgery. Every path that can
+  // clear this state is guarded — dismiss confirms, the beforeunload effect
+  // covers reload/close, and onRevealChange lets the shell block tab
+  // switches (including mid-request, before the reveal even lands — see the
+  // creating check below).
   const [justCreated, setJustCreated] = useState<CreatedReviewerToken | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -42,10 +58,12 @@ export function useTokens({ onRevealChange }: UseTokensOptions = {}) {
       .then((t) => {
         setTokens(t);
         setLoadError(null);
+        setLoading(false);
       })
       .catch((e: unknown) => {
         if (e instanceof DOMException && e.name === "AbortError") return;
         setLoadError(e instanceof ApiError ? e.message : String(e));
+        setLoading(false);
       });
     return () => controller.abort();
   }, [refreshKey]);
@@ -60,56 +78,76 @@ export function useTokens({ onRevealChange }: UseTokensOptions = {}) {
     return () => window.removeEventListener("beforeunload", warn);
   }, [justCreated]);
 
-  // Tab switches unmount the page outright, taking justCreated with it, so the
-  // shell has to do the blocking. Reported rather than handled here because
-  // the nav lives in App.
+  // Tab switches unmount the page outright, taking justCreated (and any
+  // in-flight create) with it, so the shell has to do the blocking. Reported
+  // rather than handled here because the nav lives in App. Includes
+  // `creating`, not just `justCreated`: the gap between submit and response
+  // is exactly when a tab switch used to slip past this guard entirely —
+  // justCreated was still null, so nothing blocked the unmount, and the
+  // response landed on a hook that no longer existed. Found in review
+  // (chatgpt-codex-connector).
   useEffect(() => {
-    onRevealChange?.(justCreated !== null);
-  }, [justCreated, onRevealChange]);
+    onRevealChange?.(creating || justCreated !== null);
+  }, [creating, justCreated, onRevealChange]);
 
-  const create = useCallback(async (label: string) => {
-    setError(null);
+  const create = useCallback(
+    async (label: string) => {
+      // TokensView also disables its submit button while a reveal is
+      // pending, but that is UX, not enforcement — it protects only clicks
+      // on that one button. This is the actual chokepoint: any caller of
+      // this hook (a future view, a script, a different control) must be
+      // refused here too, or it silently overwrites an uncopied, unrecoverable
+      // credential. Found in review (Copilot) against AGENTS.md §6's own
+      // rule that guard ceremonies live in the hook so future views inherit
+      // them.
+      if (justCreated) {
+        setError("A credential is already pending — dismiss it before creating another.");
+        return false;
+      }
+      setError(null);
 
-    const trimmed = label.trim();
-    if (!trimmed) {
-      setError("Label is required");
-      return false;
-    }
+      const trimmed = label.trim();
+      if (!trimmed) {
+        setError("Label is required");
+        return false;
+      }
 
-    // TOTP is only required once a device has ever been enrolled (backend's
-    // createToken doc comment), and this page can't know that in advance — so
-    // unlike the Grants page's mandatory prompts, an empty code is a
-    // legitimate answer here (a genuinely fresh install).
-    //
-    // Cancel and empty are therefore NOT equivalent, and prompt() distinguishes
-    // them: null means cancelled, "" means submitted-blank. Cancel aborts;
-    // blank proceeds with no code and lets the server decide whether one was
-    // required. Collapsing the two would make cancelling a create still create.
-    //
-    // The wording says "never enrolled", not "first device": the backend counts
-    // ever-enrolled *including revoked* rows, so an operator who has revoked
-    // every device would otherwise read "first device" as true, leave it blank,
-    // and get a bare 401 they cannot act on.
-    // Trimmed for the paste-adds-whitespace reason as the Grants page.
-    const totpInput = window.prompt(
-      "Enter a TOTP code from an already-enrolled device (leave blank only on a new install that has never enrolled one)",
-    );
-    if (totpInput === null) return false;
-    const totpCode = totpInput.trim();
+      // TOTP is only required once a device has ever been enrolled (backend's
+      // createToken doc comment), and this page can't know that in advance —
+      // so unlike the Grants page's mandatory prompts, an empty code is a
+      // legitimate answer here (a genuinely fresh install).
+      //
+      // Cancel and empty are therefore NOT equivalent, and prompt() distinguishes
+      // them: null means cancelled, "" means submitted-blank. Cancel aborts;
+      // blank proceeds with no code and lets the server decide whether one was
+      // required. Collapsing the two would make cancelling a create still create.
+      //
+      // The wording says "never enrolled", not "first device": the backend counts
+      // ever-enrolled *including revoked* rows, so an operator who has revoked
+      // every device would otherwise read "first device" as true, leave it blank,
+      // and get a bare 401 they cannot act on.
+      // Trimmed for the paste-adds-whitespace reason as the Grants page.
+      const totpInput = window.prompt(
+        "Enter a TOTP code from an already-enrolled device (leave blank only on a new install that has never enrolled one)",
+      );
+      if (totpInput === null) return false;
+      const totpCode = totpInput.trim();
 
-    setCreating(true);
-    try {
-      const created = await api.createToken(trimmed, totpCode || undefined);
-      setJustCreated(created);
-      setRefreshKey((k) => k + 1);
-      return true;
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
-      return false;
-    } finally {
-      setCreating(false);
-    }
-  }, []);
+      setCreating(true);
+      try {
+        const created = await api.createToken(trimmed, totpCode || undefined);
+        setJustCreated(created);
+        setRefreshKey((k) => k + 1);
+        return true;
+      } catch (e) {
+        setError(e instanceof ApiError ? e.message : String(e));
+        return false;
+      } finally {
+        setCreating(false);
+      }
+    },
+    [justCreated],
+  );
 
   const dismissReveal = useCallback(() => {
     if (!window.confirm("Dismiss? The bearer token and TOTP setup key above cannot be shown again.")) return;
@@ -134,6 +172,12 @@ export function useTokens({ onRevealChange }: UseTokensOptions = {}) {
     setError(null);
     try {
       await api.revokeToken(id);
+      // Revoking the browser's own token invalidates it immediately, so the
+      // refresh below deterministically 401s and can't be relied on to show
+      // the new state. Update the row from the POST's own success instead of
+      // waiting on a refetch that may never land. Found in review
+      // (chatgpt-codex-connector).
+      setTokens((prev) => prev.map((t) => (t.id === id ? { ...t, active: false } : t)));
       setRefreshKey((k) => k + 1);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
@@ -142,5 +186,5 @@ export function useTokens({ onRevealChange }: UseTokensOptions = {}) {
     }
   }, []);
 
-  return { tokens, loadError, error, busyId, creating, justCreated, create, dismissReveal, revoke };
+  return { tokens, loading, loadError, error, busyId, creating, justCreated, create, dismissReveal, revoke };
 }

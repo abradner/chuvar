@@ -8,10 +8,12 @@ type Tab = "staged-diffs" | "grants" | "tokens";
 export default function App() {
   const [tab, setTab] = useState<Tab>("staged-diffs");
   // Tabs unmount their page, which for TokensPage means discarding a
-  // just-created bearer token and TOTP setup key that exist nowhere else — the
-  // server kept only a hash. The page reports when one is on screen; switching
-  // away then costs a confirm. Held here because the nav lives here, and the
-  // page cannot veto its own unmount.
+  // just-created bearer token and TOTP setup key that exist nowhere else —
+  // the server hashes the token and keeps the secret only as sealed
+  // ciphertext, and no API surfaces either again after creation. The page
+  // reports when one is on screen (or still in flight); switching away then
+  // costs a confirm. Held here because the nav lives here, and the page
+  // cannot veto its own unmount.
   const [revealPending, setRevealPending] = useState(false);
 
   // Stable identity: TokensPage reports through this from an effect keyed on

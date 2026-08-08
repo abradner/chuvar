@@ -4,11 +4,12 @@
 // component standard"). The payoff is in TokensView.test.tsx: rendering this
 // with plain props needs no API mocks and no async.
 import { type FormEvent, useState } from "react";
-import type { CreatedReviewerToken, ReviewerToken } from "../../api/client";
+import type { CreatedReviewerToken, ReviewerToken } from "./useTokens";
 import { enrollmentSecret } from "./enrollmentSecret";
 
 export interface TokensViewProps {
   tokens: ReviewerToken[];
+  loading: boolean;
   loadError: string | null;
   error: string | null;
   busyId: string | null;
@@ -23,6 +24,7 @@ export interface TokensViewProps {
 
 export function TokensView({
   tokens,
+  loading,
   loadError,
   error,
   busyId,
@@ -84,6 +86,7 @@ export function TokensView({
         </div>
       )}
 
+      {loading && <p>Loading tokens…</p>}
       <ul className="grant-list">
         {tokens.map((t) => (
           <li key={t.id} className="grant-card">
@@ -105,7 +108,12 @@ export function TokensView({
             bare <p> here is invalid HTML and reads poorly to a screen reader.
             The sibling Grants/StagedDiffs pages still have the unwrapped
             shape; not fixed here to keep this PR to its own surface. */}
-        {tokens.length === 0 && <li className="empty">No reviewer tokens yet.</li>}
+        {/* Gated on !loading && !loadError: tokens starts as [] regardless of
+            whether the first fetch has even returned yet, so without these
+            an in-flight request or a failed one both rendered as a confirmed
+            empty inventory — including alongside the error message above.
+            Found in review (Copilot). */}
+        {!loading && !loadError && tokens.length === 0 && <li className="empty">No reviewer tokens yet.</li>}
       </ul>
 
       <form onSubmit={submit} className="new-grant-form">
@@ -114,12 +122,15 @@ export function TokensView({
           Label
           <input value={newLabel} onChange={(e) => setNewLabel(e.target.value)} placeholder="alex-laptop" />
         </label>
-        {/* Disabling this while a reveal is pending is the single guard against
-            a second create overwriting an uncopied credential — HTML implicit
-            submission does not fire while the sole submit button is disabled,
-            so no handler-side re-check is needed (an earlier revision had one;
-            it was unreachable and failed the deletion test — see the PR #56
-            review record). */}
+        {/* UX only, not the enforcement: this stops an impatient click, but the
+            actual guard against a second create overwriting an uncopied
+            credential lives in useTokens.create, so any other caller of the
+            hook is covered too (AGENTS.md §6). An earlier revision put a
+            duplicate check in this file's own submit handler instead; it was
+            unreachable — HTML implicit submission does not fire while the
+            sole submit button is disabled — and failed the deletion test, so
+            it was removed rather than kept as a second, dead copy (see the
+            PR #56 review record). */}
         <button type="submit" disabled={creating || justCreated !== null}>
           Create token
         </button>

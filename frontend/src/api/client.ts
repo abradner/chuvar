@@ -68,8 +68,10 @@ export interface ReviewerToken {
 export interface CreatedReviewerToken extends ReviewerToken {
   // token and totp_enroll_uri are both returned exactly once, in this response
   // only — see backend/internal/api/tokens.go's createTokenResponse doc
-  // comment. Neither is recoverable afterward; losing them means starting
-  // over with a new token.
+  // comment. No API exposes either again afterward. Losing them means minting
+  // a replacement from another still-enrolled device; if this was the only
+  // one, the enrollment gate has already latched and recovery is direct
+  // database access, not "start over."
   token: string;
   totp_enroll_uri: string;
 }

@@ -139,7 +139,9 @@ button.secondary {
 }
 
 /* The one panel in the app holding a credential that exists nowhere else —
-   the server kept only a hash, so once it is dismissed it is gone. It rendered
+   the token is hashed, the secret is sealed ciphertext no API exposes again,
+   so once this is dismissed it is gone from every surface this UI can reach.
+   It rendered
    identically to an ordinary .grant-card, which is the wrong signal for
    something the operator must act on before navigating away. Amber rather than
    red: this is an act-now nudge, not a failure, matching .expiring-soon's use

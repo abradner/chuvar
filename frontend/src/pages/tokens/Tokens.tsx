@@ -13,13 +13,15 @@ export interface TokensPageProps {
 }
 
 export function TokensPage({ onRevealChange }: TokensPageProps = {}) {
-  const { tokens, loadError, error, busyId, creating, justCreated, create, dismissReveal, revoke } = useTokens({
-    onRevealChange,
-  });
+  const { tokens, loading, loadError, error, busyId, creating, justCreated, create, dismissReveal, revoke } =
+    useTokens({
+      onRevealChange,
+    });
 
   return (
     <TokensView
       tokens={tokens}
+      loading={loading}
       loadError={loadError}
       error={error}
       busyId={busyId}

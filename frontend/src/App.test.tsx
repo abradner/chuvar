@@ -29,8 +29,9 @@ const created = {
 };
 
 // Switching tabs unmounts the page outright, so a pending reveal — a bearer
-// token and TOTP setup key that exist nowhere else, the server having kept only
-// a hash — would be destroyed silently. On a first device that also latches the
+// token and TOTP setup key that exist nowhere else, the server hashing the
+// token and keeping the secret only as sealed ciphertext no API exposes again
+// — would be destroyed silently. On a first device that also latches the
 // enrollment gate permanently, leaving no credential able to mint a replacement.
 // These tests cover the guard that stands between a stray click and DB surgery.
 describe("App tab navigation with a pending token reveal", () => {

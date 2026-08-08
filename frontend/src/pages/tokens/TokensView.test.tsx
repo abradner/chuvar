@@ -12,6 +12,7 @@ import { enrollmentSecret } from "./enrollmentSecret";
 
 const noProps: TokensViewProps = {
   tokens: [],
+  loading: false,
   loadError: null,
   error: null,
   busyId: null,
@@ -63,6 +64,20 @@ describe("TokensView", () => {
     // A failed create keeps the typed label so the operator can retry
     // without retyping.
     expect(label).toHaveValue("alex-phone");
+  });
+
+  it("shows a loading indicator instead of the empty state while the list is loading", () => {
+    render(<TokensView {...noProps} loading={true} />);
+
+    expect(screen.getByText("Loading tokens…")).toBeInTheDocument();
+    expect(screen.queryByText("No reviewer tokens yet.")).not.toBeInTheDocument();
+  });
+
+  it("does not show the empty state alongside a load error", () => {
+    render(<TokensView {...noProps} loading={false} loadError="boom" />);
+
+    expect(screen.getByText("boom")).toBeInTheDocument();
+    expect(screen.queryByText("No reviewer tokens yet.")).not.toBeInTheDocument();
   });
 
   it("shows no revoke button on an already-revoked token", () => {

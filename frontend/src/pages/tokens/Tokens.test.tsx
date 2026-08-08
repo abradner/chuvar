@@ -1,8 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TokensPage } from "./Tokens";
-import { api } from "../../api/client";
+import { api, ApiError } from "../../api/client";
 import type { CreatedReviewerToken, ReviewerToken } from "../../api/client";
 
 vi.mock("../../api/client", async () => {
@@ -69,6 +69,30 @@ describe("TokensPage", () => {
     expect(await screen.findByText("No reviewer tokens yet.")).toBeInTheDocument();
   });
 
+  it("does not claim the list is empty while the initial load is still pending", async () => {
+    // tokens starts as [] regardless of whether the first fetch has returned,
+    // so without a loading flag this rendered identically to a confirmed-empty
+    // inventory. Found in review (Copilot).
+    let resolveList!: (tokens: ReviewerToken[]) => void;
+    vi.mocked(api.listTokens).mockReturnValue(new Promise((resolve) => (resolveList = resolve)));
+
+    render(<TokensPage />);
+
+    expect(screen.queryByText("No reviewer tokens yet.")).not.toBeInTheDocument();
+
+    await act(async () => resolveList([]));
+    expect(await screen.findByText("No reviewer tokens yet.")).toBeInTheDocument();
+  });
+
+  it("does not claim the list is empty when the initial load fails", async () => {
+    vi.mocked(api.listTokens).mockRejectedValue(new ApiError(500, "boom"));
+
+    render(<TokensPage />);
+
+    expect(await screen.findByText("boom")).toBeInTheDocument();
+    expect(screen.queryByText("No reviewer tokens yet.")).not.toBeInTheDocument();
+  });
+
   it("reveals the plaintext token and TOTP secret exactly once after creating", async () => {
     vi.mocked(api.listTokens).mockResolvedValue([]);
     vi.mocked(api.createToken).mockResolvedValue(sampleCreated);
@@ -82,6 +106,21 @@ describe("TokensPage", () => {
     // trims then compares to "" — so this is not a security boundary, and
     // client.ts omits the header for "" anyway.)
     expect(api.createToken).toHaveBeenCalledWith("alex-phone", undefined);
+  });
+
+  it("sends a real TOTP code trimmed of paste whitespace", async () => {
+    // Only the blank and cancel branches were previously exercised; a
+    // regression that dropped or failed to trim a real code would make every
+    // post-bootstrap enrollment fail while those tests stayed green. Found in
+    // review (Copilot).
+    vi.mocked(api.listTokens).mockResolvedValue([]);
+    vi.mocked(api.createToken).mockResolvedValue(sampleCreated);
+    vi.spyOn(window, "prompt").mockReturnValue("  123456  ");
+
+    render(<TokensPage />);
+    await createAndReveal();
+
+    expect(api.createToken).toHaveBeenCalledWith("alex-phone", "123456");
   });
 
   it("falls back to the raw URI when the enrollment URI cannot be parsed", async () => {
@@ -190,6 +229,45 @@ describe("TokensPage", () => {
     expect(onRevealChange).toHaveBeenLastCalledWith(false);
   });
 
+  it("reports reveal-pending as soon as creation is submitted, not only once it resolves", async () => {
+    // A tab switch between submit and response used to slip past this guard
+    // entirely: the request was in flight, justCreated was still null, so
+    // nothing blocked the unmount and the response landed on a hook that no
+    // longer existed. Found in review (chatgpt-codex-connector).
+    const onRevealChange = vi.fn();
+    let resolveCreate!: (token: CreatedReviewerToken) => void;
+    vi.mocked(api.listTokens).mockResolvedValue([]);
+    vi.mocked(api.createToken).mockReturnValue(new Promise((resolve) => (resolveCreate = resolve)));
+
+    render(<TokensPage onRevealChange={onRevealChange} />);
+    await screen.findByText("No reviewer tokens yet.");
+    await userEvent.type(screen.getByPlaceholderText("alex-laptop"), "alex-phone");
+    await userEvent.click(screen.getByRole("button", { name: "Create token" }));
+
+    expect(onRevealChange).toHaveBeenLastCalledWith(true);
+
+    await act(async () => resolveCreate(sampleCreated));
+    expect(onRevealChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it("prevents reload/close while a reveal is pending, and stops once it is dismissed", async () => {
+    vi.mocked(api.listTokens).mockResolvedValue([]);
+    vi.mocked(api.createToken).mockResolvedValue(sampleCreated);
+
+    render(<TokensPage />);
+    await createAndReveal();
+
+    let unloadEvent = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(unloadEvent);
+    expect(unloadEvent.defaultPrevented).toBe(true);
+
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+
+    unloadEvent = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(unloadEvent);
+    expect(unloadEvent.defaultPrevented).toBe(false);
+  });
+
   it("does not revoke when the confirmation is declined", async () => {
     vi.mocked(api.listTokens).mockResolvedValue([sampleToken]);
 
@@ -219,6 +297,26 @@ describe("TokensPage", () => {
 
     expect(await screen.findByText("revoked")).toBeInTheDocument();
     expect(api.revokeToken).toHaveBeenCalledWith("token-1");
+    expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
+  });
+
+  it("marks a self-revoked token revoked even when the follow-up refresh 401s", async () => {
+    // Revoking the token this browser authenticates with invalidates it
+    // immediately, so the refresh the revoke triggers deterministically 401s.
+    // If the dashboard relied on that refresh alone, it would keep showing
+    // the just-revoked token as active with a live Revoke button. Found in
+    // review (chatgpt-codex-connector).
+    vi.mocked(api.listTokens)
+      .mockResolvedValueOnce([sampleToken])
+      .mockRejectedValueOnce(new ApiError(401, "unauthorized"));
+    vi.mocked(api.revokeToken).mockResolvedValue(undefined);
+
+    render(<TokensPage />);
+    await screen.findByText("active");
+
+    await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
+
+    expect(await screen.findByText("revoked")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
   });
 });
