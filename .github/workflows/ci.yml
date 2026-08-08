@@ -97,7 +97,7 @@ jobs:
           --health-retries=20
 
     env:
-      # Unlike local dev (54322, to dodge spritz's Postgres on this machine),
+      # Unlike local dev (54322, chosen to dodge other local Postgres instances),
       # the runner's service port is free — so 5432 here is correct, not a
       # copy-paste slip.
       DATABASE_URL: postgres://chuvar:chuvar_dev_only@localhost:5432/chuvar?sslmode=disable
