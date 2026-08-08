@@ -288,15 +288,17 @@ art found, not just parity with it.
   rows (CaviraOSS) — a cheap, direct addition to the retrieval schema.
 
 **MCP tool-design conventions copied from the official reference memory
-server** (the cleanest minimal example found): Zod input/output schemas per
-tool; tool annotations (`readOnlyHint`, `destructiveHint`,
-`idempotentHint`) — Chuvar's `read-with-scope-check` maps to read-only,
-`propose-write` to non-destructive, since it stages rather than commits;
+server** (the cleanest minimal example found): schema-validated input and
+output per tool (Zod in the reference server's TypeScript; Go structs and
+generated JSON Schema here); tool annotations (`readOnlyHint`,
+`destructiveHint`, `idempotentHint`) — Chuvar's `read_with_scope_check`
+maps to read-only, `propose_write` to non-destructive, since it stages
+rather than commits;
 dual-format tool responses (`content: [{type: "text", ...}]` and
 `structuredContent`) so both an LLM caller and a programmatic one work; and
 a consistent, always-structured error convention — the reference server
 throws on some missing-entity cases and silently no-ops on others, which is
-a specific mistake called out to avoid in `propose-write`, given it sits
+a specific mistake called out to avoid in `propose_write`, given it sits
 inside a consent/audit system where a silent partial failure is actively
 dangerous.
 
