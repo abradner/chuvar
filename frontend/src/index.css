@@ -138,6 +138,24 @@ button.secondary {
   padding: 14px 16px;
 }
 
+/* The one panel in the app holding a credential that exists nowhere else —
+   the token is hashed, the secret is sealed ciphertext no API exposes again,
+   so once this is dismissed it is gone from every surface this UI can reach.
+   It rendered
+   identically to an ordinary .grant-card, which is the wrong signal for
+   something the operator must act on before navigating away. Amber rather than
+   red: this is an act-now nudge, not a failure, matching .expiring-soon's use
+   of the same palette. */
+.token-reveal {
+  border-color: #a16207;
+  border-left-width: 4px;
+}
+
+.token-reveal input {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 .diff-content {
   margin: 0 0 8px;
   font-size: 15px;

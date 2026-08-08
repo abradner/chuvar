@@ -367,6 +367,31 @@ during the build, than as a single pass at the end. Before considering a commit 
 - Strict TypeScript (`strict: true`), no `any` without a comment explaining why it's unavoidable.
 - Colocate a component's styles/tests next to it rather than in parallel mirrored directory trees.
 
+**UI component standard** (decided 2026-08-08, PR #56 review; `pages/tokens/` is the exemplar).
+A feature splits into three roles, usually two-and-a-bit files under `pages/<feature>/`:
+
+| Role | File | Owns | Must not |
+|---|---|---|---|
+| Hook | `use<Feature>.ts` | Fetching, state, domain rules, guard ceremonies (`confirm`/`prompt`). Data-centric; returns values + callbacks. | Contain JSX |
+| View | `<Feature>View.tsx` | Props in, JSX out. May own purely-local UI state (a controlled input). | Import from `api/`; decide *when* anything may happen |
+| Page | `<Feature>.tsx` | Layout + plumbing: call the hook, hand the result to the view. | Grow logic. It stays ~thin, or the split has failed |
+
+Why this shape and not classic container/presenter: with hooks, a component whose only job is
+holding state and passing props is a layer with no behaviour of its own — the hook *is* the
+container. The observable payoff, and the test for whether a refactor did it right: **the view's
+test file needs no `vi.mock`, no async harness** (`TokensView.test.tsx` vs `Tokens.test.tsx`).
+Guard ceremonies live in the hook so any future view over the same data inherits them rather than
+re-implementing them; they're politeness, not enforcement (the server is the enforcement — see
+the deletion test above), but politeness that shouldn't silently vanish in a redesign.
+Split further (separate layout component, shared `components/` primitives) only when a second
+consumer actually exists — same "second caller is decided, not speculative" bar as §3.3.
+Behavioral tests exercise the page (hook+view integrated); view tests cover rendering given
+props. `Grants.tsx`/`StagedDiffs.tsx` predate this standard and are tracked in Notion for
+retrofit — don't copy their single-blob shape into new work.
+
+- UI-affecting PRs include a screenshot (or before/after pair) in the description — reviewers
+  shouldn't have to run the branch to see what changed.
+
 ### Database
 - All schema changes go through a migration file — never hand-edit via `psql` against a running
   dev DB and call it done; the migration is what's authoritative.

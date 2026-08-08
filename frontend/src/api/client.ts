@@ -56,6 +56,26 @@ export interface Fact {
   valid_at: string;
 }
 
+export interface ReviewerToken {
+  id: string;
+  label: string;
+  active: boolean;
+  created_at: string;
+  last_used_at?: string;
+  revoked_at?: string;
+}
+
+export interface CreatedReviewerToken extends ReviewerToken {
+  // token and totp_enroll_uri are both returned exactly once, in this response
+  // only — see backend/internal/api/tokens.go's createTokenResponse doc
+  // comment. No API exposes either again afterward. Losing them means minting
+  // a replacement from another still-enrolled device; if this was the only
+  // one, the enrollment gate has already latched and recovery is direct
+  // database access, not "start over."
+  token: string;
+  totp_enroll_uri: string;
+}
+
 // Page is the envelope the backend's cursor-paginated listing endpoints
 // (GET /api/staged-diffs, GET /api/grants — see backend/internal/api/
 // pagination.go) respond with. next_cursor is absent once no further page
@@ -181,6 +201,26 @@ export const api = {
     request<Grant>(`/api/grant-requests/${id}/approve`, { method: "POST", totpCode }),
 
   denyGrantRequest: (id: string) => request<void>(`/api/grant-requests/${id}/deny`, { method: "POST" }),
+
+  // Not a Page<T>: GET /api/tokens is deliberately unpaginated on the backend
+  // (its handler writes a bare array — see listTokens in
+  // backend/internal/api/tokens.go), unlike the staged-diff and grant
+  // listings above. Stated because the two shapes now sit side by side in
+  // this file and the bare array otherwise reads as an oversight — the
+  // device list is operator-sized, so there is nothing to paginate. If the
+  // backend ever wraps it, this must change with it.
+  listTokens: (signal?: AbortSignal) => request<ReviewerToken[]>("/api/tokens", { signal }),
+
+  // createToken's TOTP requirement is conditional server-side (backend's
+  // createToken doc comment): required once any device has ever been
+  // enrolled, not required for the very first (bootstrap) enrollment. totpCode
+  // is therefore optional here rather than mandatory like createGrant/
+  // approveGrantRequest/renewGrant — the caller passes what it has and the
+  // server decides whether it was needed.
+  createToken: (label: string, totpCode?: string) =>
+    request<CreatedReviewerToken>("/api/tokens", { method: "POST", body: JSON.stringify({ label }), totpCode }),
+
+  revokeToken: (id: string) => request<void>(`/api/tokens/${id}/revoke`, { method: "POST" }),
 };
 
 export { ApiError };
