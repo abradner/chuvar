@@ -116,7 +116,12 @@ func TestProposeWrite_NilClassifierReturnsErrorNotPanic(t *testing.T) {
 }
 
 func TestProposeWrite_NilEmbedderReturnsErrorNotPanic(t *testing.T) {
-	b := &Bouncer{Store: nil, Embedder: nil, Classifier: PassthroughClassifier{}}
+	// A real Store, not nil: the rate-limit check (which needs the Store) runs
+	// before the pipeline, so a nil Store would short-circuit this test at the
+	// misconfigured-Store error and leave the nil-Embedder branch unexercised.
+	// Found in the batch's independent aggregate review.
+	b := &Bouncer{Store: integrationStore(t), Embedder: nil, Classifier: PassthroughClassifier{},
+		RateLimit: defaultRateLimit, RateLimitWindow: defaultRateLimitWindow}
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
 	wantNotValidationError(t, err)
 }
@@ -164,7 +169,12 @@ func TestProposeWrite_ClassifierProducedInvalidScopeIsNotValidationError(t *test
 	// proposed directly) is this service's own component misbehaving, not
 	// something the calling agent can fix by resubmitting — so, unlike the
 	// caller-supplied-scope case, it must stay masked rather than shown verbatim.
-	b := New(nil, embed.Stub{}, invalidScopeClassifier{})
+	// integrationStore, not nil: with a nil Store the misconfigured-Store error
+	// fires before Classify ever runs, so this test was passing without
+	// executing the classifier-produced-invalid-scope branch it exists to pin —
+	// the exact "passes against unfixed code" failure mode AGENTS.md warns
+	// about. Found in the batch's independent aggregate review.
+	b := New(integrationStore(t), embed.Stub{}, invalidScopeClassifier{})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
 	wantNotValidationError(t, err)
 }

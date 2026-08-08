@@ -127,6 +127,20 @@ func TestAgentRoleCanDoItsActualJob(t *testing.T) {
 		require.NoError(t, agent.QueryRow(ctx, `SELECT count(*) FROM fact_scopes`).Scan(&n))
 	})
 
+	// The provenance join SearchFacts runs at every depth (the full-depth
+	// migration, 20260804000000, granted exactly these two decision columns).
+	// Exercised as the live role because that migration's whole justification
+	// is "the join breaks the moment an operator enforces roles" — a grant
+	// justified by a query shape gets verified in that shape, per the
+	// least-privilege migration's own stated practice. The still-revoked
+	// columns are pinned by TestAgentRoleCannotReadSecretTables.
+	t.Run("read staged-diff decision columns via the provenance join", func(t *testing.T) {
+		var decidedBy, decidedAt int
+		require.NoError(t, agent.QueryRow(ctx,
+			`SELECT count(sd.decided_by), count(sd.decided_at) FROM facts f
+			 LEFT JOIN staged_diffs sd ON sd.id = f.source_staged_diff_id`).Scan(&decidedBy, &decidedAt))
+	})
+
 	// INSERT ... RETURNING over only the generated columns — the shape
 	// ProposeDiff and RequestGrant now use. Column-level SELECT is what makes
 	// this work without granting a table-wide read.

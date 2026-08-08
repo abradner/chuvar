@@ -73,6 +73,17 @@ func registerProposeWrite(s *mcp.Server, subject string, b *bouncer.Bouncer) {
 				// no tool error, not masked by toolError, since there's nothing
 				// sensitive in "you're proposing too fast" that toolError's masking
 				// exists to protect.
+				//
+				// Audited before responding, same as insufficient_scope in
+				// read_with_scope_check.go: a tripwire that reports only to the
+				// adversary who tripped it is not a tripwire. The counter row alone
+				// is lossy evidence (limit+1 and a 10,000-request flood look the
+				// same after the window rolls), so each denial gets its own
+				// attributable row — and like the insufficient_scope sibling, a
+				// failed audit write fails the response rather than being dropped.
+				if auditErr := b.Store.LogAudit(ctx, "rate_limited", subject, nil, nil, nil, nil, nil, nil); auditErr != nil {
+					return nil, proposeWriteOutput{}, toolError("propose_write", auditErr)
+				}
 				return nil, proposeWriteOutput{Status: "RATE_LIMITED"}, nil
 			}
 			// bouncer.ProposeWrite's errors mix genuine input-validation failures

@@ -925,6 +925,20 @@ func TestProposeWrite_RateLimited(t *testing.T) {
 		t.Fatalf("RATE_LIMITED response carried a diff_id (%q); nothing should have been staged", third.DiffID)
 	}
 
+	// The denial must leave attributable evidence the operator can find later —
+	// the counter row alone is lossy (limit+1 and a sustained flood look the
+	// same once the window rolls). Same discipline as insufficient_scope's
+	// audit row in read_with_scope_check. Found in aggregate review.
+	var audited int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_log WHERE event_type = 'rate_limited' AND subject = 'agent-a'`,
+	).Scan(&audited); err != nil {
+		t.Fatalf("querying audit_log for rate_limited rows: %v", err)
+	}
+	if audited != 1 {
+		t.Errorf("audit_log rate_limited rows for agent-a = %d, want exactly 1 (one per denial)", audited)
+	}
+
 	// agent-b's own limit must be untouched by agent-a's activity — a shared
 	// limit keyed wrong (e.g. ignoring subject, or on something client-
 	// supplied) would throttle a completely uninvolved subject, which is its
