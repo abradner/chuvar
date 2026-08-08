@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -362,6 +363,139 @@ func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 	}
 	if len(afterCommit.Facts) != 1 {
 		t.Fatalf("read after commit facts = %+v, want 1", afterCommit.Facts)
+	}
+}
+
+// toolErrorText extracts the text of a tool-error result, the same value an
+// MCP client actually sees, so tests can assert on what's shown to the calling
+// agent rather than on internal error types.
+func toolErrorText(t *testing.T, res *mcp.CallToolResult) string {
+	t.Helper()
+	if len(res.Content) == 0 {
+		t.Fatal("tool error result has no content")
+	}
+	tc, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("tool error content[0] = %T, want *mcp.TextContent", res.Content[0])
+	}
+	return tc.Text
+}
+
+// TestProposeWrite_InvalidScopeReturnsVerbatimValidationError_ViaMCP is the
+// regression test for the bouncer.ValidationError taxonomy: a malformed
+// caller-supplied scope is safe and useful to show the agent verbatim (it can
+// self-correct and retry), unlike every other propose_write failure, which
+// stays masked behind toolError's generic "internal error" message.
+func TestProposeWrite_InvalidScopeReturnsVerbatimValidationError_ViaMCP(t *testing.T) {
+	session, _ := testSession(t, "agent-a")
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "propose_write",
+		Arguments: proposeWriteArgs{
+			Content:        "some fact",
+			ProposedScopes: []string{"Not A Valid Scope"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() transport error = %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("propose_write with a malformed scope succeeded, want a tool error")
+	}
+	text := toolErrorText(t, res)
+	if strings.Contains(text, "internal error") {
+		t.Fatalf("propose_write error text = %q, want the validation message verbatim, not the generic masked message", text)
+	}
+	if !strings.Contains(text, "scope") {
+		t.Fatalf("propose_write error text = %q, want it to mention the malformed scope", text)
+	}
+}
+
+// TestProposeWrite_StoreErrorIsMasked_ViaMCP is the negative counterpart: an
+// error that originates in the store layer (here, targeting a fact the
+// proposer's grants don't cover) must NOT be shown verbatim, even though its
+// message happens to be informative and non-sensitive in this particular case —
+// the taxonomy only trusts errors bouncer.ProposeWrite positively constructed as
+// ValidationError, never store-originated ones, since other store errors can
+// carry raw driver text.
+func TestProposeWrite_StoreErrorIsMasked_ViaMCP(t *testing.T) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set; skipping mcptools integration tests")
+	}
+	if err := db.Migrate(url); err != nil {
+		t.Fatalf("db.Migrate() error = %v", err)
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+		t.Fatalf("truncating tables: %v", err)
+	}
+	st := store.New(pool)
+	emb := embed.Stub{}
+	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
+
+	newSession := func(subject string) *mcp.ClientSession {
+		server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
+		Register(server, subject, st, emb, b)
+		clientTransport, serverTransport := mcp.NewInMemoryTransports()
+		if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
+			t.Fatalf("server.Connect() error = %v", err)
+		}
+		client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "test"}, nil)
+		session, err := client.Connect(ctx, clientTransport, nil)
+		if err != nil {
+			t.Fatalf("client.Connect() error = %v", err)
+		}
+		t.Cleanup(func() { _ = session.Close() })
+		return session
+	}
+
+	aliceSession := newSession("alice")
+	proposed := callTool[proposeWriteOutput](t, aliceSession, "propose_write", proposeWriteArgs{
+		Content:        "alice's medical condition is confidential",
+		ProposedScopes: []string{"identity.medical"},
+	})
+	commitVec, err := emb.Embed(ctx, "alice's medical condition is confidential")
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	fact, err := st.CommitDiff(ctx, proposed.DiffID, "human-reviewer", commitVec, "")
+	if err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	// bob has a real, active grant, just not one covering identity.medical — this
+	// proves the store's rejection is scope-specific.
+	if _, err := st.CreateGrant(ctx, "bob", []string{"preferences.coffee"}, "memory", "facts", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+	bobSession := newSession("bob")
+
+	res, err := bobSession.CallTool(ctx, &mcp.CallToolParams{
+		Name: "propose_write",
+		Arguments: proposeWriteArgs{
+			Content:        "innocuous-looking replacement content",
+			ProposedScopes: []string{"preferences.coffee"},
+			TargetFactID:   fact.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() transport error = %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("propose_write targeting a fact outside the subject's grants succeeded, want a tool error")
+	}
+	text := toolErrorText(t, res)
+	if !strings.Contains(text, "internal error") {
+		t.Fatalf("propose_write error text = %q, want the generic masked message, not the store's internal-detail message", text)
+	}
+	if strings.Contains(text, fact.ID) {
+		t.Fatalf("propose_write error text = %q leaked the target fact ID, a store-layer detail that must stay masked", text)
 	}
 }
 

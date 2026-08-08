@@ -66,17 +66,24 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 	// store.ProposeDiff rejects empty content anyway, but only after this function
 	// has already paid for classification and embedding — both meant to become
 	// real (external, costly) calls. Reject up front instead.
+	//
+	// This is a genuine caller-input failure — the proposing agent can fix it and
+	// retry — so it's a ValidationError, not a plain wrapped error: see that
+	// type's doc comment for why propose_write is allowed to show it verbatim.
 	if content == "" {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: content must not be empty")
+		return store.StagedDiff{}, newValidationError("bouncer: content must not be empty")
 	}
 
 	// Validate the caller's input before doing any work on its behalf — in
 	// particular before calling Classify, which is a stub today but is meant to
 	// become a real (likely external/costly) call; no reason to pay that for a
-	// request that was always going to be rejected as malformed.
+	// request that was always going to be rejected as malformed. Same
+	// ValidationError reasoning as the empty-content check above: this is the
+	// caller's own scope string, not anything derived from the classifier or
+	// store.
 	for _, sc := range proposedScopes {
 		if err := scope.Validate(sc); err != nil {
-			return store.StagedDiff{}, fmt.Errorf("bouncer: %w", err)
+			return store.StagedDiff{}, newValidationError("bouncer: %s", err)
 		}
 	}
 
@@ -96,6 +103,11 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 	if classified != nil {
 		for _, sc := range classified {
 			if err := scope.Validate(sc); err != nil {
+				// Deliberately NOT a ValidationError: this scope came from the
+				// Classifier, not from the calling agent's own input, so it isn't
+				// something the agent can fix by resubmitting — it's this
+				// service's own component misbehaving. Fail closed and mask it
+				// like any other internal failure rather than assume it's safe.
 				return store.StagedDiff{}, fmt.Errorf("bouncer: classifier produced invalid scope: %w", err)
 			}
 		}
@@ -103,7 +115,12 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 	}
 	scopes = scope.Dedupe(scopes)
 	if len(scopes) == 0 {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: no scopes proposed or classified for content")
+		// Reachable via either an empty caller-supplied proposedScopes (with the
+		// classifier deferring) or a classifier override to "no scopes apply" —
+		// either way the message itself names no store/driver internals and is
+		// actionable ("propose at least one scope"), so it's safe as a
+		// ValidationError even though the root cause isn't always the caller.
+		return store.StagedDiff{}, newValidationError("bouncer: no scopes proposed or classified for content")
 	}
 
 	if b.Embedder == nil {
