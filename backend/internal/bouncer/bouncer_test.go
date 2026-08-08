@@ -167,7 +167,7 @@ func TestProposeWrite_ClassifierOverridesProposedScopes(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -206,7 +206,7 @@ func TestProposeWrite_DuplicateScopesDedupedSoCommitSucceeds(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -244,7 +244,7 @@ func TestProposeWrite_TargetOutsideSubjectGrantsRejected(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -299,7 +299,7 @@ func TestProposeWrite_EndToEnd(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -314,5 +314,68 @@ func TestProposeWrite_EndToEnd(t *testing.T) {
 	}
 	if diff.DedupeVerdict == nil || *diff.DedupeVerdict != store.DedupeNovel {
 		t.Errorf("diff.DedupeVerdict = %v, want novel", diff.DedupeVerdict)
+	}
+}
+
+// New must leave RateLimit/RateLimitWindow at a working, non-zero default —
+// store.CheckProposeWriteRateLimit treats a non-positive limit or window as a
+// misconfiguration and fails closed (rejects the proposal), so a caller that
+// doesn't explicitly wire config.Config's PROPOSE_WRITE_RATE_LIMIT* values
+// through must still get a Bouncer that actually works, not one that silently
+// rejects every proposal.
+func TestNew_DefaultsRateLimitToAWorkingValue(t *testing.T) {
+	b := New(nil, embed.Stub{}, PassthroughClassifier{})
+	if b.RateLimit <= 0 {
+		t.Errorf("New() RateLimit = %d, want a positive default", b.RateLimit)
+	}
+	if b.RateLimitWindow <= 0 {
+		t.Errorf("New() RateLimitWindow = %v, want a positive default", b.RateLimitWindow)
+	}
+}
+
+// TestProposeWrite_RateLimitExceededIsDistinguishable pins the ticket's core
+// requirement: ProposeWrite requires no grant at all (deliberately — a
+// brand-new agent has to propose before it holds anything to be granted), so
+// without a rate limit any configured MCP_SUBJECT can stage unlimited diffs
+// against the human review queue. Once the configured limit is hit, the error
+// must be errors.Is-distinguishable as store.ErrRateLimited (not just "some
+// error"), because mcptools/propose_write.go depends on that to surface it as
+// a structured RATE_LIMITED status rather than masking it like every other
+// failure.
+func TestProposeWrite_RateLimitExceededIsDistinguishable(t *testing.T) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set; skipping bouncer integration test")
+	}
+	if err := db.Migrate(url); err != nil {
+		t.Fatalf("db.Migrate() error = %v", err)
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
+		t.Fatalf("truncating tables: %v", err)
+	}
+
+	b := New(store.New(pool), embed.Stub{}, PassthroughClassifier{})
+	b.RateLimit = 1
+
+	if _, err := b.ProposeWrite(ctx, "agent-a", "first fact, within the limit", []scope.Scope{"preferences.coffee"}, nil); err != nil {
+		t.Fatalf("ProposeWrite() (first, within limit) error = %v", err)
+	}
+
+	_, err = b.ProposeWrite(ctx, "agent-a", "second fact, over the limit", []scope.Scope{"preferences.coffee"}, nil)
+	if !errors.Is(err, store.ErrRateLimited) {
+		t.Fatalf("ProposeWrite() over the limit: err = %v, want errors.Is(err, store.ErrRateLimited)", err)
+	}
+
+	// A subject with no rate-limit history of its own must not be affected by
+	// agent-a's — otherwise the control keyed wrong and throttles an
+	// uninvolved subject, which is its own denial-of-service.
+	if _, err := b.ProposeWrite(ctx, "agent-b", "agent-b's own, unrelated fact", []scope.Scope{"preferences.tea"}, nil); err != nil {
+		t.Fatalf("ProposeWrite() for a different subject: unexpected error = %v (agent-a's limit leaked across subjects)", err)
 	}
 }

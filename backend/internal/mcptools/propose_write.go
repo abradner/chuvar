@@ -8,6 +8,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/abradner/chuvar/backend/internal/bouncer"
+	"github.com/abradner/chuvar/backend/internal/store"
 )
 
 type proposeWriteArgs struct {
@@ -17,7 +18,14 @@ type proposeWriteArgs struct {
 }
 
 type proposeWriteOutput struct {
-	DiffID          string  `json:"diff_id"`
+	DiffID string `json:"diff_id"`
+
+	// Status is the diff's staged status (e.g. "pending") on success, or
+	// "RATE_LIMITED" when this subject has exceeded its propose_write rate
+	// limit for the current window (store.ErrRateLimited). RATE_LIMITED is an
+	// expected, structured outcome the caller is meant to act on — back off
+	// and retry later — not an opaque failure, the same shape
+	// read_with_scope_check already uses for status=insufficient_scope.
 	Status          string  `json:"status"`
 	DedupeVerdict   string  `json:"dedupe_verdict"`
 	CandidateFactID *string `json:"candidate_fact_id,omitempty"`
@@ -32,7 +40,10 @@ func registerProposeWrite(s *mcp.Server, subject string, b *bouncer.Bouncer) {
 			"must explicitly approve before it becomes a real, readable fact. The dedupe_verdict in " +
 			"the response tells you what happened: novel (new fact), duplicate (matches an existing " +
 			"fact exactly, will likely be rejected as redundant), or contradiction (semantically close " +
-			"to an existing fact but not identical — flagged for human review rather than auto-merged).",
+			"to an existing fact but not identical — flagged for human review rather than auto-merged). " +
+			"Proposals are rate-limited per subject: if status=RATE_LIMITED comes back (no diff_id), " +
+			"you've proposed too many facts too quickly — wait for the current window to pass before " +
+			"retrying rather than looping on this call.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    false,
 			DestructiveHint: &falsePtr, // stages a diff, never mutates committed facts
@@ -55,6 +66,15 @@ func registerProposeWrite(s *mcp.Server, subject string, b *bouncer.Bouncer) {
 
 		diff, err := b.ProposeWrite(ctx, subject, args.Content, scopes, target)
 		if err != nil {
+			if errors.Is(err, store.ErrRateLimited) {
+				// Distinguishable from every other bouncer/store failure below on
+				// purpose (CLAUDE.md's ticket calls for "RATE_LIMITED as a signal
+				// rather than backpressure") — returned as a structured status with
+				// no tool error, not masked by toolError, since there's nothing
+				// sensitive in "you're proposing too fast" that toolError's masking
+				// exists to protect.
+				return nil, proposeWriteOutput{Status: "RATE_LIMITED"}, nil
+			}
 			// bouncer.ProposeWrite's errors mix genuine input-validation failures
 			// (safe and useful to show the agent verbatim, e.g. a malformed scope —
 			// it can self-correct and retry) with wrapped store/DB errors (not

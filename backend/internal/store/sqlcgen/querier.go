@@ -47,6 +47,13 @@ type Querier interface {
 	// same named param twice cleanly in this position (same issue worked around in
 	// facts.sql's SearchFacts).
 	HasActiveDuplicateContent(ctx context.Context, arg HasActiveDuplicateContentParams) (bool, error)
+	// Atomically increments subject's counter for the given fixed window and
+	// returns the post-increment count. ON CONFLICT DO UPDATE, not a separate
+	// SELECT-then-INSERT/UPDATE: Postgres serializes concurrent upserts against
+	// the same (subject, window_start) row via that row's own lock, which is what
+	// closes the race between two concurrent proposals from the same subject —
+	// see store.CheckProposeWriteRateLimit's doc comment.
+	IncrementProposeWriteRateLimit(ctx context.Context, arg IncrementProposeWriteRateLimitParams) (int32, error)
 	InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) error
 	// ON CONFLICT DO NOTHING rather than an upsert: two processes booting at once
 	// must not each mint a DEK and have the second overwrite the first, because
