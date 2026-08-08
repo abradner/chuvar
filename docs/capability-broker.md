@@ -155,7 +155,7 @@ a failure to report, not a decision to authorize.
 
 ---
 
-## Architecture (DRAFT — pending confirmation)
+## Architecture (confirmed 2026-08-09 — see decision log)
 
 Shared consent plane, separate execution plane. One `grants` / `grant_scopes` / `audit_log`
 schema and one approval UI; a distinct broker process that never touches the facts path.
@@ -368,23 +368,19 @@ where one exists, so the agent does not have to invent a degradation path.
 
 ## Open questions
 
-1. **Architecture confirmation.** Does the shared-consent-plane / separate-execution-plane
-   split above hold up, or does the broker want its own store entirely?
-2. **Identity separation.** If the agent key is registered to the same source-control account
+1. **Architecture confirmation.** ~~Does the shared-consent-plane / separate-execution-plane
+   split above hold up, or does the broker want its own store entirely?~~ **Resolved
+   2026-08-09** — draft confirmed; see decision log.
+2. **Identity separation.** ~~If the agent key is registered to the same source-control account
    as the human operator, commits still attribute to the human but with a distinguishable
-   key. Visible separation needs a distinct identity (e.g. email), which affects contribution
-   graphs and any future DCO/CLA. Cheap to decide now, annoying later.
+   key.~~ **Resolved 2026-08-09** — identity is grant content, not broker structure; all
+   three shapes are supported configurations. See decision log.
 3. **SaaS custody.** The in-process-memory model is fine on a single-tenant deployment; one
    process holding many tenants' keys is a much harder story. TPM/KMS is likely not a "later
    upgrade" but specifically **the SaaS deployment's custody backend**, with keychain for
    self-hosted. Same interface, different implementation.
-4. **Scope vocabulary.** Reuse the dotted-string convention verbatim (e.g.
-   `git.sign:github.com/<org>/<repo>`, `fs.write:~/code/worktrees/**`,
-   `ssh.auth:<host-alias>`)? Same `TEXT` column, same prefix matching, same "don't hardcode
-   the taxonomy" rule. Note the tension these examples deliberately expose: the current
-   validator (`scope.Validate`) accepts only dot-delimited lowercase segments, so capability
-   targets carrying `:`, path, or glob syntax need the grammar extended — that extension is
-   part of this question, not an oversight in the examples.
+4. **Scope vocabulary.** ~~Reuse the dotted-string convention verbatim?~~ **Resolved
+   2026-08-09** — dotted operation plus optional colon-delimited target; see decision log.
 5. **Count-bounded grants.** Proposed position: TTL is the control, count is an anomaly
    tripwire. Hundreds of signatures in a minute is a signal; a dozen over a night is normal.
 6. **Expiry mid-operation.** Proposed position: fail closed, but make it never bite via
@@ -591,3 +587,60 @@ seconds. No approximate-nearest-neighbour index rebuild is needed at personal sc
 design is sequenced after the zero-ambient floor and **before the real embedder ships**, so
 the retrieval engine is built in the right place the first time. It gates the embedder, not
 the broker.
+
+### 2026-08-09 — Architecture confirmed: shared consent plane, separate execution plane
+
+The draft above is now decided, not draft (issue #80). Grounds checked against the real
+system rather than re-argued: the `kind` discriminator (PR #24), grant renewal (PR #27), and
+the `grant_expiring` push already exist on the shared plane, so a separate broker store would
+re-derive the approval UI, renewal, revocation, and audit for zero gain. The availability
+concern that motivated the question dissolves under the custody model already decided:
+`brokerd` holds decrypted key material and the grant's parameters in process memory for the
+grant duration, so Postgres is never on the hot signing path — the sign call consults only
+in-process state. The database is touched at grant time, renewal, and revocation-watch
+(mechanism chosen at build time: `LISTEN/NOTIFY` or the existing SSE stream; whichever is
+chosen must keep success criterion 4's seconds-scale revocation).
+
+### 2026-08-09 — Scope grammar: dotted operation, optional colon-delimited target
+
+Resolves open question 4 (issue #75). A capability scope is
+`<dotted-operation>[:<target>]` — e.g. `git.sign:github.com/abradner/chuvar`. The operation
+part keeps the existing grammar and `Covers` segment-boundary semantics unchanged; the target
+part's grammar is defined per operation class, and memory scopes (no `:`) are untouched.
+**Exact-match targets only to start** — no globs, no path patterns, until a real need names
+one; the `fs.write:~/code/worktrees/**` example above is aspirational vocabulary, not
+committed grammar. Same `TEXT` column, no schema change, "don't hardcode the taxonomy"
+still holds. Implementation: extend `scope.Validate`/`Covers` (splits on the first `:`).
+
+### 2026-08-09 — Agent identity is grant content, not broker structure
+
+Resolves open question 2 (issue #76). The broker does not bake in one identity shape; the
+grant names the (committer email, signing key) pair it authorizes, and the payload check
+enforces whatever the human configured. Three supported configurations, chosen per use case:
+
+1. **Operator account, dedicated key only** — commits attribute to the operator; provenance
+   is in the key fingerprint (`%GK`), invisible in default tooling but present.
+2. **Operator account, dedicated key + distinct committer email alias** — attribution stays
+   with the operator's account; agent-authored commits are distinguishable in plain `git log`
+   as well as by key.
+3. **Separate machine account** — maximum visible separation, at the cost of the account's
+   own credential custody and DCO/CLA complications (a Developer Certificate of Origin
+   sign-off is a human's assertion of the right to contribute; a machine account muddies who
+   is asserting it).
+
+Chuvar's own default: configuration 2 (proposed; confirm at provisioning time, issue #78).
+
+### 2026-08-09 — Signing policy lives broker-side, in the consent plane
+
+Resolves the policy-home half of issue #72. The `required` / `preferred` / `off` policy is a
+per-repository row in the consent-plane database, set by a human through the control plane.
+**A checked-in policy file is rejected as enforcement**: it is agent-writable by
+construction — an agent with worktree write access could flip `required` to `off`, which is
+the bypass ratchet in file form and violates "an agent can request a grant; an agent cannot
+change policy." An advisory copy in-repo may exist later for preflight UX only, subject to
+the deletion test (removing it changes politeness, never possibility).
+
+Exception records (the `preferred`-mode degradation artifact): the signing shim writes a
+local append-only JSONL record at failure time — which works while the broker is down, the
+property a grant structurally cannot have — and records are reconciled into `audit_log` on
+next broker contact.
