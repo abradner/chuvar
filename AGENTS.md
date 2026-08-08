@@ -211,9 +211,9 @@ Things that cost real time to discover once — don't rediscover them:
 - **Docker needs elevated access in this sandbox.** Use `sudo -n docker ...`
   (passwordless sudo is configured) and expect to need to bypass the default command
   sandbox for those calls.
-- **Port 5432 is already claimed** by the sibling `spritz` project on this machine (also
-  7233/8233/44491 for its Temporal, 3900-3903 for Garage) — check `docker ps` before
-  assuming a default port is free. This repo's Postgres uses 54322, bound to
+- **Don't assume port 5432 is free** — other Postgres instances often use it, and this
+  dev machine runs several projects' service stacks side by side; check `docker ps`
+  before assuming any default port is free. This repo's Postgres uses 54322, bound to
   `127.0.0.1` only (see `docker-compose.yml`).
 - **Postgres 18+ Docker images require the volume mounted at `/var/lib/postgresql`**,
   not `/var/lib/postgresql/data` — the old path silently produces an unhealthy
@@ -407,7 +407,7 @@ retrofit — don't copy their single-blob shape into new work.
 
 Terse smart-caveman register for chat/status updates. Code, commits, and PRs are always written
 normal — this mode is for conversational back-and-forth only, adapted from a sibling project
-(kaff) because it's a genuinely good token-efficiency trick, not because it's this project's own
+because it's a genuinely good token-efficiency trick, not because it's this project's own
 invention.
 
 Rules:

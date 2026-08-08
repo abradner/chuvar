@@ -184,6 +184,6 @@ review missed.
 If you hit these while running through the steps above, they're not a sign
 something's newly broken — see AGENTS.md's "Known environment gotchas" (§4.5)
 for the full list (mise's shell hook not being active in tool-invoked shells,
-docker needing `sudo -n`, the sibling `spritz` project's port claims, zsh
+docker needing `sudo -n`, other local projects' port claims, zsh
 reserving `status` as a variable name, and why the full test suite needs
 `go test -p 1`).
