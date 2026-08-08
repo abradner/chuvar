@@ -91,6 +91,26 @@ describe("TokensPage", () => {
     expect(await screen.findByDisplayValue("not a valid uri")).toBeInTheDocument();
   });
 
+  it("falls back to the raw URI when the enrollment URI carries an empty secret", async () => {
+    // searchParams.get returns "" (not null) for a valueless `?secret=`, so a
+    // `??` fallback would leave the setup key field blank — the operator would
+    // have nothing to enrol from and no way to recover it. Found in review.
+    vi.mocked(api.listTokens).mockResolvedValue([]);
+    vi.mocked(api.createToken).mockResolvedValue({
+      ...sampleCreated,
+      totp_enroll_uri: "otpauth://totp/Chuvar:alex-phone?secret=&issuer=Chuvar",
+    });
+
+    render(<TokensPage />);
+    await screen.findByText("No reviewer tokens yet.");
+    await userEvent.type(screen.getByPlaceholderText("alex-laptop"), "alex-phone");
+    await userEvent.click(screen.getByRole("button", { name: "Create token" }));
+
+    expect(
+      await screen.findByDisplayValue("otpauth://totp/Chuvar:alex-phone?secret=&issuer=Chuvar"),
+    ).toBeInTheDocument();
+  });
+
   it("dismisses the revealed token without re-showing it after dismiss", async () => {
     vi.mocked(api.listTokens).mockResolvedValue([]);
     vi.mocked(api.createToken).mockResolvedValue(sampleCreated);

@@ -10,7 +10,11 @@ import { api, ApiError, type CreatedReviewerToken, type ReviewerToken } from "..
 // than anywhere else in the app.
 function enrollmentSecret(uri: string): string {
   try {
-    return new URL(uri).searchParams.get("secret") ?? uri;
+    // `||`, not `??`: searchParams.get returns "" (not null) for a valueless
+    // `?secret=`, and an empty setup key field is the one outcome worse than
+    // showing the raw URI — the operator would have nothing to enrol from and
+    // no way to get it back. Found in review.
+    return new URL(uri).searchParams.get("secret") || uri;
   } catch {
     return uri;
   }
@@ -154,7 +158,13 @@ export function TokensPage() {
             )}
           </li>
         ))}
-        {tokens.length === 0 && <p className="empty">No reviewer tokens yet.</p>}
+        {/* Wrapped in <li> because a <ul> may only contain <li> children —
+            bare <p> here is invalid HTML and reads poorly to a screen reader.
+            The sibling Grants/StagedDiffs pages still have the unwrapped
+            shape; not fixed here to keep this PR to its own surface. */}
+        {tokens.length === 0 && (
+          <li className="empty">No reviewer tokens yet.</li>
+        )}
       </ul>
 
       <form onSubmit={createToken} className="new-grant-form">
