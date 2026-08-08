@@ -7,8 +7,36 @@ RETURNING id, subject, depth, created_at, expires_at, revoked_at, kind;
 INSERT INTO grant_scopes (grant_id, scope) VALUES ($1, $2);
 
 -- name: ListGrants :many
-SELECT id, subject, depth, created_at, expires_at, revoked_at, kind
-FROM grants WHERE subject = $1 ORDER BY created_at DESC;
+-- Unpaginated, subject-scoped by design: this is also what
+-- internal/mcptools/list_grants.go's list_grants tool calls for an agent to
+-- list its own grants, a small result set by construction — not the
+-- reviewer-facing "list everything" surface the pagination ticket is about.
+-- ListGrantsPage (below) is the paginated sibling used by GET /api/grants.
+-- Scopes come back via an array_agg subquery (same shape as
+-- ListGrantsNearingExpiry and GetFact/SearchFacts' fact_scopes aggregation in
+-- facts.sql) rather than a separate ListGrantScopes call per row, to avoid an
+-- N+1 query per returned grant. Found in review.
+SELECT g.id, g.subject, g.depth, g.created_at, g.expires_at, g.revoked_at, g.kind,
+       (SELECT array_agg(gs.scope) FROM grant_scopes gs WHERE gs.grant_id = g.id)::text[] AS scopes
+FROM grants g WHERE g.subject = $1 ORDER BY g.created_at DESC;
+
+-- name: ListGrantsPage :many
+-- Cursor-paginated listing for GET /api/grants (internal/api/grants.go).
+-- Newest first, matching ListGrants' own ORDER BY, so the cursor comparison
+-- runs the opposite direction from ListStagedDiffsPage's oldest-first queue
+-- order (staged_diffs.sql): a page here is "every one of subject's grants
+-- strictly older than the last row already returned." Same (created_at, id)
+-- keyset rationale as ListStagedDiffsPage — see that query's doc comment.
+-- Scopes use the same array_agg subquery as ListGrants above, for the same
+-- N+1 reason.
+SELECT g.id, g.subject, g.depth, g.created_at, g.expires_at, g.revoked_at, g.kind,
+       (SELECT array_agg(gs.scope) FROM grant_scopes gs WHERE gs.grant_id = g.id)::text[] AS scopes
+FROM grants g
+WHERE g.subject = @subject
+  AND (sqlc.narg(cursor_created_at)::timestamptz IS NULL
+       OR (g.created_at, g.id) < (sqlc.narg(cursor_created_at)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ORDER BY g.created_at DESC, g.id DESC
+LIMIT @lim;
 
 -- name: ListGrantScopes :many
 SELECT scope FROM grant_scopes WHERE grant_id = $1;

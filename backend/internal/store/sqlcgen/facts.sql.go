@@ -82,11 +82,25 @@ SELECT
     f.created_at,
     f.valid_at,
     (SELECT array_agg(fs.scope) FROM fact_scopes fs WHERE fs.fact_id = f.id)::text[] AS scopes,
+    -- Provenance columns for "full" depth (mcptools.factView projects these only
+    -- when a fact's effective depth is "full" — see store.SearchFacts). Selected
+    -- for every candidate row regardless of depth, same as content/summary above;
+    -- the depth gate is applied in Go, once, per AGENTS.md §3.2's "filter before
+    -- ranking, not after" — here that's "select once here, gate at the one place
+    -- that already computes per-row depth," not a second SQL-level filter to keep
+    -- in sync with the first.
+    f.source_staged_diff_id,
+    f.superseded_by,
+    f.invalid_at,
+    f.expired_at,
+    sd.decided_by,
+    sd.decided_at,
     COALESCE(1.0 / ($1 + k.rank), 0) + COALESCE(1.0 / ($2 + v.rank), 0) AS score
 FROM candidate_facts c
 JOIN facts f ON f.id = c.id
 LEFT JOIN keyword_ranked k ON k.id = c.id
 LEFT JOIN vector_ranked v ON v.id = c.id
+LEFT JOIN staged_diffs sd ON sd.id = f.source_staged_diff_id
 WHERE k.id IS NOT NULL OR v.id IS NOT NULL
 ORDER BY score DESC
 LIMIT $3
@@ -104,15 +118,24 @@ type SearchFactsParams struct {
 }
 
 type SearchFactsRow struct {
-	ID        string
-	Content   string
-	Summary   *string
-	CreatedAt time.Time
-	ValidAt   time.Time
-	Scopes    []string
-	Score     pgtype.Numeric
+	ID                 string
+	Content            string
+	Summary            *string
+	CreatedAt          time.Time
+	ValidAt            time.Time
+	Scopes             []string
+	SourceStagedDiffID string
+	SupersededBy       *string
+	InvalidAt          *time.Time
+	ExpiredAt          *time.Time
+	DecidedBy          *string
+	DecidedAt          *time.Time
+	Score              pgtype.Numeric
 }
 
+// LEFT JOIN, not JOIN: source_staged_diff_id is NOT NULL and FK-enforced today,
+// so this always matches, but a provenance projection shouldn't be able to drop
+// an otherwise-visible fact from the result set if that ever changes.
 func (q *Queries) SearchFacts(ctx context.Context, arg SearchFactsParams) ([]SearchFactsRow, error) {
 	rows, err := q.db.Query(ctx, searchFacts,
 		arg.RrfK1,
@@ -138,6 +161,12 @@ func (q *Queries) SearchFacts(ctx context.Context, arg SearchFactsParams) ([]Sea
 			&i.CreatedAt,
 			&i.ValidAt,
 			&i.Scopes,
+			&i.SourceStagedDiffID,
+			&i.SupersededBy,
+			&i.InvalidAt,
+			&i.ExpiredAt,
+			&i.DecidedBy,
+			&i.DecidedAt,
 			&i.Score,
 		); err != nil {
 			return nil, err

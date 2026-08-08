@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/abradner/chuvar/backend/internal/db"
 	"github.com/abradner/chuvar/backend/internal/embed"
@@ -33,52 +34,102 @@ func (f fakeEmbedder) Embed(context.Context, string) ([]float32, error) {
 	return f.vec, f.err
 }
 
-func TestProposeWrite_NoScopesIsError(t *testing.T) {
-	b := New(nil, embed.Stub{}, PassthroughClassifier{})
-	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", nil, nil)
+// wantValidationError fails the test unless err is non-nil and satisfies
+// errors.As against *ValidationError — the taxonomy propose_write (mcptools)
+// relies on to decide what's safe to show an agent verbatim.
+func wantValidationError(t *testing.T, err error) {
+	t.Helper()
 	if err == nil {
-		t.Fatal("ProposeWrite() with no proposed/classified scopes: want error, got nil")
+		t.Fatal("want a *ValidationError, got nil")
 	}
+	var verr *ValidationError
+	if !errors.As(err, &verr) {
+		t.Fatalf("err = %v (%T), want it to satisfy errors.As(err, &ValidationError{})", err, err)
+	}
+}
+
+// wantNotValidationError fails the test unless err is non-nil and does NOT
+// satisfy errors.As against *ValidationError — these are the failure paths
+// (misconfiguration, Classifier/Embedder/Store failures) that must stay masked
+// by mcptools' generic toolError, since they can carry internal details a
+// ValidationError is allowed to skip masking for.
+func wantNotValidationError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("want an error, got nil")
+	}
+	var verr *ValidationError
+	if errors.As(err, &verr) {
+		t.Fatalf("err = %v: satisfies errors.As(err, &ValidationError{}), want it to stay masked (not a caller-input failure)", err)
+	}
+}
+
+// integrationStore returns a real *store.Store against DATABASE_URL (or skips),
+// for ProposeWrite paths past the rate-limit check — which runs before
+// Classify/Embed (an over-limit subject must not generate external pipeline
+// cost) and therefore needs a non-nil Store even in tests whose subject is the
+// classifier or embedder.
+func integrationStore(t *testing.T) *store.Store {
+	t.Helper()
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set; skipping bouncer integration test")
+	}
+	if err := db.Migrate(url); err != nil {
+		t.Fatalf("db.Migrate() error = %v", err)
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
+		t.Fatalf("truncating tables: %v", err)
+	}
+	return store.New(pool)
+}
+
+func TestProposeWrite_NoScopesIsError(t *testing.T) {
+	b := New(integrationStore(t), embed.Stub{}, PassthroughClassifier{})
+	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", nil, nil)
+	wantValidationError(t, err)
 }
 
 func TestProposeWrite_InvalidScopeIsError(t *testing.T) {
 	b := New(nil, embed.Stub{}, PassthroughClassifier{})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"Not Valid"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with malformed scope: want error, got nil")
-	}
+	wantValidationError(t, err)
 }
 
 func TestProposeWrite_EmptyContentIsError(t *testing.T) {
 	b := New(nil, embed.Stub{}, PassthroughClassifier{})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with empty content: want error, got nil")
-	}
+	wantValidationError(t, err)
 }
 
 func TestProposeWrite_NilClassifierReturnsErrorNotPanic(t *testing.T) {
 	b := &Bouncer{Store: nil, Embedder: embed.Stub{}, Classifier: nil}
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with nil Classifier: want error, got nil")
-	}
+	// Misconfiguration, not a caller mistake — must stay masked.
+	wantNotValidationError(t, err)
 }
 
 func TestProposeWrite_NilEmbedderReturnsErrorNotPanic(t *testing.T) {
-	b := &Bouncer{Store: nil, Embedder: nil, Classifier: PassthroughClassifier{}}
+	// A real Store, not nil: the rate-limit check (which needs the Store) runs
+	// before the pipeline, so a nil Store would short-circuit this test at the
+	// misconfigured-Store error and leave the nil-Embedder branch unexercised.
+	// Found in the batch's independent aggregate review.
+	b := &Bouncer{Store: integrationStore(t), Embedder: nil, Classifier: PassthroughClassifier{},
+		RateLimit: defaultRateLimit, RateLimitWindow: defaultRateLimitWindow}
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with nil Embedder: want error, got nil")
-	}
+	wantNotValidationError(t, err)
 }
 
 func TestProposeWrite_NilStoreReturnsErrorNotPanic(t *testing.T) {
 	b := &Bouncer{Store: nil, Embedder: embed.Stub{}, Classifier: PassthroughClassifier{}}
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with nil Store: want error, got nil")
-	}
+	wantNotValidationError(t, err)
 }
 
 type emptySliceClassifier struct{}
@@ -91,30 +142,52 @@ func TestProposeWrite_ClassifierNonNilEmptySliceOverridesCaller(t *testing.T) {
 	// A non-nil empty slice is a real classification ("no scopes apply"), distinct
 	// from nil ("defer to caller") — see Classifier's doc comment. It must override
 	// the caller's proposed scopes down to nothing, not be treated as "no opinion."
-	b := New(nil, embed.Stub{}, emptySliceClassifier{})
+	b := New(integrationStore(t), embed.Stub{}, emptySliceClassifier{})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with classifier returning non-nil empty scopes: want error (overridden to no scopes), got nil")
-	}
+	// "No scopes proposed or classified" is still safe/actionable even though the
+	// classifier (not the caller) drove it here — see the ValidationError call
+	// site's comment in bouncer.go.
+	wantValidationError(t, err)
 }
 
 func TestProposeWrite_ClassifierErrorIsWrapped(t *testing.T) {
-	b := New(nil, embed.Stub{}, fakeClassifier{err: errors.New("classifier unavailable")})
+	b := New(integrationStore(t), embed.Stub{}, fakeClassifier{err: errors.New("classifier unavailable")})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with a failing classifier: want error, got nil")
-	}
+	// A Classifier failure isn't caller input — could wrap an external service's
+	// error text — so it must stay masked.
+	wantNotValidationError(t, err)
+}
+
+type invalidScopeClassifier struct{}
+
+func (invalidScopeClassifier) Classify(context.Context, string) ([]scope.Scope, error) {
+	return []scope.Scope{"Not Valid"}, nil
+}
+
+func TestProposeWrite_ClassifierProducedInvalidScopeIsNotValidationError(t *testing.T) {
+	// A malformed scope from the CLASSIFIER (as opposed to one the caller
+	// proposed directly) is this service's own component misbehaving, not
+	// something the calling agent can fix by resubmitting — so, unlike the
+	// caller-supplied-scope case, it must stay masked rather than shown verbatim.
+	// integrationStore, not nil: with a nil Store the misconfigured-Store error
+	// fires before Classify ever runs, so this test was passing without
+	// executing the classifier-produced-invalid-scope branch it exists to pin —
+	// the exact "passes against unfixed code" failure mode AGENTS.md warns
+	// about. Found in the batch's independent aggregate review.
+	b := New(integrationStore(t), embed.Stub{}, invalidScopeClassifier{})
+	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
+	wantNotValidationError(t, err)
 }
 
 func TestProposeWrite_EmbedderErrorIsWrapped(t *testing.T) {
 	// Store is nil and must never be reached: the embed error should short-circuit
 	// before ProposeWrite touches the store, or this panics instead of failing
 	// cleanly.
-	b := New(nil, fakeEmbedder{err: errors.New("embedding provider unavailable")}, PassthroughClassifier{})
+	b := New(integrationStore(t), fakeEmbedder{err: errors.New("embedding provider unavailable")}, PassthroughClassifier{})
 	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
-	if err == nil {
-		t.Fatal("ProposeWrite() with a failing embedder: want error, got nil")
-	}
+	// An Embedder failure isn't caller input either — same reasoning as the
+	// Classifier failure case above.
+	wantNotValidationError(t, err)
 }
 
 func TestProposeWrite_ClassifierOverridesProposedScopes(t *testing.T) {
@@ -131,7 +204,7 @@ func TestProposeWrite_ClassifierOverridesProposedScopes(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -170,7 +243,7 @@ func TestProposeWrite_DuplicateScopesDedupedSoCommitSucceeds(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -208,7 +281,7 @@ func TestProposeWrite_TargetOutsideSubjectGrantsRejected(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -242,6 +315,11 @@ func TestProposeWrite_TargetOutsideSubjectGrantsRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("ProposeWrite() targeting a fact outside the subject's actual grants: want error, got nil")
 	}
+	// This rejection comes back from store.ProposeDiff, wrapped by ProposeWrite's
+	// generic "bouncer: stage diff: %w" — it must NOT satisfy errors.As against
+	// ValidationError, or mcptools.propose_write would show a store-originated
+	// error verbatim, the exact leak the taxonomy exists to prevent.
+	wantNotValidationError(t, err)
 }
 
 func TestProposeWrite_EndToEnd(t *testing.T) {
@@ -258,7 +336,7 @@ func TestProposeWrite_EndToEnd(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -274,4 +352,96 @@ func TestProposeWrite_EndToEnd(t *testing.T) {
 	if diff.DedupeVerdict == nil || *diff.DedupeVerdict != store.DedupeNovel {
 		t.Errorf("diff.DedupeVerdict = %v, want novel", diff.DedupeVerdict)
 	}
+}
+
+// New must leave RateLimit/RateLimitWindow at a working, non-zero default —
+// store.CheckProposeWriteRateLimit treats a non-positive limit or window as a
+// misconfiguration and fails closed (rejects the proposal), so a caller that
+// doesn't explicitly wire config.Config's PROPOSE_WRITE_RATE_LIMIT* values
+// through must still get a Bouncer that actually works, not one that silently
+// rejects every proposal.
+func TestNew_DefaultsRateLimitToAWorkingValue(t *testing.T) {
+	b := New(nil, embed.Stub{}, PassthroughClassifier{})
+	if b.RateLimit <= 0 {
+		t.Errorf("New() RateLimit = %d, want a positive default", b.RateLimit)
+	}
+	if b.RateLimitWindow <= 0 {
+		t.Errorf("New() RateLimitWindow = %v, want a positive default", b.RateLimitWindow)
+	}
+}
+
+// TestProposeWrite_RateLimitExceededIsDistinguishable pins the ticket's core
+// requirement: ProposeWrite requires no grant at all (deliberately — a
+// brand-new agent has to propose before it holds anything to be granted), so
+// without a rate limit any configured MCP_SUBJECT can stage unlimited diffs
+// against the human review queue. Once the configured limit is hit, the error
+// must be errors.Is-distinguishable as store.ErrRateLimited (not just "some
+// error"), because mcptools/propose_write.go depends on that to surface it as
+// a structured RATE_LIMITED status rather than masking it like every other
+// failure.
+func TestProposeWrite_RateLimitExceededIsDistinguishable(t *testing.T) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set; skipping bouncer integration test")
+	}
+	if err := db.Migrate(url); err != nil {
+		t.Fatalf("db.Migrate() error = %v", err)
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
+		t.Fatalf("truncating tables: %v", err)
+	}
+
+	b := New(store.New(pool), embed.Stub{}, PassthroughClassifier{})
+	b.RateLimit = 1
+	b.RateLimitWindow = time.Hour
+
+	if _, err := b.ProposeWrite(ctx, "agent-a", "first fact, within the limit", []scope.Scope{"preferences.coffee"}, nil); err != nil {
+		t.Fatalf("ProposeWrite() (first, within limit) error = %v", err)
+	}
+
+	_, err = b.ProposeWrite(ctx, "agent-a", "second fact, over the limit", []scope.Scope{"preferences.coffee"}, nil)
+	if !errors.Is(err, store.ErrRateLimited) {
+		t.Fatalf("ProposeWrite() over the limit: err = %v, want errors.Is(err, store.ErrRateLimited)", err)
+	}
+
+	// A subject with no rate-limit history of its own must not be affected by
+	// agent-a's — otherwise the control keyed wrong and throttles an
+	// uninvolved subject, which is its own denial-of-service.
+	if _, err := b.ProposeWrite(ctx, "agent-b", "agent-b's own, unrelated fact", []scope.Scope{"preferences.tea"}, nil); err != nil {
+		t.Fatalf("ProposeWrite() for a different subject: unexpected error = %v (agent-a's limit leaked across subjects)", err)
+	}
+
+	// An over-limit request must be refused BEFORE Classify or Embed run: both
+	// are stubs today but are meant to become real external, costly calls, and
+	// checking the limit only after them would let an over-limit subject keep
+	// generating unbounded provider traffic and cost while every request comes
+	// back RATE_LIMITED and stages nothing. Found in aggregate review.
+	b.Classifier = trippingClassifier{t: t}
+	b.Embedder = trippingEmbedder{t: t}
+	if _, err := b.ProposeWrite(ctx, "agent-a", "still over the limit", []scope.Scope{"preferences.coffee"}, nil); !errors.Is(err, store.ErrRateLimited) {
+		t.Fatalf("ProposeWrite() over the limit with tripping pipeline: err = %v, want errors.Is(err, store.ErrRateLimited)", err)
+	}
+}
+
+// trippingClassifier/trippingEmbedder fail the test if the pipeline reaches
+// them — used to prove an over-limit request never pays for classification or
+// embedding.
+type trippingClassifier struct{ t *testing.T }
+
+func (c trippingClassifier) Classify(context.Context, string) ([]scope.Scope, error) {
+	c.t.Error("Classify was invoked for an over-limit request — the rate limit must run first")
+	return nil, nil
+}
+
+type trippingEmbedder struct{ t *testing.T }
+
+func (e trippingEmbedder) Embed(context.Context, string) ([]float32, error) {
+	e.t.Error("Embed was invoked for an over-limit request — the rate limit must run first")
+	return nil, nil
 }

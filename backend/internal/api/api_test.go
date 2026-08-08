@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -366,7 +368,7 @@ func TestCreateAndListGrants(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /api/grants status = %d, want 200", resp.StatusCode)
 	}
-	grants := decodeInto[[]grantView](t, resp)
+	grants := decodeInto[page[grantView]](t, resp).Items
 	if len(grants) != 1 {
 		t.Fatalf("GET /api/grants returned %d grants, want 1", len(grants))
 	}
@@ -479,7 +481,7 @@ func TestRevokeGrant(t *testing.T) {
 		t.Fatalf("POST revoke status = %d, want 204", resp.StatusCode)
 	}
 
-	grants := decodeInto[[]grantView](t, doJSON(t, http.MethodGet, srv.URL+"/api/grants?subject=agent-a", nil))
+	grants := decodeInto[page[grantView]](t, doJSON(t, http.MethodGet, srv.URL+"/api/grants?subject=agent-a", nil)).Items
 	if len(grants) != 1 || grants[0].Active {
 		t.Fatalf("grant after revoke = %+v, want present but not Active", grants)
 	}
@@ -593,7 +595,7 @@ func TestStagedDiffs_ListApproveReject(t *testing.T) {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
 
-	pending := decodeInto[[]stagedDiffView](t, doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?status=pending", nil))
+	pending := decodeInto[page[stagedDiffView]](t, doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?status=pending", nil)).Items
 	if len(pending) != 2 {
 		t.Fatalf("pending diffs = %d, want 2", len(pending))
 	}
@@ -613,9 +615,130 @@ func TestStagedDiffs_ListApproveReject(t *testing.T) {
 		t.Fatalf("POST reject status = %d, want 204", resp.StatusCode)
 	}
 
-	stillPending := decodeInto[[]stagedDiffView](t, doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?status=pending", nil))
+	stillPending := decodeInto[page[stagedDiffView]](t, doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?status=pending", nil)).Items
 	if len(stillPending) != 0 {
 		t.Fatalf("pending diffs after decisions = %d, want 0", len(stillPending))
+	}
+}
+
+// TestStagedDiffs_Pagination_LimitAndCursor covers the new query-param
+// contract for GET /api/staged-diffs: limit defaults, is bounded, and the
+// cursor walk returns every pending diff exactly once with no next_cursor
+// once the walk is exhausted.
+func TestStagedDiffs_Pagination_LimitAndCursor(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	vec384 := make([]float32, 384)
+	const total = 3
+	want := make(map[string]bool, total)
+	for i := 0; i < total; i++ {
+		d, err := st.ProposeDiff(ctx, "agent-a", fmt.Sprintf("fact %d", i), []string{"preferences.tea"}, vec384, nil, nil)
+		if err != nil {
+			t.Fatalf("ProposeDiff() error = %v", err)
+		}
+		want[d.ID] = true
+	}
+
+	resp := doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?status=pending&limit=2", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/staged-diffs?limit=2 status = %d, want 200", resp.StatusCode)
+	}
+	first := decodeInto[page[stagedDiffView]](t, resp)
+	if len(first.Items) != 2 {
+		t.Fatalf("first page items = %d, want 2", len(first.Items))
+	}
+	if first.NextCursor == nil {
+		t.Fatal("first page next_cursor = nil, want a cursor (a third row still exists)")
+	}
+
+	resp = doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?status=pending&limit=2&cursor="+*first.NextCursor, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/staged-diffs with cursor status = %d, want 200", resp.StatusCode)
+	}
+	second := decodeInto[page[stagedDiffView]](t, resp)
+	if len(second.Items) != 1 {
+		t.Fatalf("second page items = %d, want 1", len(second.Items))
+	}
+	if second.NextCursor != nil {
+		t.Fatalf("second page next_cursor = %q, want nil (no rows left)", *second.NextCursor)
+	}
+
+	got := map[string]bool{}
+	for _, d := range append(first.Items, second.Items...) {
+		if got[d.ID] {
+			t.Fatalf("id %s returned twice across pages", d.ID)
+		}
+		got[d.ID] = true
+	}
+	if len(got) != len(want) {
+		t.Fatalf("walked %d distinct diffs, want %d", len(got), len(want))
+	}
+	for id := range want {
+		if !got[id] {
+			t.Errorf("diff %s never appeared across either page", id)
+		}
+	}
+}
+
+func TestStagedDiffs_Pagination_InvalidLimitRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	resp := doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?limit=0", nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("GET /api/staged-diffs?limit=0: status = %d, want 400", resp.StatusCode)
+	}
+
+	resp = doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?limit=abc", nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("GET /api/staged-diffs?limit=abc: status = %d, want 400", resp.StatusCode)
+	}
+
+	resp = doJSON(t, http.MethodGet, srv.URL+fmt.Sprintf("/api/staged-diffs?limit=%d", maxListLimit+1), nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("GET /api/staged-diffs?limit=%d (over max): status = %d, want 400", maxListLimit+1, resp.StatusCode)
+	}
+}
+
+func TestStagedDiffs_Pagination_InvalidCursorRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	resp := doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?cursor=not-a-valid-cursor!!", nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("GET /api/staged-diffs with a garbage cursor: status = %d, want 400", resp.StatusCode)
+	}
+
+	// A well-formed token whose ID half is not a UUID must also be a 400, not
+	// a 500 from the ::uuid cast inside the page query — found in review: the
+	// parser validated the timestamp but passed the ID through to Postgres.
+	badID := base64.RawURLEncoding.EncodeToString([]byte("2026-01-01T00:00:00Z|not-a-uuid"))
+	resp = doJSON(t, http.MethodGet, srv.URL+"/api/staged-diffs?cursor="+badID, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("GET /api/staged-diffs with a non-UUID cursor ID: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestGrants_Pagination_NextCursorAbsentWhenExhausted is the grants-listing
+// counterpart of the staged-diffs pagination test above, confirming
+// next_cursor is nil once every one of subject's grants has been returned.
+func TestGrants_Pagination_NextCursorAbsentWhenExhausted(t *testing.T) {
+	srv, _ := testServer(t)
+
+	doJSON(t, http.MethodPost, srv.URL+"/api/grants", createGrantRequest{
+		Subject: "agent-a",
+		Scopes:  []string{"identity.basic"},
+	})
+
+	resp := doJSON(t, http.MethodGet, srv.URL+"/api/grants?subject=agent-a&limit=50", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/grants status = %d, want 200", resp.StatusCode)
+	}
+	got := decodeInto[page[grantView]](t, resp)
+	if len(got.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(got.Items))
+	}
+	if got.NextCursor != nil {
+		t.Fatalf("next_cursor = %q, want nil (only one grant exists)", *got.NextCursor)
 	}
 }
 
@@ -659,6 +782,30 @@ func TestApproveStagedDiff_NotFoundReturnsCleanError(t *testing.T) {
 	body := decodeInto[errorResponse](t, resp)
 	if body.Error != "staged diff not found" {
 		t.Errorf("error message = %q, want a clean not-found message, not a raw store/driver error", body.Error)
+	}
+}
+
+// TestApproveStagedDiff_RealDBErrorIsNotMaskedAs404 is the regression test for
+// the same error-masking class already fixed for grant requests in this batch
+// (TestGrantRequestActions_RealDBErrorIsNotMaskedAs404): approveStagedDiff used
+// to turn every GetStagedDiff failure into a 404, so a real database error would
+// come back indistinguishable from a bad ID. A syntactically invalid UUID
+// triggers a real Postgres error ("invalid input syntax for type uuid"), not
+// pgx.ErrNoRows — a realistic way to exercise the non-404 path through an
+// ordinary HTTP request, without needing to fake a connection failure.
+func TestApproveStagedDiff_RealDBErrorIsNotMaskedAs404(t *testing.T) {
+	srv, _ := testServer(t)
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/staged-diffs/not-a-valid-uuid/approve", nil)
+	if resp.StatusCode == http.StatusNotFound {
+		t.Fatal("POST approve with a malformed ID: got 404, want a real database error to surface as 500 (not masked as not-found)")
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("POST approve with a malformed ID: status = %d, want 500", resp.StatusCode)
+	}
+	body := decodeInto[errorResponse](t, resp)
+	if body.Error != "could not look up staged diff" {
+		t.Errorf("error message = %q, want a clean generic message, not a raw store/driver error", body.Error)
 	}
 }
 
@@ -1085,7 +1232,7 @@ func TestGrantRequests_ListApproveDeny(t *testing.T) {
 	}
 
 	// The subject that had its request approved now actually holds the grant.
-	grants := decodeInto[[]grantView](t, doJSON(t, http.MethodGet, srv.URL+"/api/grants?subject=agent-a", nil))
+	grants := decodeInto[page[grantView]](t, doJSON(t, http.MethodGet, srv.URL+"/api/grants?subject=agent-a", nil)).Items
 	if len(grants) != 1 {
 		t.Fatalf("GET /api/grants?subject=agent-a returned %d grants, want 1", len(grants))
 	}

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -39,7 +40,7 @@ func testStore(t *testing.T) (*Store, *pgxpool.Pool) {
 
 	// Isolate each test: truncate everything before it runs rather than after, so a
 	// failed run leaves data behind to inspect.
-	_, err = pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys`)
+	_, err = pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys, propose_write_rate_limits`)
 	if err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
@@ -107,6 +108,74 @@ func TestGrants_CreateListRevoke(t *testing.T) {
 	if err := s.RevokeGrant(ctx, g.ID, "human-reviewer"); err == nil {
 		t.Fatal("RevokeGrant() on already-revoked grant: want error, got nil")
 	}
+}
+
+// TestListGrants_ScopesPerGrant guards the array_agg subquery that replaced
+// ListGrants' per-grant ListGrantScopes N+1 call (mirroring
+// ListGrantsNearingExpiry's identical fix): with several grants for the same
+// subject carrying different scope counts, a join gone wrong (e.g. a plain
+// JOIN instead of a scalar subquery cross-multiplying rows, or scopes
+// attached to the wrong grant) would either change the returned grant count,
+// duplicate/drop scopes, or mix scopes across grants — none of which the
+// single-grant assertion in TestGrants_CreateListRevoke would catch.
+func TestListGrants_ScopesPerGrant(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	single, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() (single-scope) error = %v", err)
+	}
+	triple, err := s.CreateGrant(ctx, "agent-a",
+		[]string{"projects.spritz.read", "projects.spritz.write", "identity.basic"},
+		"memory", "facts", nil, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() (triple-scope) error = %v", err)
+	}
+
+	grants, err := s.ListGrants(ctx, "agent-a")
+	if err != nil {
+		t.Fatalf("ListGrants() error = %v", err)
+	}
+	if len(grants) != 2 {
+		t.Fatalf("ListGrants() = %+v, want 2 grants", grants)
+	}
+
+	byID := make(map[string][]string, len(grants))
+	for _, g := range grants {
+		byID[g.ID] = g.Scopes
+	}
+
+	wantSingle := []string{"identity.basic"}
+	if got := byID[single.ID]; !scopeSetsEqual(got, wantSingle) {
+		t.Fatalf("ListGrants() scopes for single-scope grant %s = %v, want %v", single.ID, got, wantSingle)
+	}
+	wantTriple := []string{"projects.spritz.read", "projects.spritz.write", "identity.basic"}
+	if got := byID[triple.ID]; !scopeSetsEqual(got, wantTriple) {
+		t.Fatalf("ListGrants() scopes for triple-scope grant %s = %v, want %v", triple.ID, got, wantTriple)
+	}
+}
+
+// scopeSetsEqual compares two scope slices as sets, since array_agg over
+// grant_scopes (a table with no secondary ordering column) makes no promise
+// about element order — only about which scopes belong to which grant.
+func scopeSetsEqual(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	counts := make(map[string]int, len(want))
+	for _, s := range want {
+		counts[s]++
+	}
+	for _, s := range got {
+		counts[s]--
+	}
+	for _, c := range counts {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func TestRenewGrant_ExtendsExpiry(t *testing.T) {
@@ -656,6 +725,149 @@ func TestStagedDiffs_Get(t *testing.T) {
 	}
 }
 
+// TestStagedDiffs_ListPage_WalksEveryRowExactlyOnce is the boundary-case test
+// the pagination ticket's self-review calls out explicitly: walk a full
+// keyset-paginated listing with a page size smaller than the total row
+// count, and confirm every row is seen exactly once — no skips (which an
+// offset-based scheme would show if a row were removed from an earlier page
+// mid-walk) and no duplicates (which a naive "created_at only" cursor could
+// show for same-timestamp rows). It also exercises the "a row arrives
+// between two poll ticks, right at the cursor" case: a new diff is proposed
+// after the first page is fetched but before the walk finishes, and must
+// show up only once — after every row that already existed when its own
+// cursor position was captured, never skipped, never duplicated into an
+// earlier page.
+func TestStagedDiffs_ListPage_WalksEveryRowExactlyOnce(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(0)
+	const total = 5
+	ids := make([]string, 0, total+1)
+	for i := 0; i < total; i++ {
+		d, err := s.ProposeDiff(ctx, "agent-a", fmt.Sprintf("fact number %d", i), []string{"identity.basic"}, vec, nil, nil)
+		if err != nil {
+			t.Fatalf("ProposeDiff() error = %v", err)
+		}
+		ids = append(ids, d.ID)
+	}
+
+	seen := map[string]bool{}
+	var cursor *ListCursor
+	insertedMidWalk := false
+	for page := 0; ; page++ {
+		diffs, hasMore, err := s.ListStagedDiffsPage(ctx, DiffPending, 2, cursor)
+		if err != nil {
+			t.Fatalf("ListStagedDiffsPage() page %d error = %v", page, err)
+		}
+		for _, d := range diffs {
+			if seen[d.ID] {
+				t.Fatalf("ListStagedDiffsPage() returned id %s twice across pages", d.ID)
+			}
+			seen[d.ID] = true
+		}
+
+		// Simulate a diff proposed concurrently with the walk, right after the
+		// first page was captured — it must not retroactively appear in a page
+		// already returned, and must not be skipped once the walk reaches it.
+		if page == 0 && !insertedMidWalk {
+			nd, err := s.ProposeDiff(ctx, "agent-a", "fact proposed mid-walk", []string{"identity.basic"}, vec, nil, nil)
+			if err != nil {
+				t.Fatalf("ProposeDiff() (mid-walk) error = %v", err)
+			}
+			ids = append(ids, nd.ID)
+			insertedMidWalk = true
+		}
+
+		if !hasMore {
+			break
+		}
+		last := diffs[len(diffs)-1]
+		cursor = &ListCursor{CreatedAt: last.CreatedAt, ID: last.ID}
+
+		if page > total+2 {
+			t.Fatal("ListStagedDiffsPage() walk did not terminate — hasMore stuck true")
+		}
+	}
+
+	if len(seen) != len(ids) {
+		t.Fatalf("ListStagedDiffsPage() walk saw %d distinct rows, want %d (ids=%v, seen=%v)", len(seen), len(ids), ids, seen)
+	}
+	for _, id := range ids {
+		if !seen[id] {
+			t.Errorf("ListStagedDiffsPage() walk never returned id %s", id)
+		}
+	}
+}
+
+// TestStagedDiffs_ListPage_LimitZeroOrNegativeRejected guards the same input
+// contract internal/api's parseListLimit already enforces at the HTTP
+// boundary — checked again here since ListStagedDiffsPage is a public Store
+// method any future caller could reach directly with a bad limit.
+func TestStagedDiffs_ListPage_LimitZeroOrNegativeRejected(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, _, err := s.ListStagedDiffsPage(ctx, DiffPending, 0, nil); err == nil {
+		t.Error("ListStagedDiffsPage() with limit=0: want error, got nil")
+	}
+	if _, _, err := s.ListStagedDiffsPage(ctx, DiffPending, -1, nil); err == nil {
+		t.Error("ListStagedDiffsPage() with limit=-1: want error, got nil")
+	}
+}
+
+// TestGrants_ListPage_WalksEveryRowExactlyOnce is ListStagedDiffsPage's
+// sibling test for the newest-first, subject-scoped grants listing —
+// confirming the same no-skip/no-duplicate property holds when the cursor
+// comparison runs the opposite direction (created_at DESC).
+func TestGrants_ListPage_WalksEveryRowExactlyOnce(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	const total = 5
+	ids := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		g, err := s.CreateGrant(ctx, "agent-a", []string{fmt.Sprintf("scope.%d", i)}, "memory", "facts", nil, "human-reviewer")
+		if err != nil {
+			t.Fatalf("CreateGrant() error = %v", err)
+		}
+		ids = append(ids, g.ID)
+	}
+
+	seen := map[string]bool{}
+	var cursor *ListCursor
+	for page := 0; ; page++ {
+		grants, hasMore, err := s.ListGrantsPage(ctx, "agent-a", 2, cursor)
+		if err != nil {
+			t.Fatalf("ListGrantsPage() page %d error = %v", page, err)
+		}
+		for _, g := range grants {
+			if seen[g.ID] {
+				t.Fatalf("ListGrantsPage() returned id %s twice across pages", g.ID)
+			}
+			seen[g.ID] = true
+		}
+		if !hasMore {
+			break
+		}
+		last := grants[len(grants)-1]
+		cursor = &ListCursor{CreatedAt: last.CreatedAt, ID: last.ID}
+
+		if page > total+2 {
+			t.Fatal("ListGrantsPage() walk did not terminate — hasMore stuck true")
+		}
+	}
+
+	if len(seen) != total {
+		t.Fatalf("ListGrantsPage() walk saw %d distinct rows, want %d", len(seen), total)
+	}
+	for _, id := range ids {
+		if !seen[id] {
+			t.Errorf("ListGrantsPage() walk never returned id %s", id)
+		}
+	}
+}
+
 func TestStagedDiffs_DedupeExactDuplicate(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
@@ -895,6 +1107,66 @@ func TestSearchFacts_FactsAndFullDepthReturnContent(t *testing.T) {
 	}
 }
 
+// The ticket this implements: "full" depth is supposed to add a fact's
+// *provenance* on top of its content, not just be a synonym for "facts". This
+// asserts that split end to end through the real SearchFacts pipeline, not
+// just effectiveDepth's rank arithmetic.
+func TestSearchFacts_FullDepthAddsProvenance_FactsDepthDoesNot(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(35)
+	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite editor is neovim", []string{"preferences.tools"}, vec, nil, []string{"preferences.tools"})
+	if err != nil {
+		t.Fatalf("ProposeDiff() error = %v", err)
+	}
+	fact, err := s.CommitDiff(ctx, d.ID, "human-reviewer", vec, "editor preference summary")
+	if err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	factsResults, err := s.SearchFacts(ctx, "editor", vec, []GrantedScope{{Scope: "preferences.tools", Depth: "facts"}}, 10)
+	if err != nil {
+		t.Fatalf("SearchFacts() at facts depth error = %v", err)
+	}
+	if len(factsResults) != 1 {
+		t.Fatalf("SearchFacts() at facts depth = %+v, want 1 result", factsResults)
+	}
+	if factsResults[0].Provenance != nil {
+		t.Errorf("Provenance at facts depth = %+v, want nil (provenance is a full-depth-only projection)", factsResults[0].Provenance)
+	}
+
+	fullResults, err := s.SearchFacts(ctx, "editor", vec, []GrantedScope{{Scope: "preferences.tools", Depth: "full"}}, 10)
+	if err != nil {
+		t.Fatalf("SearchFacts() at full depth error = %v", err)
+	}
+	if len(fullResults) != 1 {
+		t.Fatalf("SearchFacts() at full depth = %+v, want 1 result", fullResults)
+	}
+	prov := fullResults[0].Provenance
+	if prov == nil {
+		t.Fatalf("Provenance at full depth = nil, want the approval trail")
+	}
+	if prov.SourceStagedDiffID != d.ID {
+		t.Errorf("Provenance.SourceStagedDiffID = %q, want %q", prov.SourceStagedDiffID, d.ID)
+	}
+	if prov.DecidedBy == nil || *prov.DecidedBy != "human-reviewer" {
+		t.Errorf("Provenance.DecidedBy = %v, want \"human-reviewer\"", prov.DecidedBy)
+	}
+	if prov.DecidedAt == nil {
+		t.Error("Provenance.DecidedAt = nil, want the commit time")
+	}
+	if prov.SupersededBy != nil {
+		t.Errorf("Provenance.SupersededBy = %v, want nil (fact is still current)", prov.SupersededBy)
+	}
+	if prov.InvalidAt != nil || prov.ExpiredAt != nil {
+		t.Errorf("Provenance.{InvalidAt,ExpiredAt} = %v, %v, want both nil (fact is still current)", prov.InvalidAt, prov.ExpiredAt)
+	}
+	if fact.ID == "" {
+		t.Fatal("CommitDiff() returned an empty fact ID")
+	}
+}
+
 func TestSearchFacts_EffectiveDepthIntersectsAcrossFactTags(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
@@ -1034,7 +1306,7 @@ func TestAuditLog_Insert(t *testing.T) {
 	s, pool := testStore(t)
 	ctx := context.Background()
 
-	if err := s.LogAudit(ctx, "read", "agent-a", nil, nil, nil, nil, []string{"identity.basic"}); err != nil {
+	if err := s.LogAudit(ctx, "read", "agent-a", nil, nil, nil, nil, []string{"identity.basic"}, nil); err != nil {
 		t.Fatalf("LogAudit() error = %v", err)
 	}
 

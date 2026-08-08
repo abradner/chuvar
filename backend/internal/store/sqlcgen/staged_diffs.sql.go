@@ -226,14 +226,100 @@ func (q *Queries) InsertStagedDiff(ctx context.Context, arg InsertStagedDiffPara
 	return i, err
 }
 
-const listStagedDiffs = `-- name: ListStagedDiffs :many
+const listStagedDiffsBounded = `-- name: ListStagedDiffsBounded :many
 SELECT id, subject, content, proposed_scopes, target_fact_id, status,
        dedupe_verdict, dedupe_candidate_fact_id, created_at, decided_at, decided_by
-FROM staged_diffs WHERE status = $1 ORDER BY created_at ASC
+FROM staged_diffs
+WHERE status = $1
+ORDER BY created_at ASC
+LIMIT $2
 `
 
-func (q *Queries) ListStagedDiffs(ctx context.Context, status string) ([]StagedDiff, error) {
-	rows, err := q.db.Query(ctx, listStagedDiffs, status)
+type ListStagedDiffsBoundedParams struct {
+	Status string
+	Lim    int64
+}
+
+// Explicit-bound (not paginated) listing for the /api/events SSE poll loop
+// (internal/api/events.go's streamEvents): that loop re-runs a status query
+// every eventPollInterval per connected client and needs a snapshot of
+// "currently pending," not a page it resumes across polls — there's no
+// cursor to carry between ticks, only a cap, so a large backlog can't turn a
+// fixed-cadence poll into an unbounded-cost one. Same shape/rationale as
+// ListGrantsNearingExpiry (grants.sql), bounded for the identical reason.
+func (q *Queries) ListStagedDiffsBounded(ctx context.Context, arg ListStagedDiffsBoundedParams) ([]StagedDiff, error) {
+	rows, err := q.db.Query(ctx, listStagedDiffsBounded, arg.Status, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []StagedDiff
+	for rows.Next() {
+		var i StagedDiff
+		if err := rows.Scan(
+			&i.ID,
+			&i.Subject,
+			&i.Content,
+			&i.ProposedScopes,
+			&i.TargetFactID,
+			&i.Status,
+			&i.DedupeVerdict,
+			&i.DedupeCandidateFactID,
+			&i.CreatedAt,
+			&i.DecidedAt,
+			&i.DecidedBy,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStagedDiffsPage = `-- name: ListStagedDiffsPage :many
+SELECT id, subject, content, proposed_scopes, target_fact_id, status,
+       dedupe_verdict, dedupe_candidate_fact_id, created_at, decided_at, decided_by
+FROM staged_diffs
+WHERE status = $1
+  AND ($2::timestamptz IS NULL
+       OR (created_at, id) > ($2::timestamptz, $3::uuid))
+ORDER BY created_at ASC, id ASC
+LIMIT $4
+`
+
+type ListStagedDiffsPageParams struct {
+	Status          string
+	CursorCreatedAt *time.Time
+	CursorID        *string
+	Lim             int64
+}
+
+// Cursor-paginated listing for GET /api/staged-diffs (internal/api/
+// staged_diffs.go). Keyed on (created_at, id), not an offset: the pending
+// queue this backs gains rows (new proposals) and loses them (approvals/
+// rejections) continuously while a reviewer works it, and offset pagination
+// silently skips or repeats rows across that churn — a keyset comparison
+// against the last row actually returned doesn't, since it isn't a row
+// count. id breaks ties between rows sharing a created_at (uuidv7 IDs are
+// roughly time-ordered but created_at itself isn't guaranteed distinct down
+// to its own precision) — without it, two same-timestamp rows could be
+// skipped or duplicated across the page boundary, depending on Postgres'
+// otherwise-unspecified tie order. sqlc.narg(cursor_created_at) IS NULL means
+// "first page," matching internal/api's "no cursor" convention.
+//
+// LIMIT is bound to limit+1, not limit, by the caller (store.
+// ListStagedDiffsPage) — fetching one extra row is how that caller answers
+// "does another page exist" without a second query.
+func (q *Queries) ListStagedDiffsPage(ctx context.Context, arg ListStagedDiffsPageParams) ([]StagedDiff, error) {
+	rows, err := q.db.Query(ctx, listStagedDiffsPage,
+		arg.Status,
+		arg.CursorCreatedAt,
+		arg.CursorID,
+		arg.Lim,
+	)
 	if err != nil {
 		return nil, err
 	}

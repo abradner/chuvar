@@ -18,7 +18,9 @@ afterEach(() => {
 
 describe("api client", () => {
   it("parses a successful JSON response", async () => {
-    mockFetchOnce({ ok: true, status: 200, json: async () => [{ id: "g1" }] });
+    // listGrants unwraps the backend's { items, next_cursor } pagination
+    // envelope back into a plain array — see client.ts's own comment on why.
+    mockFetchOnce({ ok: true, status: 200, json: async () => ({ items: [{ id: "g1" }] }) });
     const result = await api.listGrants("agent-a");
     expect(result).toEqual([{ id: "g1" }]);
   });
@@ -79,7 +81,7 @@ describe("api client", () => {
   });
 
   it("omits the TOTP header entirely on requests that don't need it", async () => {
-    const fetchMock = mockFetchOnce({ ok: true, status: 200, json: async () => [] });
+    const fetchMock = mockFetchOnce({ ok: true, status: 200, json: async () => ({ items: [] }) });
     await api.listGrants("agent-a");
 
     const [, init] = fetchMock.mock.calls[0];
@@ -111,7 +113,7 @@ describe("api client", () => {
   });
 
   it("sends an Authorization bearer header on every request", async () => {
-    const fetchMock = mockFetchOnce({ ok: true, status: 200, json: async () => [] });
+    const fetchMock = mockFetchOnce({ ok: true, status: 200, json: async () => ({ items: [] }) });
     await api.listGrants("agent-a");
 
     const [, init] = fetchMock.mock.calls[0];

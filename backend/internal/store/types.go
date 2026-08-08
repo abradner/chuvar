@@ -90,6 +90,40 @@ type Fact struct {
 	Scopes    []string
 	CreatedAt time.Time
 	ValidAt   time.Time
+	// Provenance is set only when Depth == "full" (see facts.go's SearchFacts
+	// loop) — nil at "summary" or "facts" depth, mirroring how Content/Summary
+	// are already mutually exclusive by Depth above. GetFact never sets it,
+	// same reason its Depth is always empty.
+	Provenance *FactProvenance
+}
+
+// FactProvenance is a fact's approval trail, supersession pointer, and
+// bi-temporal validity window — the content this codebase means by "full
+// provenance" (init migration's "progressive disclosure per Notion §3":
+// summary -> facts -> full provenance). Every field here already exists on
+// facts/staged_diffs; this struct just names the projection of it that "full"
+// depth is meant to add on top of a fact's content. Disclosing DecidedBy is
+// exactly why this is its own depth level above "facts": it names a human,
+// which the fact's content alone never does.
+type FactProvenance struct {
+	// SourceStagedDiffID traces to the staged_diffs row whose approval produced
+	// this fact (facts.source_staged_diff_id — NOT NULL on every committed fact).
+	SourceStagedDiffID string
+	// DecidedBy/DecidedAt are that staged diff's approval trail. Nil only if
+	// the source diff is somehow undecided, which shouldn't happen for a
+	// committed fact but isn't assumed impossible by this type.
+	DecidedBy *string
+	DecidedAt *time.Time
+	// SupersededBy points at the fact that replaced this one, if any — part of
+	// the append-only supersession chain (CLAUDE.md principle 12).
+	SupersededBy *string
+	// InvalidAt/ExpiredAt complete the bi-temporal pair alongside the Fact's own
+	// CreatedAt/ValidAt: InvalidAt is when the fact stopped being true in the
+	// world (event time), ExpiredAt is when Chuvar recorded that (system time).
+	// Both nil for a still-current fact — facts_supersession_consistency (init
+	// migration) guarantees they're set together with SupersededBy.
+	InvalidAt *time.Time
+	ExpiredAt *time.Time
 }
 
 // GrantedScope pairs a granted scope with the depth of the grant that covers
@@ -106,4 +140,20 @@ type Fact struct {
 type GrantedScope struct {
 	Scope string
 	Depth string
+}
+
+// ListCursor is a page boundary for the cursor-paginated listing methods
+// (ListStagedDiffsPage, ListGrantsPage): the (created_at, id) of the last row
+// the caller has already seen. nil means "first page." Keyed on created_at/id
+// together, not an offset — the tables these methods page over gain and lose
+// rows continuously while a reviewer is working (new staged diffs/grants
+// arriving, an existing one being approved/rejected/revoked), and offset
+// pagination silently skips or repeats rows across that churn; a keyset
+// comparison against the last row actually returned doesn't, since it isn't a
+// row count. id breaks ties between rows sharing a created_at — see
+// ListStagedDiffsPage's doc comment (staged_diffs.go) for why created_at
+// alone isn't a safe total order here.
+type ListCursor struct {
+	CreatedAt time.Time
+	ID        string
 }

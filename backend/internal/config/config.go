@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -26,6 +27,18 @@ type Config struct {
 
 	// RequestTimeout bounds individual request handling.
 	RequestTimeout time.Duration
+
+	// ProposeWriteRateLimit and ProposeWriteRateLimitWindow bound how many
+	// propose_write calls a single subject may make per window before
+	// bouncer.ProposeWrite starts returning store.ErrRateLimited — the defence
+	// against an ungranted (or over-eager) subject flooding the human review
+	// queue, which propose_write's own doc comment and the least-privilege-roles
+	// migration both call out as the one resource this system cannot scale.
+	// Tuning knobs, not required config: there's a safe, generous default
+	// (20/minute), unlike DatabaseURL, so a missing or invalid value warns and
+	// falls back rather than failing boot.
+	ProposeWriteRateLimit       int
+	ProposeWriteRateLimitWindow time.Duration
 }
 
 // Load reads Config from the environment, returning an error if a required variable
@@ -37,9 +50,11 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		DatabaseURL:    databaseURL,
-		HTTPAddr:       envOr("HTTP_ADDR", "127.0.0.1:8080"),
-		RequestTimeout: envDurationOr("REQUEST_TIMEOUT", 10*time.Second),
+		DatabaseURL:                 databaseURL,
+		HTTPAddr:                    envOr("HTTP_ADDR", "127.0.0.1:8080"),
+		RequestTimeout:              envDurationOr("REQUEST_TIMEOUT", 10*time.Second),
+		ProposeWriteRateLimit:       envIntOr("PROPOSE_WRITE_RATE_LIMIT", 20),
+		ProposeWriteRateLimitWindow: envDurationOr("PROPOSE_WRITE_RATE_LIMIT_WINDOW", time.Minute),
 	}, nil
 }
 
@@ -128,12 +143,36 @@ func envDurationOr(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	d, err := time.ParseDuration(v)
-	if err != nil {
+	if err != nil || d <= 0 {
 		// This is set-but-invalid, not merely unset — silently falling back here
 		// would hide a typo from whoever configured it. Still non-fatal: it's a
 		// tuning knob, not required config, so warn rather than fail boot.
-		slog.Warn("config: invalid duration, using default", "key", key, "value", v, "default", fallback, "error", err)
+		// Non-positive parses ("0", "-1s") count as invalid for the same reason
+		// envIntOr treats them so: no caller of this helper has a sane reading
+		// for a zero-or-negative duration, and the rate-limit window in
+		// particular would otherwise brick propose_write (the store fails
+		// closed on a non-positive window) off a single-character typo.
+		slog.Warn("config: invalid or non-positive duration, using default", "key", key, "value", v, "default", fallback, "error", err)
 		return fallback
 	}
 	return d
+}
+
+func envIntOr(key string, fallback int) int {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		// Same stance as envDurationOr: set-but-invalid is a typo worth a warning,
+		// not a boot failure. A non-positive value is treated as invalid rather
+		// than "unlimited" — a rate limit of 0 or less has no sane interpretation
+		// here (store.CheckProposeWriteRateLimit rejects it outright, fail-closed,
+		// if it ever got through), so falling back to the default is the safer
+		// reading of a config mistake than silently disabling the limit.
+		slog.Warn("config: invalid or non-positive integer, using default", "key", key, "value", v, "default", fallback)
+		return fallback
+	}
+	return n
 }

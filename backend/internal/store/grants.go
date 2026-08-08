@@ -8,41 +8,69 @@ import (
 	"github.com/abradner/chuvar/backend/internal/store/sqlcgen"
 )
 
-// ValidDepth mirrors the CHECK constraint on grants.depth/grant_requests.depth in
-// the schema — kept in sync by hand, not queried from the DB, since it changes
-// about as often as the migration itself. The single copy every layer that
-// accepts external input (this package, internal/api, internal/mcptools) now
-// calls, replacing three independently hand-synced maps that carried the
-// identical drift risk. Checking here means a bad value comes back as a clear
-// validation error instead of a raw Postgres check-constraint violation leaking
-// out.
-func ValidDepth(depth string) bool {
-	switch depth {
-	case "summary", "facts", "full":
-		return true
-	default:
-		return false
+// depthOrder is the single closed vocabulary for grant depths, ordered from
+// least to most permissive, and mirrors the CHECK constraint on
+// grants.depth/grant_requests.depth in the schema — kept in sync by hand, not
+// queried from the DB, since it changes about as often as the migration
+// itself. ValidDepth, depthRank, and depthName all derive from this one list
+// instead of each encoding the vocabulary in their own switch statement:
+// validity is membership, rank is index, name is the reverse lookup. PR #24
+// already consolidated three hand-synced validDepths maps (store/api/mcptools)
+// into ValidDepth for exactly this reason; PR #26 then reintroduced the same
+// drift risk in a different shape (ValidDepth, depthRank, and facts.go's
+// depthName each separately hard-coding the set and, for the latter two, its
+// ordering). This is the one place that changes when a depth is added.
+var depthOrder = []string{"summary", "facts", "full"}
+
+// depthRankIndex returns depth's position in depthOrder, or -1 if depth is
+// not in the closed vocabulary. ValidDepth and depthRank read from it;
+// depthName (the inverse direction, rank → name) indexes depthOrder
+// directly — either way, depthOrder is the single source of truth.
+func depthRankIndex(depth string) int {
+	for i, d := range depthOrder {
+		if d == depth {
+			return i
+		}
 	}
+	return -1
+}
+
+// ValidDepth reports whether depth is one of the closed vocabulary's values.
+// The single copy every layer that accepts external input (this package,
+// internal/api, internal/mcptools) calls. Checking here means a bad value
+// comes back as a clear validation error instead of a raw Postgres
+// check-constraint violation leaking out.
+func ValidDepth(depth string) bool {
+	return depthRankIndex(depth) >= 0
 }
 
 // depthRank orders depths by permissiveness, for computing an effective depth
 // across multiple covering grants (facts.go's effectiveDepth) — not derivable
 // by sorting the strings themselves, since "facts" < "full" < "summary"
-// alphabetically is not the permissiveness order. Panics on an invalid depth:
-// every caller is expected to have already passed depth through ValidDepth
-// (at write time) or to be reading it back from a column the DB CHECK
-// constraint already restricts to these three values.
-func depthRank(depth string) int {
-	switch depth {
-	case "summary":
-		return 0
-	case "facts":
-		return 1
-	case "full":
-		return 2
-	default:
-		panic(fmt.Sprintf("store: depthRank: invalid depth %q", depth))
+// alphabetically is not the permissiveness order. Returns an error instead of
+// panicking on an unrecognised depth: this is read back from a DB column on a
+// read path inside a request handler, and even though the CHECK constraint
+// makes an invalid value unreachable today, a validation failure on this input
+// must deny rather than crash the process.
+func depthRank(depth string) (int, error) {
+	r := depthRankIndex(depth)
+	if r < 0 {
+		return 0, fmt.Errorf("store: invalid depth %q", depth)
 	}
+	return r, nil
+}
+
+// depthName is depthRank's inverse: given a rank (an index into depthOrder),
+// returns the depth name. Returns an error on an out-of-range rank rather than
+// defaulting to "full" — the most permissive value — which would silently
+// widen disclosure on exactly the input this is meant to reject; see
+// depthRank's doc comment for why this must fail closed even though it's not
+// reachable today.
+func depthName(rank int) (string, error) {
+	if rank < 0 || rank >= len(depthOrder) {
+		return "", fmt.Errorf("store: invalid depth rank %d", rank)
+	}
+	return depthOrder[rank], nil
 }
 
 // ValidKind mirrors the CHECK constraint on grants.kind/grant_requests.kind.
@@ -147,7 +175,7 @@ func (s *Store) CreateGrant(ctx context.Context, subject string, scopes []string
 		}
 	}
 
-	if err := logAudit(ctx, qtx, "grant_created", actor, nil, &row.ID, nil, nil, scopes); err != nil {
+	if err := logAudit(ctx, qtx, "grant_created", actor, nil, &row.ID, nil, nil, scopes, nil); err != nil {
 		return Grant{}, err
 	}
 
@@ -174,24 +202,74 @@ func (s *Store) ListGrants(ctx context.Context, subject string) ([]Grant, error)
 		return nil, fmt.Errorf("store: list grants: %w", err)
 	}
 
-	var grants []Grant
-	for _, r := range rows {
-		scopes, err := s.q.ListGrantScopes(ctx, r.ID)
-		if err != nil {
-			return nil, fmt.Errorf("store: list grant scopes: %w", err)
-		}
-		grants = append(grants, Grant{
+	// Scopes come back from the query itself (an array_agg subquery, mirroring
+	// ListGrantsNearingExpiry) rather than a per-grant ListGrantScopes call —
+	// same fix, same reason: needless N+1 drift between two adjacent functions
+	// solving the identical problem two different ways. Found in review.
+	grants := make([]Grant, len(rows))
+	for i, r := range rows {
+		grants[i] = Grant{
 			ID:        r.ID,
 			Subject:   r.Subject,
-			Scopes:    scopes,
+			Scopes:    r.Scopes,
 			Kind:      GrantKind(r.Kind),
 			Depth:     depthOrEmpty(r.Depth),
 			CreatedAt: r.CreatedAt,
 			ExpiresAt: r.ExpiresAt,
 			RevokedAt: r.RevokedAt,
-		})
+		}
 	}
 	return grants, nil
+}
+
+// ListGrantsPage returns up to limit of subject's grants (active or not),
+// most recent first (matches ListGrants' own ORDER BY), starting strictly
+// before cursor — nil cursor means "first page." The bool return reports
+// whether further rows exist past this page. Used by GET /api/grants
+// (internal/api/grants.go); ListGrants above stays the unpaginated call
+// internal/mcptools/list_grants.go uses for an agent's own (naturally small)
+// grant list. See queries/grants.sql's ListGrantsPage for the keyset-vs-
+// offset rationale.
+func (s *Store) ListGrantsPage(ctx context.Context, subject string, limit int, cursor *ListCursor) ([]Grant, bool, error) {
+	if limit <= 0 {
+		return nil, false, fmt.Errorf("store: limit must be positive")
+	}
+	params := sqlcgen.ListGrantsPageParams{
+		Subject: subject,
+		// Requesting limit+1, not limit, is what lets hasMore below be
+		// answered from this one query instead of a second COUNT — same
+		// trick as ListStagedDiffsPage.
+		Lim: int64(limit) + 1,
+	}
+	if cursor != nil {
+		createdAt := cursor.CreatedAt
+		id := cursor.ID
+		params.CursorCreatedAt = &createdAt
+		params.CursorID = &id
+	}
+	rows, err := s.q.ListGrantsPage(ctx, params)
+	if err != nil {
+		return nil, false, fmt.Errorf("store: list grants page: %w", err)
+	}
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+
+	grants := make([]Grant, len(rows))
+	for i, r := range rows {
+		grants[i] = Grant{
+			ID:        r.ID,
+			Subject:   r.Subject,
+			Scopes:    r.Scopes,
+			Kind:      GrantKind(r.Kind),
+			Depth:     depthOrEmpty(r.Depth),
+			CreatedAt: r.CreatedAt,
+			ExpiresAt: r.ExpiresAt,
+			RevokedAt: r.RevokedAt,
+		}
+	}
+	return grants, hasMore, nil
 }
 
 // GrantedScopes returns the union of scopes granted to subject across all currently
@@ -254,7 +332,7 @@ func (s *Store) RevokeGrant(ctx context.Context, grantID, actor string) error {
 		return fmt.Errorf("store: grant %s not found or already revoked", grantID)
 	}
 
-	if err := logAudit(ctx, qtx, "grant_revoked", actor, nil, &grantID, nil, nil, nil); err != nil {
+	if err := logAudit(ctx, qtx, "grant_revoked", actor, nil, &grantID, nil, nil, nil, nil); err != nil {
 		return err
 	}
 
@@ -306,7 +384,7 @@ func (s *Store) RenewGrant(ctx context.Context, grantID string, ttl time.Duratio
 		return Grant{}, fmt.Errorf("store: list grant scopes: %w", err)
 	}
 
-	if err := logAudit(ctx, qtx, "grant_renewed", actor, nil, &grantID, nil, nil, scopes); err != nil {
+	if err := logAudit(ctx, qtx, "grant_renewed", actor, nil, &grantID, nil, nil, scopes, nil); err != nil {
 		return Grant{}, err
 	}
 

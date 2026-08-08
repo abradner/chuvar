@@ -73,6 +73,12 @@ func run() error {
 	st := store.New(pool)
 	emb := embed.Stub{} // TODO: swap for a real Embedder once the Research track lands one
 	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
+	// bouncer.New already defaults these; override from config so an operator
+	// can tune propose_write's per-subject rate limit (PROPOSE_WRITE_RATE_LIMIT*)
+	// without a code change — see that migration's doc comment for why this
+	// exists at all.
+	b.RateLimit = cfg.ProposeWriteRateLimit
+	b.RateLimitWindow = cfg.ProposeWriteRateLimitWindow
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "chuvar", Version: "v0"}, nil)
 	mcptools.Register(server, subject, st, emb, b)

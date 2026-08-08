@@ -10,6 +10,7 @@ package bouncer
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/scope"
@@ -49,14 +50,41 @@ func (PassthroughClassifier) Classify(_ context.Context, _ string) ([]scope.Scop
 	return nil, nil
 }
 
+// defaultRateLimit and defaultRateLimitWindow are New's fallback for
+// RateLimit/RateLimitWindow — a generous but non-zero default, so a caller that
+// doesn't wire config.Config's PROPOSE_WRITE_RATE_LIMIT* values through still
+// gets a working limit rather than an accidental zero (which
+// store.CheckProposeWriteRateLimit treats as a misconfiguration error, not
+// "unlimited" — see that method's doc comment on why zero must fail closed).
+const (
+	defaultRateLimit       = 20
+	defaultRateLimitWindow = time.Minute
+)
+
 type Bouncer struct {
 	Store      *store.Store
 	Embedder   embed.Embedder
 	Classifier Classifier
+
+	// RateLimit and RateLimitWindow bound how many ProposeWrite calls a single
+	// subject may make per window before it starts returning
+	// store.ErrRateLimited — see that method's doc comment for the mechanism
+	// and CLAUDE.md's ticket ("propose_write requires no grant at all — the
+	// review queue is spammable") for why this exists. New sets both to a
+	// sane default; override after construction (e.g. from config.Config) to
+	// tune them.
+	RateLimit       int
+	RateLimitWindow time.Duration
 }
 
 func New(s *store.Store, e embed.Embedder, c Classifier) *Bouncer {
-	return &Bouncer{Store: s, Embedder: e, Classifier: c}
+	return &Bouncer{
+		Store:           s,
+		Embedder:        e,
+		Classifier:      c,
+		RateLimit:       defaultRateLimit,
+		RateLimitWindow: defaultRateLimitWindow,
+	}
 }
 
 // ProposeWrite runs the pipeline for one proposed fact and returns the staged
@@ -66,22 +94,46 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 	// store.ProposeDiff rejects empty content anyway, but only after this function
 	// has already paid for classification and embedding — both meant to become
 	// real (external, costly) calls. Reject up front instead.
+	//
+	// This is a genuine caller-input failure — the proposing agent can fix it and
+	// retry — so it's a ValidationError, not a plain wrapped error: see that
+	// type's doc comment for why propose_write is allowed to show it verbatim.
 	if content == "" {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: content must not be empty")
+		return store.StagedDiff{}, newValidationError("bouncer: content must not be empty")
 	}
 
 	// Validate the caller's input before doing any work on its behalf — in
 	// particular before calling Classify, which is a stub today but is meant to
 	// become a real (likely external/costly) call; no reason to pay that for a
-	// request that was always going to be rejected as malformed.
+	// request that was always going to be rejected as malformed. Same
+	// ValidationError reasoning as the empty-content check above: this is the
+	// caller's own scope string, not anything derived from the classifier or
+	// store.
 	for _, sc := range proposedScopes {
 		if err := scope.Validate(sc); err != nil {
-			return store.StagedDiff{}, fmt.Errorf("bouncer: %w", err)
+			return store.StagedDiff{}, newValidationError("bouncer: %s", err)
 		}
 	}
 
 	if b.Classifier == nil {
 		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Classifier")
+	}
+	if b.Store == nil {
+		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Store")
+	}
+
+	// Rate-limit after the cheap caller-input validation above but before
+	// Classify and Embed: this subject may hold zero grants (propose_write
+	// deliberately requires none, so a brand-new agent can still propose
+	// before it's been granted anything — see the propose_write_rate_limit
+	// migration for the full threat this guards against) and still be able to
+	// flood the human review queue for free. Both Classify and Embed are stubs
+	// today but are meant to become real external, costly calls — checking the
+	// limit only after them would let an over-limit subject keep generating
+	// unbounded provider traffic and cost while every request comes back
+	// RATE_LIMITED and stages nothing. Found in aggregate review.
+	if err := b.Store.CheckProposeWriteRateLimit(ctx, subject, b.RateLimit, b.RateLimitWindow); err != nil {
+		return store.StagedDiff{}, fmt.Errorf("bouncer: %w", err)
 	}
 
 	scopes := proposedScopes
@@ -96,6 +148,11 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 	if classified != nil {
 		for _, sc := range classified {
 			if err := scope.Validate(sc); err != nil {
+				// Deliberately NOT a ValidationError: this scope came from the
+				// Classifier, not from the calling agent's own input, so it isn't
+				// something the agent can fix by resubmitting — it's this
+				// service's own component misbehaving. Fail closed and mask it
+				// like any other internal failure rather than assume it's safe.
 				return store.StagedDiff{}, fmt.Errorf("bouncer: classifier produced invalid scope: %w", err)
 			}
 		}
@@ -103,7 +160,12 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 	}
 	scopes = scope.Dedupe(scopes)
 	if len(scopes) == 0 {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: no scopes proposed or classified for content")
+		// Reachable via either an empty caller-supplied proposedScopes (with the
+		// classifier deferring) or a classifier override to "no scopes apply" —
+		// either way the message itself names no store/driver internals and is
+		// actionable ("propose at least one scope"), so it's safe as a
+		// ValidationError even though the root cause isn't always the caller.
+		return store.StagedDiff{}, newValidationError("bouncer: no scopes proposed or classified for content")
 	}
 
 	if b.Embedder == nil {
@@ -119,9 +181,6 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 		scopeStrs[i] = string(sc)
 	}
 
-	if b.Store == nil {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Store")
-	}
 	// The subject's current granted scopes gate both the dedupe candidate search
 	// and target_fact_id visibility inside ProposeDiff — see that function's doc
 	// comment. Fetched here rather than inside the store layer because Bouncer

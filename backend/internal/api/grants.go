@@ -55,25 +55,44 @@ func toGrantView(g store.Grant) grantView {
 	return v
 }
 
-// listGrants handles GET /api/grants?subject=X.
+// listGrants handles GET /api/grants?subject=X&limit=50&cursor=... (limit
+// default: defaultListLimit). Cursor-paginated, newest first — see
+// store.ListGrantsPage's doc comment for the keyset-vs-offset rationale, and
+// pagination.go for the limit/cursor parsing shared with listStagedDiffs.
 func (a *API) listGrants(w http.ResponseWriter, r *http.Request) {
 	subject := r.URL.Query().Get("subject")
 	if subject == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("subject query parameter is required"))
 		return
 	}
+	limit, err := parseListLimit(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	cursor, err := parseListCursor(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 
-	grants, err := a.Store.ListGrants(r.Context(), subject)
+	grants, hasMore, err := a.Store.ListGrantsPage(r.Context(), subject, limit, cursor)
 	if err != nil {
 		writeStoreError(w, http.StatusInternalServerError, "listGrants", "could not list grants", err)
 		return
+	}
+
+	var next *string
+	if len(grants) > 0 {
+		last := grants[len(grants)-1]
+		next = nextCursorFor(hasMore, last.CreatedAt, last.ID)
 	}
 
 	views := make([]grantView, len(grants))
 	for i, g := range grants {
 		views[i] = toGrantView(g)
 	}
-	writeJSON(w, http.StatusOK, views)
+	writeJSON(w, http.StatusOK, page[grantView]{Items: views, NextCursor: next})
 }
 
 type createGrantRequest struct {

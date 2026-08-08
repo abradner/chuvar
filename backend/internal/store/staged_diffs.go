@@ -184,16 +184,64 @@ func (s *Store) GetStagedDiff(ctx context.Context, id string) (StagedDiff, error
 	return toStagedDiff(row), nil
 }
 
-// ListStagedDiffs returns diffs in the given status, oldest first (review queue
-// order) — used by the approval UI's REST API.
-func (s *Store) ListStagedDiffs(ctx context.Context, status DiffStatus) ([]StagedDiff, error) {
-	rows, err := s.q.ListStagedDiffs(ctx, string(status))
-	if err != nil {
-		return nil, fmt.Errorf("store: list staged diffs: %w", err)
+// ListStagedDiffsPage returns up to limit diffs in status, oldest first
+// (review-queue order — matches the pre-pagination ORDER BY), starting
+// strictly after cursor. cursor nil means "first page." The bool return
+// reports whether at least one further row exists past the page returned, so
+// the caller (internal/api's listStagedDiffs) knows whether to hand back a
+// next_cursor. See queries/staged_diffs.sql's ListStagedDiffsPage for the
+// keyset-vs-offset rationale.
+func (s *Store) ListStagedDiffsPage(ctx context.Context, status DiffStatus, limit int, cursor *ListCursor) ([]StagedDiff, bool, error) {
+	if limit <= 0 {
+		return nil, false, fmt.Errorf("store: limit must be positive")
 	}
-	var diffs []StagedDiff
-	for _, r := range rows {
-		diffs = append(diffs, toStagedDiff(r))
+	params := sqlcgen.ListStagedDiffsPageParams{
+		Status: string(status),
+		// Requesting limit+1, not limit, is what lets hasMore below be
+		// answered from this one query instead of a second COUNT.
+		Lim: int64(limit) + 1,
+	}
+	if cursor != nil {
+		createdAt := cursor.CreatedAt
+		id := cursor.ID
+		params.CursorCreatedAt = &createdAt
+		params.CursorID = &id
+	}
+	rows, err := s.q.ListStagedDiffsPage(ctx, params)
+	if err != nil {
+		return nil, false, fmt.Errorf("store: list staged diffs page: %w", err)
+	}
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+	diffs := make([]StagedDiff, len(rows))
+	for i, r := range rows {
+		diffs[i] = toStagedDiff(r)
+	}
+	return diffs, hasMore, nil
+}
+
+// ListStagedDiffsBounded returns up to limit diffs in status, oldest first,
+// with no cursor/resumption support — the /api/events SSE poll loop
+// (internal/api/events.go's streamEvents) calls this every eventPollInterval
+// per connected client and needs a bounded snapshot of "currently pending,"
+// not a page it walks forward across ticks. See the backing query's own doc
+// comment (queries/staged_diffs.sql) for the full reasoning.
+func (s *Store) ListStagedDiffsBounded(ctx context.Context, status DiffStatus, limit int) ([]StagedDiff, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("store: limit must be positive")
+	}
+	rows, err := s.q.ListStagedDiffsBounded(ctx, sqlcgen.ListStagedDiffsBoundedParams{
+		Status: string(status),
+		Lim:    int64(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: list staged diffs bounded: %w", err)
+	}
+	diffs := make([]StagedDiff, len(rows))
+	for i, r := range rows {
+		diffs[i] = toStagedDiff(r)
 	}
 	return diffs, nil
 }
@@ -237,7 +285,7 @@ func (s *Store) RejectDiff(ctx context.Context, diffID, decidedBy string) error 
 		return fmt.Errorf("store: diff %s is not pending", diffID)
 	}
 
-	if err := logAudit(ctx, qtx, "diff_rejected", decidedBy, nil, nil, &diffID, nil, nil); err != nil {
+	if err := logAudit(ctx, qtx, "diff_rejected", decidedBy, nil, nil, &diffID, nil, nil, nil); err != nil {
 		return err
 	}
 
@@ -364,7 +412,7 @@ func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedd
 		return Fact{}, fmt.Errorf("store: mark diff committed: %w", err)
 	}
 
-	if err := logAudit(ctx, qtx, "diff_committed", decidedBy, &f.ID, nil, &diffID, nil, diff.ProposedScopes); err != nil {
+	if err := logAudit(ctx, qtx, "diff_committed", decidedBy, &f.ID, nil, &diffID, nil, diff.ProposedScopes, nil); err != nil {
 		return Fact{}, err
 	}
 

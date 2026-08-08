@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/abradner/chuvar/backend/internal/store"
 )
 
@@ -87,7 +89,11 @@ var validStatuses = map[store.DiffStatus]bool{
 	store.DiffCommitted: true,
 }
 
-// listStagedDiffs handles GET /api/staged-diffs?status=pending (default: pending).
+// listStagedDiffs handles GET /api/staged-diffs?status=pending&limit=50&cursor=...
+// (status default: pending, limit default: defaultListLimit). Cursor-paginated,
+// oldest first (review-queue order) — see store.ListStagedDiffsPage's doc
+// comment for the keyset-vs-offset rationale, and pagination.go for the
+// limit/cursor parsing shared with listGrants.
 func (a *API) listStagedDiffs(w http.ResponseWriter, r *http.Request) {
 	status := store.DiffStatus(r.URL.Query().Get("status"))
 	if status == "" {
@@ -97,18 +103,34 @@ func (a *API) listStagedDiffs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("status must be one of pending, approved, rejected, committed (got %q)", status))
 		return
 	}
+	limit, err := parseListLimit(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	cursor, err := parseListCursor(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 
-	diffs, err := a.Store.ListStagedDiffs(r.Context(), status)
+	diffs, hasMore, err := a.Store.ListStagedDiffsPage(r.Context(), status, limit, cursor)
 	if err != nil {
 		writeStoreError(w, http.StatusInternalServerError, "listStagedDiffs", "could not list staged diffs", err)
 		return
+	}
+
+	var next *string
+	if len(diffs) > 0 {
+		last := diffs[len(diffs)-1]
+		next = nextCursorFor(hasMore, last.CreatedAt, last.ID)
 	}
 
 	views := make([]stagedDiffView, len(diffs))
 	for i, d := range diffs {
 		views[i] = toStagedDiffView(d)
 	}
-	writeJSON(w, http.StatusOK, views)
+	writeJSON(w, http.StatusOK, page[stagedDiffView]{Items: views, NextCursor: next})
 }
 
 // approveStagedDiff handles POST /api/staged-diffs/{id}/approve. This is the only
@@ -123,14 +145,16 @@ func (a *API) approveStagedDiff(w http.ResponseWriter, r *http.Request) {
 	diff, err := a.Store.GetStagedDiff(r.Context(), id)
 	if err != nil {
 		// GetStagedDiff wraps every failure the same way, including a real DB
-		// error, not just "no row with that id" — turning that straight into a
-		// 404 with nothing logged made a genuine internal failure indistinguishable
-		// from a bad ID at both the client and in the logs. Log it server-side; the
-		// client still gets 404 either way for now (disambiguating via
-		// errors.Is(err, pgx.ErrNoRows) is a fine follow-up, not required to fix
-		// the "silently masked" part of this).
-		slog.Error("api: approveStagedDiff: get staged diff", "id", id, "error", err)
-		writeError(w, http.StatusNotFound, errors.New("staged diff not found"))
+		// error, not just "no row with that id" — treating them identically made a
+		// genuine internal failure indistinguishable from a bad ID at the client.
+		// Only pgx.ErrNoRows means "not found"; everything else is a 500, logged
+		// server-side via writeStoreError (never echoed to the client) — same
+		// distinction as grantRequestExists in grant_requests.go.
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, errors.New("staged diff not found"))
+			return
+		}
+		writeStoreError(w, http.StatusInternalServerError, "approveStagedDiff", "could not look up staged diff", err)
 		return
 	}
 

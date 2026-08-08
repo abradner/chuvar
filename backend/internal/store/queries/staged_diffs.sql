@@ -43,10 +43,46 @@ SELECT id, subject, content, proposed_scopes, target_fact_id, status,
        dedupe_verdict, dedupe_candidate_fact_id, created_at, decided_at, decided_by
 FROM staged_diffs WHERE id = $1;
 
--- name: ListStagedDiffs :many
+-- name: ListStagedDiffsPage :many
+-- Cursor-paginated listing for GET /api/staged-diffs (internal/api/
+-- staged_diffs.go). Keyed on (created_at, id), not an offset: the pending
+-- queue this backs gains rows (new proposals) and loses them (approvals/
+-- rejections) continuously while a reviewer works it, and offset pagination
+-- silently skips or repeats rows across that churn — a keyset comparison
+-- against the last row actually returned doesn't, since it isn't a row
+-- count. id breaks ties between rows sharing a created_at (uuidv7 IDs are
+-- roughly time-ordered but created_at itself isn't guaranteed distinct down
+-- to its own precision) — without it, two same-timestamp rows could be
+-- skipped or duplicated across the page boundary, depending on Postgres'
+-- otherwise-unspecified tie order. sqlc.narg(cursor_created_at) IS NULL means
+-- "first page," matching internal/api's "no cursor" convention.
+--
+-- LIMIT is bound to limit+1, not limit, by the caller (store.
+-- ListStagedDiffsPage) — fetching one extra row is how that caller answers
+-- "does another page exist" without a second query.
 SELECT id, subject, content, proposed_scopes, target_fact_id, status,
        dedupe_verdict, dedupe_candidate_fact_id, created_at, decided_at, decided_by
-FROM staged_diffs WHERE status = $1 ORDER BY created_at ASC;
+FROM staged_diffs
+WHERE status = @status
+  AND (sqlc.narg(cursor_created_at)::timestamptz IS NULL
+       OR (created_at, id) > (sqlc.narg(cursor_created_at)::timestamptz, sqlc.narg(cursor_id)::uuid))
+ORDER BY created_at ASC, id ASC
+LIMIT @lim;
+
+-- name: ListStagedDiffsBounded :many
+-- Explicit-bound (not paginated) listing for the /api/events SSE poll loop
+-- (internal/api/events.go's streamEvents): that loop re-runs a status query
+-- every eventPollInterval per connected client and needs a snapshot of
+-- "currently pending," not a page it resumes across polls — there's no
+-- cursor to carry between ticks, only a cap, so a large backlog can't turn a
+-- fixed-cadence poll into an unbounded-cost one. Same shape/rationale as
+-- ListGrantsNearingExpiry (grants.sql), bounded for the identical reason.
+SELECT id, subject, content, proposed_scopes, target_fact_id, status,
+       dedupe_verdict, dedupe_candidate_fact_id, created_at, decided_at, decided_by
+FROM staged_diffs
+WHERE status = @status
+ORDER BY created_at ASC
+LIMIT @lim;
 
 -- name: RejectDiff :execrows
 UPDATE staged_diffs SET status = 'rejected', decided_at = now(), decided_by = $2

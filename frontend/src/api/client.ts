@@ -74,6 +74,15 @@ export interface CreatedReviewerToken extends ReviewerToken {
   totp_enroll_uri: string;
 }
 
+// Page is the envelope the backend's cursor-paginated listing endpoints
+// (GET /api/staged-diffs, GET /api/grants — see backend/internal/api/
+// pagination.go) respond with. next_cursor is absent once no further page
+// exists, not the empty string.
+interface Page<T> {
+  items: T[];
+  next_cursor?: string;
+}
+
 export interface GrantRequest {
   id: string;
   subject: string;
@@ -132,8 +141,20 @@ async function request<T>(
 }
 
 export const api = {
+  // The backend now paginates this listing (cursor-based, default page size
+  // set server-side — see backend/internal/api/pagination.go) rather than
+  // returning every matching row. This wrapper still resolves to a plain
+  // array — unwrapping items here, rather than threading the envelope (and a
+  // "load more"/cursor param) through StagedDiffsPage, keeps this change
+  // minimal: at today's v0 scale the first page covers every real pending
+  // queue, and surfacing pagination in the UI itself is a follow-up, not
+  // this ticket's scope. A queue that grows past the server's default page
+  // size will silently show only its first page here until that follow-up
+  // lands.
   listStagedDiffs: (status = "pending", signal?: AbortSignal) =>
-    request<StagedDiff[]>(`/api/staged-diffs?status=${encodeURIComponent(status)}`, { signal }),
+    request<Page<StagedDiff>>(`/api/staged-diffs?status=${encodeURIComponent(status)}`, { signal }).then(
+      (p) => p.items,
+    ),
 
   // approveStagedDiff/createGrant/approveGrantRequest require totpCode — the
   // backend's requireTOTP gate rejects these without a valid device-local
@@ -143,8 +164,10 @@ export const api = {
 
   rejectStagedDiff: (id: string) => request<void>(`/api/staged-diffs/${id}/reject`, { method: "POST" }),
 
+  // Same envelope-unwrapping as listStagedDiffs above, for the same reason —
+  // see that wrapper's comment.
   listGrants: (subject: string, signal?: AbortSignal) =>
-    request<Grant[]>(`/api/grants?subject=${encodeURIComponent(subject)}`, { signal }),
+    request<Page<Grant>>(`/api/grants?subject=${encodeURIComponent(subject)}`, { signal }).then((p) => p.items),
 
   createGrant: (subject: string, scopes: string[], depth: string, totpCode: string, ttlSeconds?: number) =>
     request<Grant>("/api/grants", {
@@ -177,6 +200,13 @@ export const api = {
 
   denyGrantRequest: (id: string) => request<void>(`/api/grant-requests/${id}/deny`, { method: "POST" }),
 
+  // Not a Page<T>: GET /api/tokens is deliberately unpaginated on the backend
+  // (its handler writes a bare array — see listTokens in
+  // backend/internal/api/tokens.go), unlike the staged-diff and grant
+  // listings above. Stated because the two shapes now sit side by side in
+  // this file and the bare array otherwise reads as an oversight — the
+  // device list is operator-sized, so there is nothing to paginate. If the
+  // backend ever wraps it, this must change with it.
   listTokens: (signal?: AbortSignal) => request<ReviewerToken[]>("/api/tokens", { signal }),
 
   // createToken's TOTP requirement is conditional server-side (backend's

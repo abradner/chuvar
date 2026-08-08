@@ -2,7 +2,9 @@ package mcptools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -24,23 +26,41 @@ type readArgs struct {
 // e.g. a pre-migration fact with none generated yet) apart from "not summary
 // depth" (empty Summary because Content was returned instead).
 //
-// "facts" and "full" are indistinguishable today — both return full content —
-// but that is an unimplemented level, not a vestigial one. The ladder was
+// Provenance is "full" depth's own addition on top of "facts": the ladder was
 // designed as summary → facts → *full provenance* (the init migration's
-// "progressive disclosure per Notion §3"): "full" was meant to add a fact's
-// provenance on top of its content, not more content. The data for it already
-// exists and is simply not projected here — facts.source_staged_diff_id
-// (NOT NULL, and staged_diffs carries decided_by/decided_at, i.e. who approved
-// this fact), facts.superseded_by, and the bi-temporal valid_at/invalid_at/
-// expired_at set. Note that shipping it discloses a human's identity, which is
-// exactly why it deserves its own grant level. Tracked in Notion; do not
-// "simplify" the two levels together on the assumption they're duplicates.
+// "progressive disclosure per Notion §3"), so "full" adds a fact's provenance
+// to its content rather than more content. There is exactly one gate for this,
+// and it is not here: store.SearchFacts sets Fact.Provenance only when that
+// row's own effective depth is "full" (see its doc comment), so copying it
+// through whenever it's non-nil is the whole of this function's job —
+// factView has no separate depth check to get wrong, because Provenance being
+// nil already means "not full depth" for that fact. Shipping decided_by here
+// discloses a human's identity (who approved the diff that produced this
+// fact), which the fact's content alone never does — exactly why this is its
+// own grant level rather than folded into "facts".
 type factView struct {
-	ID      string   `json:"id"`
-	Content string   `json:"content,omitempty"`
-	Summary string   `json:"summary,omitempty"`
-	Depth   string   `json:"depth"`
-	Scopes  []string `json:"scopes"`
+	ID         string              `json:"id"`
+	Content    string              `json:"content,omitempty"`
+	Summary    string              `json:"summary,omitempty"`
+	Depth      string              `json:"depth"`
+	Scopes     []string            `json:"scopes"`
+	Provenance *factProvenanceView `json:"provenance,omitempty"`
+}
+
+// factProvenanceView is the JSON shape of a "full"-depth fact's provenance:
+// store.FactProvenance's fields plus the bi-temporal window's two starts,
+// CreatedAt (system time) and ValidAt (real-world time), which live on the
+// Fact itself. Times are formatted as RFC3339 strings, matching the rest of
+// this package's *string time convention — see formatTimePtr.
+type factProvenanceView struct {
+	SourceStagedDiffID string  `json:"source_staged_diff_id"`
+	DecidedBy          *string `json:"decided_by,omitempty"`
+	DecidedAt          *string `json:"decided_at,omitempty"`
+	SupersededBy       *string `json:"superseded_by,omitempty"`
+	CreatedAt          string  `json:"created_at"`
+	ValidAt            string  `json:"valid_at"`
+	InvalidAt          *string `json:"invalid_at,omitempty"`
+	ExpiredAt          *string `json:"expired_at,omitempty"`
 }
 
 type readOutput struct {
@@ -93,7 +113,7 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 
 		if missing := scope.Missing(requested, toScopes(grantedStrs)); len(missing) > 0 {
 			missingStrs := fromScopes(missing)
-			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, nil, missingStrs); err != nil {
+			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, nil, missingStrs, nil); err != nil {
 				return nil, readOutput{}, toolError("read_with_scope_check", err)
 			}
 			return nil, readOutput{Status: "insufficient_scope", MissingScopes: missingStrs}, nil
@@ -134,7 +154,7 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 		grantedStrs = grantedScopeStrs(grantedDepths)
 		if missing := scope.Missing(requested, toScopes(grantedStrs)); len(missing) > 0 {
 			missingStrs := fromScopes(missing)
-			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, nil, missingStrs); err != nil {
+			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, nil, missingStrs, nil); err != nil {
 				return nil, readOutput{}, toolError("read_with_scope_check", err)
 			}
 			return nil, readOutput{Status: "insufficient_scope", MissingScopes: missingStrs}, nil
@@ -147,9 +167,38 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 
 		out := readOutput{Status: "ok"}
 		for _, f := range facts {
-			out.Facts = append(out.Facts, factView{ID: f.ID, Content: f.Content, Summary: f.Summary, Depth: f.Depth, Scopes: f.Scopes})
+			fv := factView{ID: f.ID, Content: f.Content, Summary: f.Summary, Depth: f.Depth, Scopes: f.Scopes}
+			if f.Provenance != nil {
+				p := f.Provenance
+				fv.Provenance = &factProvenanceView{
+					SourceStagedDiffID: p.SourceStagedDiffID,
+					DecidedBy:          p.DecidedBy,
+					DecidedAt:          formatTimePtr(p.DecidedAt),
+					SupersededBy:       p.SupersededBy,
+					CreatedAt:          f.CreatedAt.Format(time.RFC3339),
+					ValidAt:            f.ValidAt.Format(time.RFC3339),
+					InvalidAt:          formatTimePtr(p.InvalidAt),
+					ExpiredAt:          formatTimePtr(p.ExpiredAt),
+				}
+			}
+			out.Facts = append(out.Facts, fv)
 		}
-		if err := st.LogAudit(ctx, "read", subject, nil, nil, nil, nil, grantedStrs); err != nil {
+		// Record what was actually disclosed (fact ID + the depth it was disclosed
+		// at), not just which scopes the subject held — granted scopes alone answer
+		// "what was this agent allowed to see," not "what did it actually see, and
+		// at what fidelity," which is the question that matters after a suspected
+		// compromise. One row per read call: depth is computed per fact (see
+		// ReadAuditDetail's doc comment), so this is a per-fact list, not a single
+		// value for the whole call.
+		detail := store.ReadAuditDetail{Facts: make([]store.ReadFactDisclosure, 0, len(out.Facts))}
+		for _, f := range out.Facts {
+			detail.Facts = append(detail.Facts, store.ReadFactDisclosure{FactID: f.ID, Depth: f.Depth})
+		}
+		detailJSON, err := json.Marshal(detail)
+		if err != nil {
+			return nil, readOutput{}, toolError("read_with_scope_check", err)
+		}
+		if err := st.LogAudit(ctx, "read", subject, nil, nil, nil, nil, grantedStrs, detailJSON); err != nil {
 			return nil, readOutput{}, toolError("read_with_scope_check", err)
 		}
 		return nil, out, nil

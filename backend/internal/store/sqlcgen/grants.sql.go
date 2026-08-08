@@ -157,19 +157,40 @@ func (q *Queries) ListGrantScopes(ctx context.Context, grantID string) ([]string
 }
 
 const listGrants = `-- name: ListGrants :many
-SELECT id, subject, depth, created_at, expires_at, revoked_at, kind
-FROM grants WHERE subject = $1 ORDER BY created_at DESC
+SELECT g.id, g.subject, g.depth, g.created_at, g.expires_at, g.revoked_at, g.kind,
+       (SELECT array_agg(gs.scope) FROM grant_scopes gs WHERE gs.grant_id = g.id)::text[] AS scopes
+FROM grants g WHERE g.subject = $1 ORDER BY g.created_at DESC
 `
 
-func (q *Queries) ListGrants(ctx context.Context, subject string) ([]Grant, error) {
+type ListGrantsRow struct {
+	ID        string
+	Subject   string
+	Depth     *string
+	CreatedAt time.Time
+	ExpiresAt *time.Time
+	RevokedAt *time.Time
+	Kind      string
+	Scopes    []string
+}
+
+// Unpaginated, subject-scoped by design: this is also what
+// internal/mcptools/list_grants.go's list_grants tool calls for an agent to
+// list its own grants, a small result set by construction — not the
+// reviewer-facing "list everything" surface the pagination ticket is about.
+// ListGrantsPage (below) is the paginated sibling used by GET /api/grants.
+// Scopes come back via an array_agg subquery (same shape as
+// ListGrantsNearingExpiry and GetFact/SearchFacts' fact_scopes aggregation in
+// facts.sql) rather than a separate ListGrantScopes call per row, to avoid an
+// N+1 query per returned grant. Found in review.
+func (q *Queries) ListGrants(ctx context.Context, subject string) ([]ListGrantsRow, error) {
 	rows, err := q.db.Query(ctx, listGrants, subject)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Grant
+	var items []ListGrantsRow
 	for rows.Next() {
-		var i Grant
+		var i ListGrantsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Subject,
@@ -178,6 +199,7 @@ func (q *Queries) ListGrants(ctx context.Context, subject string) ([]Grant, erro
 			&i.ExpiresAt,
 			&i.RevokedAt,
 			&i.Kind,
+			&i.Scopes,
 		); err != nil {
 			return nil, err
 		}
@@ -231,6 +253,77 @@ func (q *Queries) ListGrantsNearingExpiry(ctx context.Context, expiresAt pgtype.
 	var items []ListGrantsNearingExpiryRow
 	for rows.Next() {
 		var i ListGrantsNearingExpiryRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Subject,
+			&i.Depth,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.RevokedAt,
+			&i.Kind,
+			&i.Scopes,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGrantsPage = `-- name: ListGrantsPage :many
+SELECT g.id, g.subject, g.depth, g.created_at, g.expires_at, g.revoked_at, g.kind,
+       (SELECT array_agg(gs.scope) FROM grant_scopes gs WHERE gs.grant_id = g.id)::text[] AS scopes
+FROM grants g
+WHERE g.subject = $1
+  AND ($2::timestamptz IS NULL
+       OR (g.created_at, g.id) < ($2::timestamptz, $3::uuid))
+ORDER BY g.created_at DESC, g.id DESC
+LIMIT $4
+`
+
+type ListGrantsPageParams struct {
+	Subject         string
+	CursorCreatedAt *time.Time
+	CursorID        *string
+	Lim             int64
+}
+
+type ListGrantsPageRow struct {
+	ID        string
+	Subject   string
+	Depth     *string
+	CreatedAt time.Time
+	ExpiresAt *time.Time
+	RevokedAt *time.Time
+	Kind      string
+	Scopes    []string
+}
+
+// Cursor-paginated listing for GET /api/grants (internal/api/grants.go).
+// Newest first, matching ListGrants' own ORDER BY, so the cursor comparison
+// runs the opposite direction from ListStagedDiffsPage's oldest-first queue
+// order (staged_diffs.sql): a page here is "every one of subject's grants
+// strictly older than the last row already returned." Same (created_at, id)
+// keyset rationale as ListStagedDiffsPage — see that query's doc comment.
+// Scopes use the same array_agg subquery as ListGrants above, for the same
+// N+1 reason.
+func (q *Queries) ListGrantsPage(ctx context.Context, arg ListGrantsPageParams) ([]ListGrantsPageRow, error) {
+	rows, err := q.db.Query(ctx, listGrantsPage,
+		arg.Subject,
+		arg.CursorCreatedAt,
+		arg.CursorID,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListGrantsPageRow
+	for rows.Next() {
+		var i ListGrantsPageRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Subject,
