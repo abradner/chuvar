@@ -235,7 +235,22 @@ separate defects.
    the roster (`<slug> (#<first>–#<last>)`) and Position (`base (1/<m>)`,
    `interstitial (<n>/<m>)`, `cap (<m>/<m>)`). The stacked flavour renders
    all of this natively and has no roster sweep — see the deltas.
-5. From here: **no reaction.** No replies, no fixes pushed to reviewed
+5. **Neighbouring-PR overlap sweep.** List the other open PRs and intersect
+   their file lists with the batch's touched set (`gh pr list`, then
+   `gh pr view <n> --json files`). For each overlap, decide and record one
+   of three dispositions — the batch does not absorb neighbours, and
+   neighbours do not silently break:
+   - **Comment, adapt-after** (default): a comment on the neighbouring PR
+     naming what the batch changed, which files collide, and that it should
+     adapt *after* the train lands. Never pre-emptively rebase it (mid-train
+     churn) and never pull its work into the batch (scope creep).
+   - **Adapt-in**: only when the batch *semantically breaks* the neighbour
+     (not merely conflicts with it) and the fix is mechanical — and then it
+     lands in the followup, attributed, not smuggled into an interstitial.
+   - **Escalate**: an irreversible collision (competing migrations claiming
+     the same version timestamp, incompatible schema intent) is an operator
+     decision, not a comment.
+6. From here: **no reaction.** No replies, no fixes pushed to reviewed
    branches, no merging main in because of batch feedback.
 
 State only what is known at write time. **Never guess ordinals, totals, or PR
@@ -356,7 +371,10 @@ fresh session.
 **Followup green → merge.** When the followup's CI is green **and** every
 thread is answered — fixed, ticketed, or marked not-relevant; a thread closed
 with "ticketed as <link>" counts — wake once to *report* the stack is ready
-and ask for the go-ahead. Readiness is never itself the go-ahead.
+and ask for the go-ahead. Re-run the Phase 3 overlap sweep in the same wake:
+parallel work may have opened while the batch baked, and the readiness
+report should name every neighbouring PR that will need to adapt. Readiness
+is never itself the go-ahead.
 
 ## Phase 5 — Synthesis
 
@@ -380,6 +398,24 @@ cross-PR interactions, sibling inconsistency (same problem solved two ways),
 gaps *adjacent* to a PR's purpose — a boundary PR that hardens one principal
 chain but not its twin. Apply AGENTS.md §6's trust-boundary questions across
 the whole surface, not per file.
+
+**When implementation was delegated, "your own review" is not fresh eyes.**
+The overnight shape — subagents implement, the orchestrator assembles — means
+the synthesis session has read agent reports and bot comments, not the diff;
+its aggregate pass is process review wearing a code-review hat, and the bots
+only ever had per-PR context. Nobody has held the whole diff. So the
+aggregate review is delegated too, and it is not optional: spawn **one
+independent reviewer agent over the full aggregate diff**
+(`git diff origin/main...<followup-branch>`, or `...<cap-branch>` before the
+followup exists) — fresh context, no authorship, briefed with the §6
+trust-boundary questions and told to *trace* claims rather than trust
+comments, PR bodies, or the orchestrator's summary. Launch it at the start
+of synthesis, in parallel with the comment harvest, so its findings fold
+into the followup's **first** commit instead of burning a late reactive
+round. Its findings count toward the round cap like anyone else's — and the
+round cap's failure mode is exactly what it exists to catch: a reactive fix
+quietly defanging a test in code every earlier reviewer had already signed
+off.
 
 Triage on merit — bots only had per-PR context:
 
@@ -683,6 +719,12 @@ followup degrades independently of the interstitials.
   the release.
 - Cap reactive rounds at three, or the moment a round's findings are all in
   the previous round's code. Past that, fix real defects, ticket the rest.
+- Delegated implementation means delegated review: one independent
+  fresh-eyes agent over the full aggregate diff, launched with synthesis —
+  the orchestrator's summary of agent reports is not a code review.
+- Sweep neighbouring open PRs for file overlap at fan-out and again at
+  readiness. Default disposition: comment, adapt-after — never absorb, never
+  pre-emptively rebase someone else's branch.
 - Never trust an aggregate review signal.
 - A merge is not a release.
 - Write every deferral down as a Notion task in the Memory Vault Tasks
@@ -728,3 +770,19 @@ is published and progressively less after, because every later finding is
 fixed under pressure against a stack that resists change. A reactive round
 also drains every budget at once — bot credits, model tokens, CI minutes. One
 such batch consumed half a month's paid Actions minutes across three days.
+
+**The fresh-eyes pass earns its keep (this repo, batch #42–#50).** Nine
+interstitials implemented by delegated agents; Copilot reviewed every PR,
+Codex reviewed the aggregate diff, and the orchestrator synthesised 16
+findings across two reactive rounds. An independent reviewer agent over the
+full diff then found what all of that missed: a round-2 fix had reordered
+`ProposeWrite` and silently defanged two bouncer tests — one of them the
+regression test for a security property (classifier-produced errors must
+stay masked), now passing without ever executing the branch it pinned — plus
+an unaudited denial path and a privilege grant whose sole justification was
+never verified under the live role. Three bot rounds, zero of the three.
+The reviewer also *cleared* the batch's security claims by tracing them
+(depth-gate egress, cursor-vs-filter ordering, both down-migrations), which
+is what made the readiness report worth trusting. Same batch, overlap sweep:
+one neighbouring PR shared one file with the stack; a comment telling it to
+adapt after the train cost one API call and prevented a surprise conflict.
