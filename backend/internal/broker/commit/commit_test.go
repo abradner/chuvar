@@ -258,6 +258,40 @@ func TestParse_Rejects(t *testing.T) {
 			),
 		},
 		{
+			// A git commit object has exactly one committer header. An
+			// attacker who places the grant-authorized committer FIRST (to
+			// satisfy the broker's identity match) and a second committer
+			// after it would, without this rejection, get a signature over a
+			// commit git 2.43 attributes to the second, ungranted identity
+			// (%ce resolves from the last committer). The second committer
+			// lands in Parse's trailing-header loop and is refused there.
+			"duplicate committer header (identity-spoof via last-wins %ce)",
+			build(
+				"tree "+validTree,
+				"author Agent <agent@example.com> 1723190400 +0000",
+				"committer Agent <agent@example.com> 1723190400 +0000",
+				"committer Attacker <attacker@evil.com> 1723190400 +0000",
+			),
+		},
+		{
+			"duplicate author header",
+			build(
+				"tree "+validTree,
+				"author Agent <agent@example.com> 1723190400 +0000",
+				"committer Agent <agent@example.com> 1723190400 +0000",
+				"author Attacker <attacker@evil.com> 1723190400 +0000",
+			),
+		},
+		{
+			"duplicate tree header",
+			build(
+				"tree "+validTree,
+				"author Agent <agent@example.com> 1723190400 +0000",
+				"committer Agent <agent@example.com> 1723190400 +0000",
+				"tree "+strings.Repeat("b", 40),
+			),
+		},
+		{
 			"no blank line separating headers from message",
 			[]byte("tree " + validTree + "\n" +
 				"author Agent <agent@example.com> 1723190400 +0000\n" +

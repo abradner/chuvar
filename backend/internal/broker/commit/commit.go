@@ -71,6 +71,17 @@ type ErrMalformed struct{ Reason string }
 
 func (e *ErrMalformed) Error() string { return "commit: malformed commit object: " + e.Reason }
 
+// malformed builds an ErrMalformed whose Reason is a fixed STRUCTURAL
+// description — it must never interpolate payload-derived bytes (a rejected
+// tree/author/committer/parent value, or a raw header line). The broker
+// surfaces this text verbatim to the socket client (broker.go's Sign), so an
+// attacker-controlled value echoed here would leak payload bytes into
+// wrapper/client logs and, for a header sized near the request limit, amplify
+// a rejection into a multi-megabyte response. Keeping every Reason a constant
+// closes both by construction (principle 9: no plaintext-secret surface).
+// This is why callers pass only literal format strings and no args; the
+// variadic signature is retained solely so a future genuinely non-payload
+// value could be formatted without reworking every call site.
 func malformed(format string, args ...any) error {
 	return &ErrMalformed{Reason: fmt.Sprintf(format, args...)}
 }
@@ -117,11 +128,11 @@ func Parse(payload []byte) (*Commit, error) {
 
 	idx := 0
 	if idx >= len(lines) || !hasKey(lines[idx], "tree") {
-		return nil, malformed("first header line must be \"tree <id>\", got %q", truncate(safeLine(lines, idx)))
+		return nil, malformed("first header line must be \"tree <id>\"")
 	}
 	tree := value(lines[idx], "tree")
 	if !treeOrParentPattern.MatchString(tree) {
-		return nil, malformed("tree %q is not a valid 40- or 64-character hex object id", tree)
+		return nil, malformed("tree is not a valid 40- or 64-character hex object id")
 	}
 	c.Tree = tree
 	idx++
@@ -129,39 +140,54 @@ func Parse(payload []byte) (*Commit, error) {
 	for idx < len(lines) && hasKey(lines[idx], "parent") {
 		parent := value(lines[idx], "parent")
 		if !treeOrParentPattern.MatchString(parent) {
-			return nil, malformed("parent %q is not a valid 40- or 64-character hex object id", parent)
+			return nil, malformed("parent is not a valid 40- or 64-character hex object id")
 		}
 		c.Parents = append(c.Parents, parent)
 		idx++
 	}
 
 	if idx >= len(lines) || !hasKey(lines[idx], "author") {
-		return nil, malformed("expected \"author\" header after tree/parents, got %q", truncate(safeLine(lines, idx)))
+		return nil, malformed("expected \"author\" header after tree/parents")
 	}
 	author := value(lines[idx], "author")
 	if !identityLinePattern.MatchString(author) {
-		return nil, malformed("author line %q is not \"Name <email> timestamp tz\"", author)
+		return nil, malformed("author line is not \"Name <email> timestamp tz\"")
 	}
 	c.Author = author
 	idx++
 
 	if idx >= len(lines) || !hasKey(lines[idx], "committer") {
-		return nil, malformed("expected \"committer\" header after author, got %q", truncate(safeLine(lines, idx)))
+		return nil, malformed("expected \"committer\" header after author")
 	}
 	committer := value(lines[idx], "committer")
 	m := identityLinePattern.FindStringSubmatch(committer)
 	if m == nil {
-		return nil, malformed("committer line %q is not \"Name <email> timestamp tz\"", committer)
+		return nil, malformed("committer line is not \"Name <email> timestamp tz\"")
 	}
 	c.Committer = committer
 	c.CommitterEmail = m[2]
 	idx++
 
-	// Every remaining header (if any) is tolerated but must not be gpgsig —
-	// see this function's doc comment.
+	// Every remaining header (if any) is tolerated but must not be gpgsig, nor
+	// a SECOND tree/author/committer — see this function's doc comment.
+	//
+	// A git commit object carries exactly one tree, one author, and one
+	// committer header; git itself writes them exactly once. A payload with a
+	// duplicate is not something any real git produces, and tolerating one is
+	// an attributability hole, not a harmless extension: git 2.43's commit
+	// parser resolves %ce/%ae from the LAST matching header, so an attacker
+	// who places the grant-authorized committer first (satisfying the identity
+	// match above) and a SECOND committer after it would get a signature over
+	// a commit that every downstream git tool attributes to the second,
+	// ungranted identity. Refusing any duplicate of these three closes that
+	// gap by construction rather than trying to match git's last-wins
+	// resolution (which would just move the ambiguity, not remove it).
 	for ; idx < len(lines); idx++ {
 		if hasKey(lines[idx], "gpgsig") || hasKey(lines[idx], "gpgsig-sha256") {
 			return nil, malformed("payload already carries a gpgsig/gpgsig-sha256 header; refusing to sign a commit that claims to already be signed")
+		}
+		if hasKey(lines[idx], "tree") || hasKey(lines[idx], "author") || hasKey(lines[idx], "committer") {
+			return nil, malformed("payload carries a duplicate tree/author/committer header; a git commit object has exactly one of each")
 		}
 	}
 
@@ -202,17 +228,3 @@ func value(line, key string) string {
 	return line[len(key)+1:]
 }
 
-func safeLine(lines []string, idx int) string {
-	if idx < 0 || idx >= len(lines) {
-		return "<end of headers>"
-	}
-	return lines[idx]
-}
-
-func truncate(s string) string {
-	const max = 80
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "..."
-}
