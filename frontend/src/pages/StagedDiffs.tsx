@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, type Fact, type StagedDiff } from "../api/client";
+import { promptSecondFactor } from "./secondFactor";
 
 const VERDICT_LABEL: Record<string, string> = {
   novel: "Novel",
@@ -69,21 +70,16 @@ export function StagedDiffsPage() {
 
   const decide = async (id: string, action: "approve" | "reject") => {
     // approveStagedDiff is the only path (besides tests) that turns a staged
-    // diff into a real fact, so it's gated behind requireTOTP the same as a
-    // grant approval — reject isn't, since it only discards a proposal.
-    let totpCode = "";
-    if (action === "approve") {
-      // Trimmed: browsers commonly preserve accidental leading/trailing spaces
-      // when pasting, which would otherwise cause server-side TOTP validation
-      // to fail even though the digits themselves are correct. Found in review.
-      totpCode = window.prompt("Enter TOTP code to approve")?.trim() ?? "";
-      if (!totpCode) return;
-    }
+    // diff into a real fact, so it's gated behind requireStrongFactor the
+    // same as a grant approval — reject isn't, since it only discards a
+    // proposal. promptSecondFactor is the shared TOTP-or-passkey ceremony.
     setBusyId(id);
     setError(null);
     try {
       if (action === "approve") {
-        await api.approveStagedDiff(id, totpCode);
+        const factor = await promptSecondFactor("approve");
+        if (factor === null) return;
+        await api.approveStagedDiff(id, factor);
       } else {
         await api.rejectStagedDiff(id);
       }

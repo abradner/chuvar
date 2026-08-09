@@ -1,5 +1,6 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { api, ApiError, type Grant, type GrantRequest } from "../api/client";
+import { promptSecondFactor } from "./secondFactor";
 
 export function GrantsPage() {
   const [subject, setSubject] = useState("agent-a");
@@ -72,24 +73,18 @@ export function GrantsPage() {
   }, [refreshKey]);
 
   const decideRequest = async (id: string, action: "approve" | "deny") => {
-    // Approving requires the device-local TOTP second factor (requireTOTP,
+    // Approving requires the device-local second factor (requireStrongFactor,
     // backend/internal/api/api.go) — deny doesn't, since it only reduces
-    // authority, not the self-escalation vector the gate exists for. A plain
-    // prompt() is a deliberately minimal stopgap UI, not the eventual WebAuthn
-    // surface.
-    let totpCode = "";
-    if (action === "approve") {
-      // Trimmed: browsers commonly preserve accidental leading/trailing spaces
-      // when pasting, which would otherwise cause server-side TOTP validation
-      // to fail even though the digits themselves are correct. Found in review.
-      totpCode = window.prompt("Enter TOTP code to approve")?.trim() ?? "";
-      if (!totpCode) return;
-    }
+    // authority, not the self-escalation vector the gate exists for.
+    // promptSecondFactor is the shared TOTP-or-passkey ceremony; still a
+    // deliberately minimal stopgap UI.
     setBusyId(id);
     setError(null);
     try {
       if (action === "approve") {
-        await api.approveGrantRequest(id, totpCode);
+        const factor = await promptSecondFactor("approve");
+        if (factor === null) return;
+        await api.approveGrantRequest(id, factor);
       } else {
         await api.denyGrantRequest(id);
       }
@@ -120,9 +115,9 @@ export function GrantsPage() {
   // renewGrant requires a TTL, unlike createGrant's optional one (the backend
   // rejects a missing/non-positive ttl_seconds — see api/client.ts's comment),
   // so this prompts for minutes the same way createGrant's form field does,
-  // then TOTP the same way decideRequest's approve path does. Two sequential
-  // window.prompt()s, same deliberately-minimal stopgap UI as the rest of this
-  // page — not the eventual WebAuthn surface.
+  // then a second factor the same way decideRequest's approve path does. Two
+  // sequential ceremonies, same deliberately-minimal stopgap UI as the rest
+  // of this page.
   const renew = async (id: string) => {
     const minutesInput = window.prompt("Renew for how many minutes?");
     if (!minutesInput) return;
@@ -131,14 +126,13 @@ export function GrantsPage() {
       setError("TTL must be a positive whole number of minutes");
       return;
     }
-    // Trimmed — see decideRequest's matching comment above.
-    const totpCode = window.prompt("Enter TOTP code to renew")?.trim() ?? "";
-    if (!totpCode) return;
 
     setBusyId(id);
     setError(null);
     try {
-      await api.renewGrant(id, minutes * 60, totpCode);
+      const factor = await promptSecondFactor("renew");
+      if (factor === null) return;
+      await api.renewGrant(id, minutes * 60, factor);
       setRefreshKey((k) => k + 1);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
@@ -190,16 +184,14 @@ export function GrantsPage() {
       ttlSeconds = minutes * 60;
     }
 
-    // createGrant is a direct capability grant — the same requireTOTP gate as
-    // approving a grant request (it's the other REST path that ever creates a
-    // real grant; see the backend's Routes doc comment).
-    // Trimmed — see decideRequest's matching comment above.
-    const totpCode = window.prompt("Enter TOTP code to create this grant")?.trim() ?? "";
-    if (!totpCode) return;
-
+    // createGrant is a direct capability grant — the same requireStrongFactor
+    // gate as approving a grant request (it's the other REST path that ever
+    // creates a real grant; see the backend's Routes doc comment).
     setCreating(true);
     try {
-      await api.createGrant(subject.trim(), scopes, newDepth, totpCode, ttlSeconds);
+      const factor = await promptSecondFactor("create this grant");
+      if (factor === null) return;
+      await api.createGrant(subject.trim(), scopes, newDepth, factor, ttlSeconds);
       setNewScopes("");
       setRefreshKey((k) => k + 1);
     } catch (e) {

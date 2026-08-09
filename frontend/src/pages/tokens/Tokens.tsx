@@ -7,6 +7,8 @@
 // before.
 import { TokensView } from "./TokensView";
 import { useTokens } from "./useTokens";
+import { PasskeysView } from "./PasskeysView";
+import { usePasskeys } from "./usePasskeys";
 
 export interface TokensPageProps {
   onRevealChange?: (pending: boolean) => void;
@@ -17,19 +19,33 @@ export function TokensPage({ onRevealChange }: TokensPageProps = {}) {
     useTokens({
       onRevealChange,
     });
+  const passkeys = usePasskeys();
 
   return (
-    <TokensView
-      tokens={tokens}
-      loading={loading}
-      loadError={loadError}
-      error={error}
-      busyId={busyId}
-      creating={creating}
-      justCreated={justCreated}
-      onCreate={create}
-      onDismissReveal={dismissReveal}
-      onRevoke={revoke}
-    />
+    <>
+      <TokensView
+        tokens={tokens}
+        loading={loading}
+        loadError={loadError}
+        error={error}
+        busyId={busyId}
+        creating={creating}
+        justCreated={justCreated}
+        onCreate={create}
+        onDismissReveal={dismissReveal}
+        onRevoke={revoke}
+      />
+      <PasskeysView
+        credentials={passkeys.credentials}
+        loading={passkeys.loading}
+        loadError={passkeys.loadError}
+        error={passkeys.error}
+        busyId={passkeys.busyId}
+        registering={passkeys.registering}
+        supported={passkeys.supported}
+        onRegister={passkeys.register}
+        onRevoke={passkeys.revoke}
+      />
+    </>
   );
 }
