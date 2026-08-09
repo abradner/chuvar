@@ -48,7 +48,7 @@ func TestCache_Load_SkipsGrantWithInvalidStoredScope(t *testing.T) {
 		`INSERT INTO grant_scopes (grant_id, scope) VALUES ($1, $2)`, bad.GrantID, "Not A Valid Scope!"); err != nil {
 		t.Fatalf("inserting invalid scope fixture: %v", err)
 	}
-	good := insertCapabilityGrant(t, pool, "agent-good", "good@example.com", []string{"git.sign"}, nil)
+	good := insertCapabilityGrant(t, pool, "agent-good", "good@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 
 	c := NewCache(pool)
 	if err := c.Load(context.Background()); err != nil {
@@ -63,9 +63,47 @@ func TestCache_Load_SkipsGrantWithInvalidStoredScope(t *testing.T) {
 	}
 }
 
+// TestCache_Load_SkipsUntargetedCapabilityScope exercises the require-target
+// half of parseScopes specifically — distinct from
+// TestCache_Load_SkipsGrantWithInvalidStoredScope above, which covers a
+// scope that fails even the base scope.Validate grammar check. "git.sign"
+// alone is syntactically well-formed (scope.Validate accepts it — it's
+// exactly what a memory scope looks like) but is not a valid *capability*
+// scope per the 2026-08-09 require-target decision
+// (docs/capability-broker.md): scope.ValidateCapability rejects it, and
+// parseScopes must too. No capability-grant creation surface exists yet
+// (#96) to have refused this at write time, so a grant row seeded directly
+// (a fixture, or an operator's psql — exactly the scenario
+// scope.ValidateCapability's doc comment names) is the realistic way this
+// state reaches the cache. The grant must be refused loudly (logged) and
+// treated as absent — the resulting Cache.Lookup miss is what makes the
+// broker answer NO_GRANT rather than caching a grant that could never
+// legitimately match any request checkScope would accept (checkScope
+// itself requires every *request* scope to carry a target too — see
+// TestBroker_Sign_UntargetedCapabilityGrantNeverCached for the same
+// scenario proven at the Broker level, and that test's doc comment for why
+// NO_GRANT, not SCOPE_DENIED, is the correct code here).
+func TestCache_Load_SkipsUntargetedCapabilityScope(t *testing.T) {
+	pool := testPool(t)
+	bad := insertCapabilityGrant(t, pool, "agent-bad", "bad@example.com", []string{"git.sign"}, nil)
+	good := insertCapabilityGrant(t, pool, "agent-good", "good@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
+
+	c := NewCache(pool)
+	if err := c.Load(context.Background()); err != nil {
+		t.Fatalf("Load: %v (must not fail the whole load over one untargeted grant)", err)
+	}
+
+	if _, ok := c.Lookup(bad.Token); ok {
+		t.Error("Lookup(token for the untargeted-scope grant): ok = true, want false (skipped)")
+	}
+	if _, ok := c.Lookup(good.Token); !ok {
+		t.Error("Lookup(token for the unrelated targeted grant): ok = false, want true (unaffected by the untargeted row)")
+	}
+}
+
 func TestCache_Lookup_UnknownTokenRejected(t *testing.T) {
 	pool := testPool(t)
-	insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 
 	c := NewCache(pool)
 	if err := c.Load(context.Background()); err != nil {
@@ -80,7 +118,7 @@ func TestCache_Lookup_UnknownTokenRejected(t *testing.T) {
 func TestCache_Lookup_ExpiredGrantExcluded(t *testing.T) {
 	pool := testPool(t)
 	past := -time.Hour
-	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign"}, &past)
+	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, &past)
 
 	c := NewCache(pool)
 	if err := c.Load(context.Background()); err != nil {
@@ -100,7 +138,7 @@ func TestCache_Lookup_ExpiredGrantExcluded(t *testing.T) {
 func TestCache_Lookup_ExpiresBetweenRefreshes(t *testing.T) {
 	pool := testPool(t)
 	soon := 50 * time.Millisecond
-	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign"}, &soon)
+	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, &soon)
 
 	c := NewCache(pool)
 	if err := c.Load(context.Background()); err != nil {
@@ -119,7 +157,7 @@ func TestCache_Lookup_ExpiresBetweenRefreshes(t *testing.T) {
 
 func TestCache_Lookup_RevokedGrantExcludedAfterReload(t *testing.T) {
 	pool := testPool(t)
-	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 
 	c := NewCache(pool)
 	if err := c.Load(context.Background()); err != nil {
@@ -141,7 +179,7 @@ func TestCache_Lookup_RevokedGrantExcludedAfterReload(t *testing.T) {
 
 func TestCache_Remove_DropsEntryWithoutReload(t *testing.T) {
 	pool := testPool(t)
-	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 
 	c := NewCache(pool)
 	if err := c.Load(context.Background()); err != nil {
@@ -171,7 +209,7 @@ func TestCache_Remove_UnknownGrantIDIsNoOp(t *testing.T) {
 // loadCapabilityGrants/Remove/apply code paths, sequenced by hand.
 func TestCache_StaleReloadCannotResurrectRevokedGrant(t *testing.T) {
 	pool := testPool(t)
-	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 
 	c := NewCache(pool)
 	if err := c.Load(context.Background()); err != nil {
@@ -218,7 +256,7 @@ func TestCache_Remove_TombstonesGrantTheCacheNeverHeld(t *testing.T) {
 		Subject:        "agent-a",
 		CommitterEmail: "agent@example.com",
 		TokenHash:      hashToken(token),
-		Scopes:         []string{"git.sign"},
+		Scopes:         []string{"git.sign:github.com/abradner/chuvar"},
 	}})
 
 	if _, ok := c.Lookup(token); ok {
@@ -256,7 +294,7 @@ func TestCache_TombstonesPrunedAfterTTL(t *testing.T) {
 // test at all.
 func TestCache_Watch_RevocationPropagatesViaNotify(t *testing.T) {
 	pool := testPool(t)
-	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 
 	c := NewCache(pool)
 	if err := c.Load(context.Background()); err != nil {

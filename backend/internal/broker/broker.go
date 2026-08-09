@@ -29,10 +29,23 @@ import (
 const gitNamespace = "git"
 
 // gitSignOperation is the one capability operation this binary implements.
-// Every request's scope must name exactly this operation (any target is
-// fine — that half is checked against the grant via scope.Covers); anything
-// else is refused before the grant's own scopes are even consulted. See
-// checkScope for who this defends against.
+// Every request's scope must name exactly this operation; anything else is
+// refused before the grant's own scopes are even consulted. See checkScope
+// for who this defends against.
+//
+// The target half is NOT "fine either way" — brokerd always knows which
+// repository it is signing for (it parsed the commit payload's tree/parent
+// context or was invoked for a specific worktree), so every request scope
+// it builds or accepts must carry a target, and checkScope enforces that via
+// scope.ValidateCapability before ever consulting the grant. This reflects
+// the 2026-08-09 fail-closed resolution (docs/capability-broker.md decision
+// log, "Capability scope Covers is fail-closed on target..."): an
+// untargeted grant does not cover a targeted request and vice versa, so a
+// request with no target could never be legitimately authorized by any
+// grant this broker is willing to cache in the first place (see cache.go's
+// parseScopes) — accepting an untargeted request at all would just be a
+// slower way to reach the same SCOPE_DENIED/NO_GRANT outcome, with a less
+// useful error message along the way.
 const gitSignOperation = scope.Scope("git.sign")
 
 // Broker wires together the grant cache, the signing key, and the audit
@@ -172,13 +185,23 @@ func (b *Broker) Sign(ctx context.Context, req Request) Result {
 // refuse (an agent doing exactly what the design asks, "ask before
 // starting," must never get a false positive from the cheap call).
 //
-// Two checks, in order:
+// Three checks, in order:
 //
-//  1. The requested scope's operation must be exactly gitSignOperation.
+//  1. The requested scope must be well-formed AND carry a target
+//     (scope.ValidateCapability, not the weaker scope.Validate that memory
+//     scopes use). Adversary: a caller sending an untargeted "git.sign"
+//     hoping it resolves against some ambient default repository. Per the
+//     2026-08-09 fail-closed decision, no grant this broker will ever cache
+//     can cover an untargeted request anyway (cache.go's parseScopes
+//     refuses to load an untargeted capability grant at all — see its doc
+//     comment) — rejecting here first just gives a precise "must specify a
+//     target" message instead of a generic scope-mismatch one for what
+//     would otherwise still end in denial.
+//  2. The requested scope's operation must be exactly gitSignOperation.
 //     Adversary: a mis-provisioned grant row. No grant-creation surface
 //     exists yet (#96), so nothing upstream enforces that a capability
 //     grant carrying identity+token rows also carries a git.sign-shaped
-//     scope — and coverage alone (check 2) would happily authorize a grant
+//     scope — and coverage alone (check 3) would happily authorize a grant
 //     seeded with "totally.unrelated.operation" to mint a real git-commit
 //     signature, an operation its human approver never named. The only
 //     artifact Sign can ever produce is an SSHSIG in the "git" namespace,
@@ -186,13 +209,13 @@ func (b *Broker) Sign(ctx context.Context, req Request) Result {
 //     than resolved against the grant. Exact match, not Covers-descent: a
 //     request for a sub-operation ("git.sign.something") names an operation
 //     this binary doesn't implement either.
-//  2. The grant's scopes must cover the request (scope.AnyCovers) — the
-//     operation hierarchy and exact-match target semantics both live in
-//     internal/scope, checked against the grant the *token* authenticated,
-//     never a grant the request merely named.
+//  3. The grant's scopes must cover the request (scope.AnyCovers) — the
+//     operation hierarchy and fail-closed exact-match target semantics both
+//     live in internal/scope, checked against the grant the *token*
+//     authenticated, never a grant the request merely named.
 func checkScope(entry Entry, reqScope string) (Result, bool) {
 	requested := scope.Scope(reqScope)
-	if err := scope.Validate(requested); err != nil {
+	if err := scope.ValidateCapability(requested); err != nil {
 		return Result{Code: ScopeDenied, Message: "invalid scope: " + err.Error()}, false
 	}
 	if requested.Operation() != gitSignOperation {

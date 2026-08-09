@@ -143,12 +143,28 @@ func (c *Cache) apply(rows []grantRow) {
 	for _, r := range rows {
 		scopes, err := parseScopes(r.Scopes)
 		if err != nil {
-			// A grant with an unparseable stored scope is an operator/data
-			// problem (scope.Validate already runs wherever a scope is
-			// meant to be written), not a reason to fail the whole cache
+			// A grant with an unparseable stored scope, OR a syntactically
+			// well-formed but untargeted capability scope, is an
+			// operator/data problem — not a reason to fail the whole cache
 			// load — every other grant should still work. Logged loudly,
-			// skipped individually.
-			slog.Error("broker: cache load: skipping grant with invalid stored scope",
+			// skipped individually: this is the "fail closed, loudly" half
+			// of the 2026-08-09 require-target decision (docs/
+			// capability-broker.md) applied at the one place brokerd reads
+			// a capability grant's scopes back — grant-creation validation
+			// (scope.ValidateCapability, store-side) is meant to keep an
+			// untargeted capability scope from ever being persisted, but
+			// this package holds no dependency on internal/store (see
+			// store.go's doc comment) and cannot assume every row in
+			// grant_scopes went through that gate — a fixture, an
+			// operator's psql, or a future bulk-import path could still
+			// write one directly. A grant that can structurally never cover
+			// any request this broker would accept (checkScope requires a
+			// targeted request too) is refused here rather than cached as
+			// dead weight: the resulting effect is a Cache.Lookup miss for
+			// that grant's token, i.e. NO_GRANT, not SCOPE_DENIED — from a
+			// caller's perspective indistinguishable from a token that was
+			// never granted anything, which is the point.
+			slog.Error("broker: cache load: skipping grant with invalid or untargeted stored scope",
 				"grant_id", r.ID, "error", err)
 			continue
 		}
@@ -180,11 +196,18 @@ func (c *Cache) apply(rows []grantRow) {
 	c.tokenOf = tokenOf
 }
 
+// parseScopes validates every stored scope string on a capability grant row
+// with scope.ValidateCapability, not the weaker scope.Validate that memory
+// scopes use — every row loadCapabilityGrants returns is already filtered to
+// kind = 'capability' (see its query), so every scope on it must carry a
+// target (2026-08-09 require-target decision) or the whole grant is refused
+// (see apply's caller, which skips-and-logs rather than caching a grant that
+// can never match any request checkScope will accept).
 func parseScopes(raw []string) ([]scope.Scope, error) {
 	out := make([]scope.Scope, len(raw))
 	for i, s := range raw {
 		sc := scope.Scope(s)
-		if err := scope.Validate(sc); err != nil {
+		if err := scope.ValidateCapability(sc); err != nil {
 			return nil, err
 		}
 		out[i] = sc

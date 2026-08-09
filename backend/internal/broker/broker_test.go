@@ -70,12 +70,12 @@ func TestBroker_Preflight_OK(t *testing.T) {
 func TestBroker_Preflight_WithExpiryReportsIt(t *testing.T) {
 	b, cache := testBroker(t)
 	ttl := time.Hour
-	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, &ttl)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, &ttl)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
 
-	res := b.Preflight(Request{Op: "preflight", Token: fx.Token, Scope: "git.sign"})
+	res := b.Preflight(Request{Op: "preflight", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar"})
 	if res.Code != OK {
 		t.Fatalf("Preflight() = %+v, want OK", res)
 	}
@@ -93,7 +93,7 @@ func TestBroker_Preflight_WithExpiryReportsIt(t *testing.T) {
 
 func TestBroker_Preflight_BadToken(t *testing.T) {
 	b, _ := testBroker(t)
-	res := b.Preflight(Request{Op: "preflight", Token: "nonsense", Scope: "git.sign"})
+	res := b.Preflight(Request{Op: "preflight", Token: "nonsense", Scope: "git.sign:github.com/abradner/chuvar"})
 	if res.Code != NoGrant {
 		t.Fatalf("Preflight() with bad token = %+v, want NO_GRANT", res)
 	}
@@ -115,7 +115,7 @@ func TestBroker_Preflight_ScopeNotCovered(t *testing.T) {
 
 func TestBroker_Preflight_InvalidScopeSyntaxRejected(t *testing.T) {
 	b, cache := testBroker(t)
-	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
@@ -128,13 +128,13 @@ func TestBroker_Preflight_InvalidScopeSyntaxRejected(t *testing.T) {
 
 func TestBroker_Preflight_NoSideEffects(t *testing.T) {
 	b, cache := testBroker(t)
-	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
 
 	for i := 0; i < 5; i++ {
-		if res := b.Preflight(Request{Op: "preflight", Token: fx.Token, Scope: "git.sign"}); res.Code != OK {
+		if res := b.Preflight(Request{Op: "preflight", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar"}); res.Code != OK {
 			t.Fatalf("Preflight() call %d = %+v, want OK", i, res)
 		}
 	}
@@ -189,7 +189,7 @@ func TestBroker_Sign_OK(t *testing.T) {
 
 func TestBroker_Sign_BadToken(t *testing.T) {
 	b, _ := testBroker(t)
-	res := b.Sign(context.Background(), Request{Op: "sign", Token: "nonsense", Scope: "git.sign", Payload: commitPayload("a@example.com")})
+	res := b.Sign(context.Background(), Request{Op: "sign", Token: "nonsense", Scope: "git.sign:github.com/abradner/chuvar", Payload: commitPayload("a@example.com")})
 	if res.Code != NoGrant {
 		t.Fatalf("Sign() with bad token = %+v, want NO_GRANT", res)
 	}
@@ -197,13 +197,13 @@ func TestBroker_Sign_BadToken(t *testing.T) {
 
 func TestBroker_Sign_RevokedGrantRejected(t *testing.T) {
 	b, cache := testBroker(t)
-	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
 	cache.Remove(fx.GrantID) // simulates what Watch's NOTIFY path does on revocation
 
-	res := b.Sign(context.Background(), Request{Op: "sign", Token: fx.Token, Scope: "git.sign", Payload: commitPayload("agent@example.com")})
+	res := b.Sign(context.Background(), Request{Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar", Payload: commitPayload("agent@example.com")})
 	if res.Code != NoGrant {
 		t.Fatalf("Sign() with a revoked grant's token = %+v, want NO_GRANT", res)
 	}
@@ -226,6 +226,75 @@ func TestBroker_Sign_ScopeNotCovered(t *testing.T) {
 	}
 }
 
+// TestBroker_Sign_UntargetedCapabilityGrantNeverCached is the third leg of
+// the three-scenario matrix the 2026-08-09 fail-closed/require-target
+// decision calls for (docs/capability-broker.md decision log), alongside
+// TestBroker_Sign_ScopeNotCovered ("targeted grant, different-target
+// request" — SCOPE_DENIED) and TestBroker_Sign_OK ("targeted grant,
+// matching-target request" — OK): "untargeted grant, targeted request."
+//
+// The grant is inserted directly with a bare "git.sign" scope — no
+// capability-grant creation surface exists yet (#96) to have refused this at
+// write time, so a fixture (or an operator's psql) inserting it straight is
+// the realistic path, exactly as scope.ValidateCapability's doc comment
+// describes. The expected code is NO_GRANT, not SCOPE_DENIED, and that is a
+// deliberate consequence of where this build enforces the require-target
+// rule, not an arbitrary pick between the two:
+//
+//   - cache.go's parseScopes runs scope.ValidateCapability over every scope
+//     on a capability grant row and skips (logs, does not cache) the whole
+//     grant if any scope fails it — see TestCache_Load_SkipsUntargetedCapabilityScope.
+//     An untargeted capability grant is therefore never present in
+//     Cache.byToken at all.
+//   - Broker.Sign's (and Preflight's) very first step is
+//     b.cache.Lookup(req.Token). For this grant's token, that lookup misses
+//     — the same map-miss codes.go's NoGrant doc comment describes as
+//     "no active grant matches the presented token at all" — and returns
+//     NO_GRANT before checkScope, and therefore before SCOPE_DENIED, is
+//     ever reached.
+//
+// SCOPE_DENIED presupposes "an active grant was found (the token matched)"
+// (codes.go) — that premise is false here by construction, so SCOPE_DENIED
+// would misdescribe what happened. From the caller's perspective, holding a
+// token for a grant the broker refuses to load is indistinguishable from
+// holding a token for a grant that was never issued, which is exactly what
+// NO_GRANT is for.
+func TestBroker_Sign_UntargetedCapabilityGrantNeverCached(t *testing.T) {
+	b, cache := testBroker(t)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	if err := cache.Load(context.Background()); err != nil {
+		t.Fatalf("cache.Load: %v", err)
+	}
+
+	res := b.Sign(context.Background(), Request{
+		Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar",
+		Payload: commitPayload("agent@example.com"),
+	})
+	if res.Code != NoGrant {
+		t.Fatalf("Sign() with a targeted request against an untargeted (never-cached) grant = %+v, want NO_GRANT", res)
+	}
+	if res.Signature != "" {
+		t.Fatal("Sign() produced a signature for a grant that was never cached")
+	}
+}
+
+// TestBroker_Preflight_UntargetedCapabilityGrantNeverCached is Preflight's
+// side of TestBroker_Sign_UntargetedCapabilityGrantNeverCached — checkScope's
+// shared gate means the two must never disagree (see checkScope's own doc
+// comment on why it is shared).
+func TestBroker_Preflight_UntargetedCapabilityGrantNeverCached(t *testing.T) {
+	b, cache := testBroker(t)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	if err := cache.Load(context.Background()); err != nil {
+		t.Fatalf("cache.Load: %v", err)
+	}
+
+	res := b.Preflight(Request{Op: "preflight", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar"})
+	if res.Code != NoGrant {
+		t.Fatalf("Preflight() with a targeted request against an untargeted (never-cached) grant = %+v, want NO_GRANT", res)
+	}
+}
+
 // TestBroker_Sign_UnrelatedOperationRefused: authorization must not rest on
 // scope coverage alone. No grant-creation surface exists yet (#96), so
 // nothing upstream guarantees a capability grant with identity+token rows
@@ -236,13 +305,13 @@ func TestBroker_Sign_ScopeNotCovered(t *testing.T) {
 func TestBroker_Sign_UnrelatedOperationRefused(t *testing.T) {
 	b, cache := testBroker(t)
 	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com",
-		[]string{"totally.unrelated.operation"}, nil)
+		[]string{"totally.unrelated.operation:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
 
 	res := b.Sign(context.Background(), Request{
-		Op: "sign", Token: fx.Token, Scope: "totally.unrelated.operation",
+		Op: "sign", Token: fx.Token, Scope: "totally.unrelated.operation:github.com/abradner/chuvar",
 		Payload: commitPayload("agent@example.com"),
 	})
 	if res.Code != ScopeDenied {
@@ -260,12 +329,12 @@ func TestBroker_Sign_UnrelatedOperationRefused(t *testing.T) {
 func TestBroker_Preflight_UnrelatedOperationRefused(t *testing.T) {
 	b, cache := testBroker(t)
 	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com",
-		[]string{"totally.unrelated.operation"}, nil)
+		[]string{"totally.unrelated.operation:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
 
-	res := b.Preflight(Request{Op: "preflight", Token: fx.Token, Scope: "totally.unrelated.operation"})
+	res := b.Preflight(Request{Op: "preflight", Token: fx.Token, Scope: "totally.unrelated.operation:github.com/abradner/chuvar"})
 	if res.Code != ScopeDenied {
 		t.Fatalf("Preflight() for an unrelated operation = %+v, want SCOPE_DENIED", res)
 	}
@@ -278,13 +347,13 @@ func TestBroker_Preflight_UnrelatedOperationRefused(t *testing.T) {
 // the pin refuses it before coverage is consulted.
 func TestBroker_Sign_SubOperationRefused(t *testing.T) {
 	b, cache := testBroker(t)
-	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
 
 	res := b.Sign(context.Background(), Request{
-		Op: "sign", Token: fx.Token, Scope: "git.sign.extra",
+		Op: "sign", Token: fx.Token, Scope: "git.sign.extra:github.com/abradner/chuvar",
 		Payload: commitPayload("agent@example.com"),
 	})
 	if res.Code != ScopeDenied {
@@ -297,13 +366,13 @@ func TestBroker_Sign_SubOperationRefused(t *testing.T) {
 
 func TestBroker_Sign_CommitterMismatchRejected(t *testing.T) {
 	b, cache := testBroker(t)
-	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
 
 	res := b.Sign(context.Background(), Request{
-		Op: "sign", Token: fx.Token, Scope: "git.sign",
+		Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar",
 		Payload: commitPayload("someone-else@example.com"),
 	})
 	if res.Code != ScopeDenied {
@@ -313,12 +382,12 @@ func TestBroker_Sign_CommitterMismatchRejected(t *testing.T) {
 
 func TestBroker_Sign_MalformedPayloadRejected(t *testing.T) {
 	b, cache := testBroker(t)
-	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
 
-	res := b.Sign(context.Background(), Request{Op: "sign", Token: fx.Token, Scope: "git.sign", Payload: []byte("not a commit object")})
+	res := b.Sign(context.Background(), Request{Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar", Payload: []byte("not a commit object")})
 	if res.Code != ScopeDenied {
 		t.Fatalf("Sign() with a malformed payload = %+v, want SCOPE_DENIED", res)
 	}
@@ -331,13 +400,13 @@ func TestBroker_Sign_MalformedPayloadRejected(t *testing.T) {
 // even parse as a commit to reach the signing step.
 func TestBroker_Sign_HostAuthChallengeRefused(t *testing.T) {
 	b, cache := testBroker(t)
-	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
 
 	challenge := []byte{0x00, 0x01, 'S', 'S', 'H', '2', 0x00, 0x00, 0xde, 0xad}
-	res := b.Sign(context.Background(), Request{Op: "sign", Token: fx.Token, Scope: "git.sign", Payload: challenge})
+	res := b.Sign(context.Background(), Request{Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar", Payload: challenge})
 	if res.Code == OK {
 		t.Fatal("Sign() produced a signature over a non-commit payload — success criterion 7 violated")
 	}
@@ -347,7 +416,7 @@ func TestBroker_Sign_HostAuthChallengeRefused(t *testing.T) {
 // already-(claimed-)signed commit — see commit.Parse's doc comment.
 func TestBroker_Sign_GpgsigHeaderRejected(t *testing.T) {
 	b, cache := testBroker(t)
-	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
@@ -357,7 +426,7 @@ func TestBroker_Sign_GpgsigHeaderRejected(t *testing.T) {
 		"committer Agent <agent@example.com> 1723190400 +0000\n" +
 		"gpgsig -----BEGIN SSH SIGNATURE-----\n someb64\n -----END SSH SIGNATURE-----\n\ncommit message\n")
 
-	res := b.Sign(context.Background(), Request{Op: "sign", Token: fx.Token, Scope: "git.sign", Payload: payload})
+	res := b.Sign(context.Background(), Request{Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar", Payload: payload})
 	if res.Code != ScopeDenied {
 		t.Fatalf("Sign() with a gpgsig header already present = %+v, want SCOPE_DENIED", res)
 	}
@@ -365,7 +434,7 @@ func TestBroker_Sign_GpgsigHeaderRejected(t *testing.T) {
 
 func TestBroker_Sign_InvalidScopeSyntaxRejected(t *testing.T) {
 	b, cache := testBroker(t)
-	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
@@ -384,7 +453,7 @@ func TestBroker_Sign_InvalidScopeSyntaxRejected(t *testing.T) {
 // doc comment.
 func TestBroker_Sign_DestroyedKeyReturnsBackendUnreachable(t *testing.T) {
 	b, cache := testBroker(t)
-	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
@@ -392,7 +461,7 @@ func TestBroker_Sign_DestroyedKeyReturnsBackendUnreachable(t *testing.T) {
 	b.key.Destroy()
 
 	res := b.Sign(context.Background(), Request{
-		Op: "sign", Token: fx.Token, Scope: "git.sign", Payload: commitPayload("agent@example.com"),
+		Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar", Payload: commitPayload("agent@example.com"),
 	})
 	if res.Code != BackendUnreachable {
 		t.Fatalf("Sign() with a destroyed signing key = %+v, want BACKEND_UNREACHABLE", res)
@@ -407,7 +476,7 @@ func TestBroker_Sign_DestroyedKeyReturnsBackendUnreachable(t *testing.T) {
 // validly-computed signature — see Broker.Sign's doc comment.
 func TestBroker_Sign_AuditFailureDiscardsSignature(t *testing.T) {
 	b, cache := testBroker(t)
-	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
@@ -417,7 +486,7 @@ func TestBroker_Sign_AuditFailureDiscardsSignature(t *testing.T) {
 	}
 
 	res := b.Sign(context.Background(), Request{
-		Op: "sign", Token: fx.Token, Scope: "git.sign", Payload: commitPayload("agent@example.com"),
+		Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar", Payload: commitPayload("agent@example.com"),
 	})
 	if res.Code != BackendUnreachable {
 		t.Fatalf("Sign() when the audit write fails = %+v, want BACKEND_UNREACHABLE", res)
@@ -440,14 +509,14 @@ func TestBroker_Sign_RateLimited(t *testing.T) {
 	t.Cleanup(key.Destroy)
 
 	cache := NewCache(pool)
-	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign"}, nil)
+	fx := insertCapabilityGrant(t, pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
 	if err := cache.Load(context.Background()); err != nil {
 		t.Fatalf("cache.Load: %v", err)
 	}
 
 	b := New(pool, cache, key, 2, time.Minute) // budget of 2 per minute for this test
 
-	req := Request{Op: "sign", Token: fx.Token, Scope: "git.sign", Payload: commitPayload("agent@example.com")}
+	req := Request{Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar", Payload: commitPayload("agent@example.com")}
 	if res := b.Sign(context.Background(), req); res.Code != OK {
 		t.Fatalf("Sign() call 1 = %+v, want OK", res)
 	}
@@ -507,7 +576,7 @@ func TestBroker_Serve_EndToEnd(t *testing.T) {
 	// A second, independent connection with a bad token over the same live
 	// socket — confirms the socket serves more than one request across its
 	// lifetime (one request per *connection*, not one request ever).
-	res2 := sendRequest(t, socketPath, Request{Op: "preflight", Token: "wrong", Scope: "git.sign"})
+	res2 := sendRequest(t, socketPath, Request{Op: "preflight", Token: "wrong", Scope: "git.sign:github.com/abradner/chuvar"})
 	if res2.Code != NoGrant {
 		t.Fatalf("second connection with a bad token = %+v, want NO_GRANT", res2)
 	}
