@@ -13,6 +13,7 @@ vi.mock("../../api/client", async () => {
       listTokens: vi.fn(),
       createToken: vi.fn(),
       revokeToken: vi.fn(),
+      webauthnAssertBegin: vi.fn(),
     },
   };
 });
@@ -101,11 +102,13 @@ describe("TokensPage", () => {
     await createAndReveal();
 
     expect(screen.getByDisplayValue("JBSWY3DPEHPK3PXP")).toBeInTheDocument();
-    // Shape check only: a blank prompt sends no code. (The backend treats an
-    // absent and an empty X-Chuvar-TOTP-Code header identically — verifyTOTPCode
-    // trims then compares to "" — so this is not a security boundary, and
-    // client.ts omits the header for "" anyway.)
-    expect(api.createToken).toHaveBeenCalledWith("alex-phone", undefined);
+    // Shape check only: a blank prompt (jsdom has no PublicKeyCredential, so
+    // promptSecondFactor's optional mode can't even offer the passkey
+    // branch) sends an empty SecondFactor, not a totpCode. (The backend
+    // treats an absent and an empty X-Chuvar-TOTP-Code header identically —
+    // verifyTOTPCode trims then compares to "" — so this is not a security
+    // boundary, and client.ts omits both headers for an empty factor anyway.)
+    expect(api.createToken).toHaveBeenCalledWith("alex-phone", {});
   });
 
   it("sends a real TOTP code trimmed of paste whitespace", async () => {
@@ -120,7 +123,58 @@ describe("TokensPage", () => {
     render(<TokensPage />);
     await createAndReveal();
 
-    expect(api.createToken).toHaveBeenCalledWith("alex-phone", "123456");
+    expect(api.createToken).toHaveBeenCalledWith("alex-phone", { totpCode: "123456" });
+  });
+
+  it("mints a replacement token from a passkey assertion when TOTP is left blank — the break-glass path docs/operations.md promises", async () => {
+    // The scenario this test pins: a reviewer whose authenticator app is
+    // gone but whose passkey still works must still be able to mint a
+    // replacement device token — no curl workaround exists for a WebAuthn
+    // assertion the way one exists for a TOTP code, so this is the one path
+    // that has no fallback if it's broken. See docs/operations.md's
+    // break-glass section ("Any passkey still working? ... including
+    // minting a replacement token").
+    vi.mocked(api.listTokens).mockResolvedValue([sampleToken]);
+    vi.mocked(api.createToken).mockResolvedValue(sampleCreated);
+    vi.mocked(window.prompt).mockReturnValue("");
+    // jsdom implements neither the Credential Management nor WebAuthn APIs —
+    // stub the boundary so promptSecondFactor's real passkey branch runs, as
+    // StagedDiffs.test.tsx's identical passkey test does.
+    Object.defineProperty(window, "PublicKeyCredential", {
+      value: function PublicKeyCredential() {},
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "credentials", {
+      value: {
+        get: vi.fn().mockResolvedValue({
+          id: "cred-1",
+          rawId: new Uint8Array([1]).buffer,
+          type: "public-key",
+          response: {
+            clientDataJSON: new Uint8Array([2]).buffer,
+            authenticatorData: new Uint8Array([3]).buffer,
+            signature: new Uint8Array([4]).buffer,
+          },
+        }),
+      },
+      writable: true,
+      configurable: true,
+    });
+    vi.mocked(api.webauthnAssertBegin).mockResolvedValue({
+      publicKey: { challenge: "AAAA" },
+    });
+
+    render(<TokensPage />);
+    await screen.findByText("alex-laptop");
+    await userEvent.type(screen.getByPlaceholderText("alex-laptop"), "alex-phone");
+    await userEvent.click(screen.getByRole("button", { name: "Create token" }));
+
+    await screen.findByDisplayValue("plaintext-bearer-token");
+    expect(api.createToken).toHaveBeenCalledWith("alex-phone", { webauthnAssertion: expect.any(String) });
+
+    Reflect.deleteProperty(window, "PublicKeyCredential");
+    Reflect.deleteProperty(navigator, "credentials");
   });
 
   it("falls back to the raw URI when the enrollment URI cannot be parsed", async () => {

@@ -279,14 +279,22 @@ export const api = {
   // backend ever wraps it, this must change with it.
   listTokens: (signal?: AbortSignal) => request<ReviewerToken[]>("/api/tokens", { signal }),
 
-  // createToken's TOTP requirement is conditional server-side (backend's
-  // createToken doc comment): required once any device has ever been
-  // enrolled, not required for the very first (bootstrap) enrollment. totpCode
-  // is therefore optional here rather than mandatory like createGrant/
-  // approveGrantRequest/renewGrant — the caller passes what it has and the
-  // server decides whether it was needed.
-  createToken: (label: string, totpCode?: string) =>
-    request<CreatedReviewerToken>("/api/tokens", { method: "POST", body: JSON.stringify({ label }), totpCode }),
+  // createToken's SecondFactor requirement is conditional server-side
+  // (backend's createToken doc comment): required once any device has ever
+  // enrolled a factor of either kind, not for the very first (bootstrap)
+  // enrollment or after the direct-database break-glass recovery in
+  // docs/operations.md restores that same state. factor is therefore an
+  // empty object rather than mandatory like createGrant/approveGrantRequest/
+  // renewGrant's SecondFactor argument — pages/secondFactor.ts's
+  // promptSecondFactor(action, { optional: true }) is what produces that
+  // empty object when there is nothing to prove; the caller passes whatever
+  // it collected and the server decides whether it was needed. Same either-
+  // factor shape as every other gated mutation (TOTP or a WebAuthn
+  // assertion), so a reviewer whose only surviving factor is a passkey can
+  // still mint a replacement token — see the 2026-08-09 decision in
+  // docs/decisions.md.
+  createToken: (label: string, factor: SecondFactor) =>
+    request<CreatedReviewerToken>("/api/tokens", { method: "POST", body: JSON.stringify({ label }), ...factor }),
 
   revokeToken: (id: string) => request<void>(`/api/tokens/${id}/revoke`, { method: "POST" }),
 
