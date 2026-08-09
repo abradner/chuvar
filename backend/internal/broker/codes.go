@@ -12,11 +12,13 @@ const (
 	// NoGrant: never granted, expired, or revoked. Correct agent response
 	// per the doc: request a grant; consult repo signing policy.
 	//
-	// Also returned for a payload that fails to parse as a well-formed git
-	// commit object, or that already carries a gpgsig header — see
-	// SCOPE_DENIED's own doc comment for why those two land under
-	// SCOPE_DENIED instead, and NoGrant is reserved for "no active grant
-	// matches the presented token at all."
+	// Reserved strictly for "no active grant matches the presented token at
+	// all" — the cache.Lookup miss at the top of Preflight/Sign. A payload
+	// that fails to parse as a well-formed git commit object, or that already
+	// carries a gpgsig header, does NOT land here: the token matched a live
+	// grant, so those are SCOPE_DENIED (see that code's own doc comment for
+	// why the whole content-shaped question of what a signing grant authorizes
+	// folds into SCOPE_DENIED rather than a new code).
 	NoGrant Code = "NO_GRANT"
 
 	// ScopeDenied: an active grant was found (the token matched), but it
