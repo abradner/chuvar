@@ -403,7 +403,7 @@ func seedCapabilityGrant(t *testing.T, admin *pgxpool.Pool) string {
 	require.NoError(t, admin.QueryRow(ctx,
 		`INSERT INTO grants (subject, kind, depth, expires_at) VALUES ('agent-broker', 'capability', NULL, NULL) RETURNING id`,
 	).Scan(&id))
-	_, err := admin.Exec(ctx, `INSERT INTO grant_scopes (grant_id, scope) VALUES ($1, 'git.sign')`, id)
+	_, err := admin.Exec(ctx, `INSERT INTO grant_scopes (grant_id, scope) VALUES ($1, 'git.sign:github.com/abradner/chuvar')`, id)
 	require.NoError(t, err)
 	_, err = admin.Exec(ctx, `INSERT INTO capability_grant_identities (grant_id, committer_email) VALUES ($1, 'agent@example.com')`, id)
 	require.NoError(t, err)
@@ -441,7 +441,7 @@ func TestBrokerRoleCanDoItsActualJob(t *testing.T) {
 
 	t.Run("append to audit_log — insertSignAuditLog", func(t *testing.T) {
 		_, err := broker.Exec(ctx,
-			`INSERT INTO audit_log (event_type, subject, grant_id, scopes) VALUES ('capability_signed', 'agent-broker', $1, ARRAY['git.sign'])`,
+			`INSERT INTO audit_log (event_type, subject, grant_id, scopes) VALUES ('capability_signed', 'agent-broker', $1, ARRAY['git.sign:github.com/abradner/chuvar'])`,
 			grantID)
 		require.NoError(t, err, "the broker role could not append to audit_log")
 	})
@@ -475,7 +475,7 @@ func TestBrokerRoleCanAppendButNotReadAuditLog(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := broker.Exec(ctx,
-		`INSERT INTO audit_log (event_type, subject, scopes) VALUES ('capability_signed', 'agent-broker', ARRAY['git.sign'])`)
+		`INSERT INTO audit_log (event_type, subject, scopes) VALUES ('capability_signed', 'agent-broker', ARRAY['git.sign:github.com/abradner/chuvar'])`)
 	require.NoError(t, err, "the broker role could not append to audit_log")
 
 	var n int
