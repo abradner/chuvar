@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -71,15 +72,42 @@ func loadCapabilityGrants(ctx context.Context, pool *pgxpool.Pool) ([]grantRow, 
 	return out, nil
 }
 
+// signAuditDetail is the non-sensitive, stable descriptor of what a single
+// capability_signed row represents, serialized into audit_log.detail. It
+// deliberately carries NO raw payload content (principle 9: never add a
+// plaintext-content surface) — only a sha256 digest of the unsigned commit
+// payload and the committer identity the signature attributes to, both of
+// which are already-derivable, non-secret facts. Without it every signature
+// under one grant recorded detail '{}' and multiple commits signed on one
+// grant were indistinguishable in the trail — an exercise of authority you
+// cannot attribute to a specific object is barely audited (principle 6).
+type signAuditDetail struct {
+	// PayloadSHA256 is the hex sha256 of the exact unsigned commit payload
+	// that was signed — a stable identifier of the signed object that reveals
+	// nothing about its contents.
+	PayloadSHA256 string `json:"payload_sha256"`
+	// CommitterEmail is the parsed committer identity the signature
+	// attributes the commit to. Cheap to record here and already stored in
+	// plaintext in capability_grant_identities, so it is not a new secret
+	// surface — it makes a row legible without a join.
+	CommitterEmail string `json:"committer_email"`
+}
+
 // insertSignAuditLog records one successful signing operation. Synchronous
 // on the sign path, deliberately — see internal/broker/broker.go's doc
 // comment on why the audit write, unlike the grant-authorization check that
-// precedes it, is not purely in-process state.
-func insertSignAuditLog(ctx context.Context, pool *pgxpool.Pool, subject, grantID, scope string) error {
-	_, err := pool.Exec(ctx, `
+// precedes it, is not purely in-process state. detail is threaded from the
+// sign path so each row names the specific object it signed (see
+// signAuditDetail).
+func insertSignAuditLog(ctx context.Context, pool *pgxpool.Pool, subject, grantID, scope string, detail signAuditDetail) error {
+	detailJSON, err := json.Marshal(detail)
+	if err != nil {
+		return fmt.Errorf("broker: marshaling sign audit detail: %w", err)
+	}
+	_, err = pool.Exec(ctx, `
 		INSERT INTO audit_log (event_type, subject, grant_id, scopes, detail)
-		VALUES ('capability_signed', $1, $2, $3, '{}'::jsonb)
-	`, subject, grantID, []string{scope})
+		VALUES ('capability_signed', $1, $2, $3, $4::jsonb)
+	`, subject, grantID, []string{scope}, detailJSON)
 	if err != nil {
 		return fmt.Errorf("broker: inserting sign audit log: %w", err)
 	}

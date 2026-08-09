@@ -10,6 +10,8 @@ package broker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -138,13 +140,20 @@ func (b *Broker) Sign(ctx context.Context, req Request) Result {
 	// object, and its committer must be the identity this specific grant
 	// authorizes — see codes.go's ScopeDenied doc comment for why both
 	// failure shapes land on that code rather than a new one.
+	// commit.Parse's ErrMalformed is deliberately structural and carries no
+	// payload-derived bytes (see commit.go's malformed doc) — so surfacing
+	// err.Error() to the socket client here leaks nothing attacker-controlled
+	// and cannot be amplified into an oversized response by a giant header
+	// value. Do NOT interpolate parsed payload fields into a client-facing
+	// message for the same reason: the committer-mismatch case below reports
+	// the structural fact ("does not match this grant's authorized identity")
+	// without echoing the attacker-supplied, unbounded committer string.
 	c, err := commit.Parse(req.Payload)
 	if err != nil {
 		return Result{Code: ScopeDenied, Message: "refusing to sign: " + err.Error()}
 	}
 	if c.CommitterEmail != entry.CommitterEmail {
-		return Result{Code: ScopeDenied, Message: fmt.Sprintf(
-			"refusing to sign: committer %q does not match this grant's authorized identity", c.CommitterEmail)}
+		return Result{Code: ScopeDenied, Message: "refusing to sign: committer does not match this grant's authorized identity"}
 	}
 
 	signer, err := b.key.Signer()
@@ -173,7 +182,17 @@ func (b *Broker) Sign(ctx context.Context, req Request) Result {
 		return Result{Code: BackendUnreachable, Message: "signing failed: " + err.Error()}
 	}
 
-	if err := insertSignAuditLog(ctx, b.pool, entry.Subject, entry.GrantID, req.Scope); err != nil {
+	// Attribute this row to the specific object signed: the sha256 of the
+	// unsigned payload plus the committer identity, both non-sensitive (see
+	// signAuditDetail). Digest the exact bytes that were signed (req.Payload,
+	// which is also what sshsig.Sign consumed above), so the trail identifies
+	// the signed object, not a reserialization of it.
+	digest := sha256.Sum256(req.Payload)
+	detail := signAuditDetail{
+		PayloadSHA256:  hex.EncodeToString(digest[:]),
+		CommitterEmail: c.CommitterEmail,
+	}
+	if err := insertSignAuditLog(ctx, b.pool, entry.Subject, entry.GrantID, req.Scope, detail); err != nil {
 		return Result{Code: BackendUnreachable, Message: "signature computed but could not be audited; refusing to return it: " + err.Error()}
 	}
 
@@ -184,6 +203,29 @@ func (b *Broker) Sign(ctx context.Context, req Request) Result {
 // deliberately, so preflight can never say OK to a request Sign would then
 // refuse (an agent doing exactly what the design asks, "ask before
 // starting," must never get a false positive from the cheap call).
+//
+// What this broker enforces today, stated exactly (principle 8, "claims name
+// their adversary — and must hold"): the grant's authorized committer
+// identity (broker.go's Sign, the CommitterEmail match), a well-formed,
+// not-already-signed git commit payload (commit.Parse), and the
+// operation:target scope STRING the caller presents (checkScope below:
+// operation == git.sign, a target is present, and the grant covers it).
+//
+// What it does NOT enforce — the residual, stated plainly rather than
+// aspirationally claimed: the signature is NOT bound to the repository the
+// scope target names. A git commit object carries no repository identity (only
+// tree/parent object ids), and checkScope validates only the caller-supplied
+// req.Scope, never the payload's tree/parents against the repo the target
+// names. The adversary is our own user's confused/injected agent (principle 2)
+// holding a legitimate git.sign:<repoA> grant: it can label the request with
+// repoA's scope (passing every check here) while submitting a well-formed
+// commit destined for repoB with the permitted committer email, and receive a
+// valid "git" SSHSIG usable in repoB — an object the human approver authorized
+// for repoA only. This is architectural (the payload has no repo identity to
+// check against), deliberately shipped documented-and-ticketed rather than
+// enforced in this PR; real binding is designed in issue #106. Do not read
+// this as "repo binding is stated but not enforced" cover for adding a weaker
+// check: until #106 lands there is NO repository binding at all.
 //
 // Three checks, in order:
 //

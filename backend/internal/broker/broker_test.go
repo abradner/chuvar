@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -429,6 +431,146 @@ func TestBroker_Sign_GpgsigHeaderRejected(t *testing.T) {
 	res := b.Sign(context.Background(), Request{Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar", Payload: payload})
 	if res.Code != ScopeDenied {
 		t.Fatalf("Sign() with a gpgsig header already present = %+v, want SCOPE_DENIED", res)
+	}
+}
+
+// TestBroker_Sign_DoubledCommitterRefused is finding 1 at the broker level:
+// a payload whose grant-authorized committer comes first (passing the
+// identity match) but which carries a SECOND committer git would resolve %ce
+// from must not be signed — commit.Parse's duplicate-header rejection stops
+// it before any signature is produced.
+func TestBroker_Sign_DoubledCommitterRefused(t *testing.T) {
+	b, cache := testBroker(t)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
+	if err := cache.Load(context.Background()); err != nil {
+		t.Fatalf("cache.Load: %v", err)
+	}
+
+	payload := []byte("tree " + validTree + "\n" +
+		"author Agent <agent@example.com> 1723190400 +0000\n" +
+		"committer Agent <agent@example.com> 1723190400 +0000\n" +
+		"committer Attacker <attacker@evil.com> 1723190400 +0000\n\ncommit message\n")
+
+	res := b.Sign(context.Background(), Request{Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar", Payload: payload})
+	if res.Code != ScopeDenied {
+		t.Fatalf("Sign() with a doubled committer header = %+v, want SCOPE_DENIED", res)
+	}
+	if res.Signature != "" {
+		t.Fatal("Sign() produced a signature over a payload with two committer headers")
+	}
+}
+
+// TestBroker_Sign_ErrorDoesNotEchoPayloadBytes is finding 3: the SCOPE_DENIED
+// message for a malformed payload (and for a committer mismatch) must be a
+// bounded, structural description that contains none of the attacker-supplied
+// input bytes — otherwise payload-sized/secret content reaches wrapper/client
+// logs and an oversized header amplifies a rejection into a huge response.
+func TestBroker_Sign_ErrorDoesNotEchoPayloadBytes(t *testing.T) {
+	b, cache := testBroker(t)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
+	if err := cache.Load(context.Background()); err != nil {
+		t.Fatalf("cache.Load: %v", err)
+	}
+
+	const marker = "SUPERSECRETMARKER_deadbeefcafe"
+
+	// Malformed: the tree value is an invalid hex id carrying the marker.
+	// The old error interpolated the rejected tree value verbatim.
+	malformed := []byte("tree " + marker + strings.Repeat("A", 4096) + "\n" +
+		"author Agent <agent@example.com> 1723190400 +0000\n" +
+		"committer Agent <agent@example.com> 1723190400 +0000\n\nmsg\n")
+	res := b.Sign(context.Background(), Request{Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar", Payload: malformed})
+	if res.Code != ScopeDenied {
+		t.Fatalf("Sign() with a malformed payload = %+v, want SCOPE_DENIED", res)
+	}
+	if strings.Contains(res.Message, marker) {
+		t.Fatalf("malformed-payload message echoed attacker input bytes: %q", res.Message)
+	}
+	if len(res.Message) > 512 {
+		t.Fatalf("malformed-payload message is not bounded: %d bytes", len(res.Message))
+	}
+
+	// Committer mismatch: a well-formed commit whose committer email carries
+	// the marker but does not match the grant. The old message interpolated
+	// the attacker-supplied committer email verbatim.
+	mismatch := []byte("tree " + validTree + "\n" +
+		"author Agent <agent@example.com> 1723190400 +0000\n" +
+		"committer Agent <" + marker + strings.Repeat("z", 4096) + "@evil.com> 1723190400 +0000\n\nmsg\n")
+	res = b.Sign(context.Background(), Request{Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar", Payload: mismatch})
+	if res.Code != ScopeDenied {
+		t.Fatalf("Sign() with a mismatched committer = %+v, want SCOPE_DENIED", res)
+	}
+	if strings.Contains(res.Message, marker) {
+		t.Fatalf("committer-mismatch message echoed attacker input bytes: %q", res.Message)
+	}
+	if len(res.Message) > 512 {
+		t.Fatalf("committer-mismatch message is not bounded: %d bytes", len(res.Message))
+	}
+}
+
+// TestBroker_Sign_AuditDetailIdentifiesSignedObject is finding 4: two
+// different payloads signed under the SAME grant must record distinct,
+// non-sensitive digests in audit_log.detail, so the trail can attribute each
+// exercise of authority to the specific object signed (principle 6). The
+// digest is a sha256 of the unsigned payload — no raw content (principle 9).
+func TestBroker_Sign_AuditDetailIdentifiesSignedObject(t *testing.T) {
+	b, cache := testBroker(t)
+	fx := insertCapabilityGrant(t, b.pool, "agent-a", "agent@example.com", []string{"git.sign:github.com/abradner/chuvar"}, nil)
+	if err := cache.Load(context.Background()); err != nil {
+		t.Fatalf("cache.Load: %v", err)
+	}
+
+	payloadA := commitPayload("agent@example.com")
+	payloadB := []byte("tree " + validTree + "\n" +
+		"author Agent <agent@example.com> 1723190400 +0000\n" +
+		"committer Agent <agent@example.com> 1723190400 +0000\n\na different message\n")
+
+	for _, p := range [][]byte{payloadA, payloadB} {
+		res := b.Sign(context.Background(), Request{Op: "sign", Token: fx.Token, Scope: "git.sign:github.com/abradner/chuvar", Payload: p})
+		if res.Code != OK {
+			t.Fatalf("Sign() = %+v, want OK", res)
+		}
+	}
+
+	rows, err := b.pool.Query(context.Background(),
+		`SELECT detail->>'payload_sha256', detail->>'committer_email' FROM audit_log WHERE grant_id = $1 AND event_type = 'capability_signed'`,
+		fx.GrantID)
+	if err != nil {
+		t.Fatalf("querying audit_log detail: %v", err)
+	}
+	defer rows.Close()
+
+	digests := map[string]bool{}
+	n := 0
+	for rows.Next() {
+		var digest, email string
+		if err := rows.Scan(&digest, &email); err != nil {
+			t.Fatalf("scanning detail: %v", err)
+		}
+		if digest == "" {
+			t.Fatal("audit_log.detail has no payload_sha256 — the row does not identify what was signed")
+		}
+		if email != "agent@example.com" {
+			t.Fatalf("detail committer_email = %q, want agent@example.com", email)
+		}
+		digests[digest] = true
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating rows: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("got %d capability_signed rows, want 2", n)
+	}
+	if len(digests) != 2 {
+		t.Fatalf("two different payloads recorded the same digest — audit cannot distinguish them: %v", digests)
+	}
+
+	// The digests are exactly sha256(payload), not a reserialization.
+	sumA := sha256.Sum256(payloadA)
+	sumB := sha256.Sum256(payloadB)
+	if !digests[hex.EncodeToString(sumA[:])] || !digests[hex.EncodeToString(sumB[:])] {
+		t.Fatalf("recorded digests %v do not match sha256 of the exact signed payloads", digests)
 	}
 }
 
