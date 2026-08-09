@@ -121,6 +121,74 @@ func TestOnePasswordBackendTruncatesLongErrorOutput(t *testing.T) {
 	require.Less(t, len(err.Error()), len(long), "long op stderr was not truncated")
 }
 
+// Unseal must refuse rather than silently succeed when the calling
+// environment carries a designed-for-automation credential that would let
+// `op` authenticate with zero human interaction — see ambientOpAuthVar's
+// doc comment and OnePasswordBackend's package doc for the adversary this
+// defends against. The stub script would return a valid key if reached;
+// asserting the specific error (rather than merely "some error") also
+// confirms Unseal never even shells out to `op` in this case.
+func TestOnePasswordBackendRefusesAmbientServiceAccountToken(t *testing.T) {
+	raw, err := GenerateKey()
+	require.NoError(t, err)
+	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", "ops_fake_automation_token")
+
+	cli := writeStubOp(t, fmt.Sprintf("printf %%s %q\n", base64.StdEncoding.EncodeToString(raw)))
+	b := &OnePasswordBackend{Reference: "op://Private/chuvar-master-key/password", CLIPath: cli}
+
+	_, err = b.Unseal(context.Background())
+	require.ErrorContains(t, err, "OP_SERVICE_ACCOUNT_TOKEN")
+	require.ErrorContains(t, err, "no human interaction")
+}
+
+// A cached interactive `op signin` session (OP_SESSION_<account>) is the
+// other non-interactive path — present in the environment, it authenticates
+// `op` for the remainder of its TTL without re-prompting.
+func TestOnePasswordBackendRefusesAmbientSessionToken(t *testing.T) {
+	raw, err := GenerateKey()
+	require.NoError(t, err)
+	t.Setenv("OP_SESSION_my_account", "cached_session_token")
+
+	cli := writeStubOp(t, fmt.Sprintf("printf %%s %q\n", base64.StdEncoding.EncodeToString(raw)))
+	b := &OnePasswordBackend{Reference: "op://Private/chuvar-master-key/password", CLIPath: cli}
+
+	_, err = b.Unseal(context.Background())
+	require.ErrorContains(t, err, "OP_SESSION_my_account")
+}
+
+// A normal environment (no ambient 1Password auth vars) must be unaffected
+// by the new check — this is the control for the two tests above.
+func TestOnePasswordBackendSucceedsWithoutAmbientAuthVars(t *testing.T) {
+	raw, err := GenerateKey()
+	require.NoError(t, err)
+
+	cli := writeStubOp(t, fmt.Sprintf("printf %%s %q\n", base64.StdEncoding.EncodeToString(raw)))
+	b := &OnePasswordBackend{Reference: "op://Private/chuvar-master-key/password", CLIPath: cli}
+
+	key, err := b.Unseal(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, raw, key)
+}
+
+func TestAmbientOpAuthVarDetection(t *testing.T) {
+	tests := []struct {
+		name    string
+		environ []string
+		want    string
+	}{
+		{"empty", nil, ""},
+		{"unrelated vars only", []string{"PATH=/usr/bin", "HOME=/home/x"}, ""},
+		{"service account token", []string{"OP_SERVICE_ACCOUNT_TOKEN=abc"}, "OP_SERVICE_ACCOUNT_TOKEN"},
+		{"session token", []string{"OP_SESSION_myaccount=abc"}, "OP_SESSION_myaccount"},
+		{"prefix collision only, not a match", []string{"OP_SERVICE_ACCOUNT_TOKEN_BUT_NOT=abc"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, ambientOpAuthVar(tt.environ))
+		})
+	}
+}
+
 func TestOnePasswordBackendRejectsEmptyReference(t *testing.T) {
 	b := &OnePasswordBackend{CLIPath: writeStubOp(t, "printf 'unused'\n")}
 	_, err := b.Unseal(context.Background())

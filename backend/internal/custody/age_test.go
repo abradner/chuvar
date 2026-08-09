@@ -215,6 +215,35 @@ func TestAgeBackendRejectsMissingPassphraseFile(t *testing.T) {
 	require.Error(t, err)
 }
 
+// Sealed() must distinguish the two ways a passphrase can be delivered: a
+// PassphrasePath file sits right next to the key file, readable by the same
+// same-OS-user adversary with zero human interaction (no more protection
+// than FileBackend's plaintext key), while an in-memory Passphrase implies
+// it was sourced from a human-present prompt and never touches disk. See
+// AgeBackend.Sealed's doc comment for the full statement.
+func TestAgeBackendSealedReflectsPassphraseDelivery(t *testing.T) {
+	t.Run("interactive passphrase reports sealed", func(t *testing.T) {
+		b := &AgeBackend{Path: "irrelevant.age", Passphrase: "correct horse battery staple"}
+		require.True(t, b.Sealed())
+	})
+
+	t.Run("co-located passphrase file reports NOT sealed", func(t *testing.T) {
+		b := &AgeBackend{Path: "irrelevant.age", PassphrasePath: "/some/co-located/passphrase"}
+		require.False(t, b.Sealed(),
+			"PassphrasePath is a same-OS-user-readable file, same exposure as FileBackend's "+
+				"plaintext key; Sealed() must not claim otherwise")
+	})
+
+	t.Run("both set: PassphrasePath takes precedence and reports NOT sealed", func(t *testing.T) {
+		b := &AgeBackend{
+			Path:           "irrelevant.age",
+			PassphrasePath: "/some/co-located/passphrase",
+			Passphrase:     "correct horse battery staple",
+		}
+		require.False(t, b.Sealed())
+	})
+}
+
 func TestAgeBackendRejectsEmptyPassphraseFile(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "master.key.age")

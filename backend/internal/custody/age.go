@@ -33,7 +33,11 @@ import (
 //     exception to remember.
 //   - PassphrasePath: the actual secret. Read the same way config.Secret
 //     reads a required credential's <KEY>_FILE (see readPrivateFile) —
-//     refused if the file is regular but readable beyond its owner.
+//     refused if the file is regular but readable beyond its owner. Note
+//     that "readable only by this file's owner" is not the same guarantee
+//     as "readable only by a human" — see Sealed's doc comment for which
+//     adversary each delivery mode (PassphrasePath vs. Passphrase) actually
+//     defends against.
 //
 // The plaintext key is stored as the raw KeyLen bytes inside the age
 // envelope, not base64 the way FileBackend's plaintext file is: FileBackend
@@ -45,15 +49,31 @@ type AgeBackend struct {
 	Path string
 
 	// PassphrasePath points to a file holding the decryption passphrase.
-	// Takes precedence over Passphrase when set — see the type doc for why
-	// a file is the preferred delivery shape.
+	// Takes precedence over Passphrase when set.
+	//
+	// CAVEAT — read before using this in a real deployment (see Sealed's doc
+	// comment for the full statement): a passphrase co-located on disk next
+	// to Path is readable, with zero human interaction, by exactly the same
+	// same-OS-user adversary who can already read Path — the primary
+	// adversary AGENTS.md §3.0 puts in scope for at-rest protection (an
+	// instruction-following agent, or commodity exfiltration malware,
+	// running as the operator's own OS user). Against that adversary this
+	// mode buys nothing over FileBackend's plaintext key: the attacker
+	// reads two 0600 files instead of one, still fully offline, still no
+	// prompt. It only helps against a narrower adversary — one who reaches
+	// the database or a backup but not the general filesystem. Use it only
+	// when that narrower guarantee (plus restart-without-a-human) is the
+	// accepted trade, not as a default "preferred for real deployments."
 	PassphrasePath string
 
-	// Passphrase is the decryption passphrase already resident in memory.
-	// Exists for tests and for callers that already sourced the passphrase
-	// from a human-present prompt at boot; PassphrasePath is preferred for
-	// real deployments so the passphrase never has to transit a struct
-	// literal built from other config.
+	// Passphrase is the decryption passphrase already resident in memory,
+	// sourced from a human-present prompt at boot (see Backend.Unseal's doc
+	// comment on why that ceremony is the one point chuvar requires operator
+	// presence). Because the passphrase never touches disk, this — not
+	// PassphrasePath — is the configuration that actually delivers the
+	// guarantee Sealed() reports: protection against the same-OS-user
+	// adversary named on PassphrasePath's doc, not just the narrower
+	// database-only one.
 	Passphrase string
 
 	// AllowCreate permits sealing a fresh key under the passphrase when Path
@@ -66,15 +86,42 @@ type AgeBackend struct {
 
 func (b *AgeBackend) Name() string { return "age" }
 
-// Sealed is true: the key is encrypted at rest under a passphrase run
-// through scrypt, unlike FileBackend's plaintext file. It still relies on
-// the passphrase's strength and on PassphrasePath's own permissions — this
-// package does not enforce a minimum passphrase entropy, which is an honest
-// gap, not a claim this type overstates.
-func (b *AgeBackend) Sealed() bool { return true }
+// Sealed reports whether this configuration protects the key against the
+// primary adversary AGENTS.md §3.0 puts in scope for at-rest protection: an
+// instruction-following agent, or commodity exfiltration malware, reading
+// the filesystem as the operator's own OS user. The age ciphertext and its
+// scrypt KDF buy nothing against that adversary if the passphrase needed to
+// open it sits in a second file the same attacker can also read — so
+// Sealed() is keyed on *how the passphrase was delivered*, not merely on
+// whether the key file is ciphertext:
+//
+//   - PassphrasePath set: false. The passphrase is a co-located 0600 file;
+//     Unseal reads both files automatically with no human interaction, which
+//     is exactly FileBackend's plaintext-key exposure with extra steps. See
+//     PassphrasePath's doc comment for the full statement.
+//   - Passphrase set (PassphrasePath empty): true. The passphrase was
+//     sourced from a human-present prompt at boot and never reaches disk, so
+//     this configuration genuinely denies the same-OS-user adversary the key
+//     — modulo the passphrase's strength, which this package does not
+//     enforce a minimum entropy for (an honest gap, not a claim overstated
+//     here).
+//
+// Neither mode defends against an attacker who can read this process's own
+// memory while it holds the passphrase or the unsealed key (see the package
+// doc's stated runtime residual) — Sealed() is an at-rest claim only.
+func (b *AgeBackend) Sealed() bool { return b.PassphrasePath == "" }
 
 func (b *AgeBackend) passphrase() (string, error) {
 	if b.PassphrasePath != "" {
+		// Deliberately noisy, mirroring FileBackend.warnUnsealed: this mode
+		// reports Sealed() == false (see its doc comment) for a real reason,
+		// and the moment that becomes background noise nobody notices is the
+		// moment a PoC deployment quietly becomes the real one.
+		slog.Warn("custody: age backend configured with PassphrasePath — the decryption "+
+			"passphrase is a co-located file, readable with no human interaction by anyone who "+
+			"can read the master key file itself; this is NOT sealed against that adversary, "+
+			"only against one who reaches the database but not the filesystem (see "+
+			"AgeBackend.PassphrasePath's doc comment)", "backend", b.Name(), "path", b.PassphrasePath)
 		return readPrivateFile(b.PassphrasePath)
 	}
 	if b.Passphrase != "" {

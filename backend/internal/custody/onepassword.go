@@ -6,14 +6,32 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
 
 // OnePasswordBackend fetches the master key from 1Password by shelling out
-// to the `op` CLI — biometric/system-auth release is exactly the
-// human-present ceremony Backend.Unseal's doc comment describes, and it's
-// 1Password's own desktop app that prompts for it, not this package.
+// to the `op` CLI — biometric/system-auth release is meant to be the
+// human-present ceremony Backend.Unseal's doc comment describes, with
+// 1Password's own desktop app prompting for it, not this package.
+//
+// That guarantee is only as good as the environment `op` runs in. Unseal
+// below shells out with no Env override, so `op` inherits this process's
+// full environment — and 1Password's CLI honours two designed-for-
+// automation, non-interactive auth paths that would let it return the key
+// with zero human interaction: OP_SERVICE_ACCOUNT_TOKEN (a credential meant
+// for unattended automation) and OP_SESSION_<account> (the token a prior
+// `op signin` caches for its session TTL). Either one present in the
+// calling environment defeats the whole point of this backend against the
+// primary adversary AGENTS.md §3.0 names — an instruction-following agent,
+// or commodity exfiltration malware, running as the operator's own OS
+// user — which is exactly "zero ambient authority" (CLAUDE.md principle 3):
+// an env var reachable through a legitimate interface is a bug, not a
+// convenience. Unseal refuses outright when it detects either var, rather
+// than silently proceeding. What this package cannot detect from here: a
+// cached 1Password *desktop-app* session (its own IPC channel, no env var
+// footprint) — an honest residual gap, not a claim this backend closes.
 //
 // # Required setup
 //
@@ -53,7 +71,10 @@ func (b *OnePasswordBackend) Name() string { return "1password" }
 // account's Secret Key and password, independent of anything in this
 // package — the strongest of the three shipped-or-designed backends by that
 // measure, at the cost of depending on 1Password's own availability and CLI
-// being present and authenticated.
+// being present and authenticated. This is an at-rest claim about the vault,
+// not a claim that every Unseal call is human-gated — see the package doc
+// comment and Unseal's ambient-auth-var check for the narrower, separate
+// guarantee (and its limits) around the human-present ceremony.
 func (b *OnePasswordBackend) Sealed() bool { return true }
 
 func (b *OnePasswordBackend) cliPath() string {
@@ -61,6 +82,22 @@ func (b *OnePasswordBackend) cliPath() string {
 		return b.CLIPath
 	}
 	return "op"
+}
+
+// ambientOpAuthVar reports the name of the first environment variable in
+// environ that lets `op` authenticate with zero human interaction, or "" if
+// none is present. See the package doc comment on OnePasswordBackend for why
+// this specific pair of variables defeats the ceremony this backend exists
+// to provide, and for the residual (desktop-app session caching) this check
+// cannot see.
+func ambientOpAuthVar(environ []string) string {
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if name == "OP_SERVICE_ACCOUNT_TOKEN" || strings.HasPrefix(name, "OP_SESSION_") {
+			return name
+		}
+	}
+	return ""
 }
 
 // Unseal shells out to `op read` for Reference. It never logs or otherwise
@@ -73,6 +110,15 @@ func (b *OnePasswordBackend) Unseal(ctx context.Context) ([]byte, error) {
 	if !strings.HasPrefix(b.Reference, "op://") {
 		return nil, fmt.Errorf("custody: OnePasswordBackend.Reference %q is not an op:// "+
 			"secret reference", b.Reference)
+	}
+	// Fail closed, loudly (CLAUDE.md principle 5) rather than silently
+	// letting a non-interactive `op` auth path stand in for the human-
+	// present ceremony this backend promises. See ambientOpAuthVar's doc.
+	if v := ambientOpAuthVar(os.Environ()); v != "" {
+		return nil, fmt.Errorf("custody: refusing to unseal via 1Password: %s is set in this "+
+			"process's environment, which would let `op read` succeed with no human interaction "+
+			"instead of the biometric/system-auth ceremony this backend requires — unset it or "+
+			"launch apiserver without it (see OnePasswordBackend's doc comment)", v)
 	}
 
 	cmd := exec.CommandContext(ctx, b.cliPath(), "read", "--no-newline", b.Reference)
