@@ -292,6 +292,13 @@ should trigger from it.
   bot): review fully as normal; unanswered comments on batch PRs are the workflow operating as
   designed, not feedback being ignored.
 
+- **Security-critical features can be built competitively — `.claude/skills/competition-build`.**
+  2–3 independent implementations of one brief, adversarial judges, only the survivor becomes a
+  PR, escalate a tier only when every attempt has blocking holes. Opt-in, for trust-boundary work
+  or unattended runs; it decides *what* enters the batch flow, it doesn't replace it. Whenever
+  more than one branch is in flight against the same package — competitively or not — run
+  `.claude/skills/stack-integration-check` before opening the PRs.
+
 ### Review discipline
 
 The v0 build (Jul 2026) shipped 12 commits, then got an independent, adversarial
@@ -346,6 +353,20 @@ during the build, than as a single pass at the end. Before considering a commit 
   run `.claude/skills/independent-commit-review` — one fresh-eyes subagent per
   commit, no prior context, adversarial framing. Don't review your own work and call
   it independent.
+- **Per-branch review is blind to what happens between branches.** Two branches can
+  each be correct, each be green, and still implement the same shared function in
+  opposite directions — the suites pass because each only tests the cases that behave
+  identically either way. Run `.claude/skills/stack-integration-check` on the
+  combination as soon as the candidate branches exist. Cautionary example: two
+  branches shipped opposite `scope.Covers` semantics for untargeted-grant-vs-targeted-
+  request, and a third silently deleted a validation chokepoint the branch below it
+  had introduced. Both were caught by diffing branches against each other, not by any
+  test run.
+- **Never relay a subagent's finding without checking it against git.** Read the diff,
+  grep the branch, run the command — then say whether you're reporting what you
+  verified or what you were told. Agents commit correct work and then fail at
+  reporting it; two agents contradicting each other are usually both right about
+  different artifacts.
 
 ### Go
 - Idiomatic standard-library-first Go: `net/http`'s built-in method+path routing is enough for
