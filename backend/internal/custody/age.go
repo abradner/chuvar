@@ -105,11 +105,16 @@ func (b *AgeBackend) Name() string { return "age" }
 //     — modulo the passphrase's strength, which this package does not
 //     enforce a minimum entropy for (an honest gap, not a claim overstated
 //     here).
+//   - Neither set: false. The backend has no passphrase source at all and
+//     cannot unseal — Unseal errors — so it protects nothing; reporting
+//     sealed would claim an at-rest guarantee for a configuration that opens
+//     no key, the very overstatement CLAUDE.md principle 8 forbids.
 //
-// Neither mode defends against an attacker who can read this process's own
-// memory while it holds the passphrase or the unsealed key (see the package
-// doc's stated runtime residual) — Sealed() is an at-rest claim only.
-func (b *AgeBackend) Sealed() bool { return b.PassphrasePath == "" }
+// Neither configured mode defends against an attacker who can read this
+// process's own memory while it holds the passphrase or the unsealed key (see
+// the package doc's stated runtime residual) — Sealed() is an at-rest claim
+// only.
+func (b *AgeBackend) Sealed() bool { return b.PassphrasePath == "" && b.Passphrase != "" }
 
 func (b *AgeBackend) passphrase() (string, error) {
 	if b.PassphrasePath != "" {
@@ -184,9 +189,17 @@ func (b *AgeBackend) Unseal(ctx context.Context) ([]byte, error) {
 	// the primary control).
 	raw, err := io.ReadAll(io.LimitReader(r, KeyLen+1))
 	if err != nil {
+		// A partial read still decrypted up to KeyLen+1 bytes of authenticated
+		// plaintext into raw — potentially the whole master key plus a byte.
+		// We're rejecting it, so zero it rather than abandon a copy to the GC.
+		clear(raw)
 		return nil, fmt.Errorf("custody: read decrypted age key file %s: %w", b.Path, err)
 	}
 	if len(raw) != KeyLen {
+		// A KeyLen+1 payload here contains a full 32-byte key plus one byte;
+		// wipe it before rejecting so no extra copy of key material outlives
+		// this call. (The too-short case zeroes harmlessly.)
+		clear(raw)
 		return nil, fmt.Errorf("custody: age key file %s holds %d bytes, want %d: %w",
 			b.Path, len(raw), KeyLen, ErrKeyLen)
 	}

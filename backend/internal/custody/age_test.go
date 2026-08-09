@@ -242,6 +242,46 @@ func TestAgeBackendSealedReflectsPassphraseDelivery(t *testing.T) {
 		}
 		require.False(t, b.Sealed())
 	})
+
+	// Neither delivery mode configured: the backend cannot unseal at all, so it
+	// must not claim to be sealed — that would assert an at-rest guarantee for a
+	// config that opens no key (CLAUDE.md principle 8).
+	t.Run("neither set reports NOT sealed", func(t *testing.T) {
+		b := &AgeBackend{Path: "irrelevant.age"}
+		require.False(t, b.Sealed(),
+			"an unconfigured AgeBackend protects nothing; Sealed() must not report true")
+	})
+}
+
+// readPrivateFile must strip only the trailing line ending an editor or `echo`
+// leaves behind, never intentional leading/trailing spaces or tabs — a
+// passphrase is arbitrary text and those bytes may be part of the secret. An
+// all-whitespace file still carries no secret and is rejected.
+func TestReadPrivateFilePreservesIntentionalWhitespace(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("preserves surrounding spaces, strips only the newline", func(t *testing.T) {
+		p := filepath.Join(dir, "spaced")
+		require.NoError(t, os.WriteFile(p, []byte("  pass phrase with edges  \n"), 0o600))
+		v, err := readPrivateFile(p)
+		require.NoError(t, err)
+		require.Equal(t, "  pass phrase with edges  ", v)
+	})
+
+	t.Run("strips a CRLF ending", func(t *testing.T) {
+		p := filepath.Join(dir, "crlf")
+		require.NoError(t, os.WriteFile(p, []byte("secret\r\n"), 0o600))
+		v, err := readPrivateFile(p)
+		require.NoError(t, err)
+		require.Equal(t, "secret", v)
+	})
+
+	t.Run("rejects an all-whitespace file", func(t *testing.T) {
+		p := filepath.Join(dir, "blank")
+		require.NoError(t, os.WriteFile(p, []byte("   \t\n"), 0o600))
+		_, err := readPrivateFile(p)
+		require.ErrorContains(t, err, "is empty")
+	})
 }
 
 func TestAgeBackendRejectsEmptyPassphraseFile(t *testing.T) {

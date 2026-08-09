@@ -189,6 +189,35 @@ func TestAmbientOpAuthVarDetection(t *testing.T) {
 	}
 }
 
+// The `op` subprocess must run in a sanitised, allow-listed environment — it
+// must NOT inherit the apiserver's wider environment (DATABASE_URL, bootstrap
+// tokens, unrelated secrets). The stub dumps its own environment to a file so
+// the test can assert exactly what crossed the process boundary.
+func TestOnePasswordBackendSanitizesSubprocessEnv(t *testing.T) {
+	raw, err := GenerateKey()
+	require.NoError(t, err)
+
+	// Secrets that live in the apiserver's environment and must not reach `op`.
+	t.Setenv("DATABASE_URL", "postgres://user:secret@localhost:5432/chuvar")
+	t.Setenv("CHUVAR_UNRELATED_SECRET", "bootstrap-token-value")
+
+	envDump := filepath.Join(t.TempDir(), "env.dump")
+	cli := writeStubOp(t, fmt.Sprintf("env > %q\nprintf %%s %q\n",
+		envDump, base64.StdEncoding.EncodeToString(raw)))
+	b := &OnePasswordBackend{Reference: "op://Private/chuvar-master-key/password", CLIPath: cli}
+
+	key, err := b.Unseal(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, raw, key)
+
+	dump, err := os.ReadFile(envDump)
+	require.NoError(t, err)
+	got := string(dump)
+	require.NotContains(t, got, "DATABASE_URL", "op subprocess inherited DATABASE_URL from the apiserver env")
+	require.NotContains(t, got, "CHUVAR_UNRELATED_SECRET", "op subprocess inherited an unrelated apiserver secret")
+	require.Contains(t, got, "PATH=", "op subprocess is missing PATH from the allow-list")
+}
+
 func TestOnePasswordBackendRejectsEmptyReference(t *testing.T) {
 	b := &OnePasswordBackend{CLIPath: writeStubOp(t, "printf 'unused'\n")}
 	_, err := b.Unseal(context.Background())

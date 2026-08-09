@@ -278,11 +278,17 @@ func checkPrivateFileMode(info fs.FileInfo, path string) error {
 }
 
 // readPrivateFile reads a secret from disk, refusing loose permissions first
-// via checkPrivateFileMode and trimming the trailing newline any editor or
-// `echo` leaves behind — the same shape config.Secret uses to read a
+// via checkPrivateFileMode — the same shape config.Secret uses to read a
 // required credential's <KEY>_FILE, reproduced here rather than imported so
 // this package stays free of a dependency on internal/config's env-var
 // lookup semantics, which don't apply to an explicit file path.
+//
+// It trims only the trailing line ending (`\n` or `\r\n`) an editor or `echo`
+// leaves behind — NOT spaces or tabs, which may be intentional characters of
+// the secret (an age passphrase is arbitrary text, unlike the connection
+// strings and tokens config.Secret trims with TrimSpace, so the trimming
+// deliberately differs there). An all-whitespace or empty file carries no
+// secret and is still rejected.
 func readPrivateFile(path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -295,8 +301,8 @@ func readPrivateFile(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("custody: read %s: %w", path, err)
 	}
-	v := strings.TrimSpace(string(raw))
-	if v == "" {
+	v := strings.TrimRight(string(raw), "\r\n")
+	if strings.TrimSpace(v) == "" {
 		return "", fmt.Errorf("custody: %s is empty", path)
 	}
 	return v, nil

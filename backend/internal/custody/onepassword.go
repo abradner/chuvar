@@ -100,6 +100,38 @@ func ambientOpAuthVar(environ []string) string {
 	return ""
 }
 
+// opEnvAllowlist names the only environment variables the child `op` process
+// is given. The subprocess is spawned with an explicitly constructed Env (not
+// left nil, which would inherit os.Environ()) so it never sees the apiserver's
+// wider environment — DATABASE_URL, bootstrap tokens, unrelated secrets — none
+// of which `op read` needs. It is an allow-list, not a deny-list, on purpose:
+// a secret added to the apiserver's environment later can never silently start
+// leaking into a subprocess this package spawns. Note what is deliberately
+// absent: the OP_SERVICE_ACCOUNT_TOKEN / OP_SESSION_* automation credentials
+// Unseal refuses above — withholding them from the child as well is
+// belt-and-suspenders, since the biometric/desktop ceremony this backend
+// requires locates its own IPC socket via HOME/XDG, not an env token.
+var opEnvAllowlist = []string{
+	"PATH",            // resolve `op`'s own helper lookups
+	"HOME",            // 1Password CLI reads ~/.config/op and finds the desktop socket
+	"XDG_CONFIG_HOME", // config-dir override, when set
+	"XDG_RUNTIME_DIR", // where the desktop-app integration socket lives, when set
+	"XDG_DATA_HOME",   // data-dir override, when set
+}
+
+// opChildEnv builds the minimal, allow-listed environment for the `op`
+// subprocess. See opEnvAllowlist for why the child does not inherit
+// os.Environ().
+func opChildEnv() []string {
+	env := make([]string, 0, len(opEnvAllowlist))
+	for _, name := range opEnvAllowlist {
+		if v, ok := os.LookupEnv(name); ok {
+			env = append(env, name+"="+v)
+		}
+	}
+	return env
+}
+
 // Unseal shells out to `op read` for Reference. It never logs or otherwise
 // persists what comes back — the returned bytes are the only place the key
 // material touches this process.
@@ -122,6 +154,9 @@ func (b *OnePasswordBackend) Unseal(ctx context.Context) ([]byte, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, b.cliPath(), "read", "--no-newline", b.Reference)
+	// Sanitise the subprocess environment: `op` gets a minimal allow-list, not
+	// this process's entire environment. See opEnvAllowlist's doc comment.
+	cmd.Env = opChildEnv()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -142,13 +177,26 @@ func (b *OnePasswordBackend) Unseal(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("custody: op read %s: %w", b.Reference, err)
 	}
 
-	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(stdout.String()))
+	// op wrote the base64-encoded key into stdout's buffer. Decode straight
+	// from those mutable bytes — not stdout.String(), which makes an immutable
+	// string copy of the key that the GC later abandons without zeroing — and
+	// wipe op's response buffer, plus any intermediate slice that held decoded
+	// key bytes, on every return path. The returned `key` is the sole copy of
+	// the master key that leaves this process.
+	b64 := stdout.Bytes()
+	defer clear(b64)
+
+	key := make([]byte, base64.StdEncoding.DecodedLen(len(b64)))
+	n, err := base64.StdEncoding.Decode(key, bytes.TrimSpace(b64))
 	if err != nil {
+		clear(key)
 		return nil, fmt.Errorf("custody: decode 1Password field at %s: %w", b.Reference, err)
 	}
-	if len(key) != KeyLen {
+	key = key[:n]
+	if n != KeyLen {
+		clear(key)
 		return nil, fmt.Errorf("custody: 1Password field at %s holds %d bytes, want %d: %w",
-			b.Reference, len(key), KeyLen, ErrKeyLen)
+			b.Reference, n, KeyLen, ErrKeyLen)
 	}
 	return key, nil
 }
