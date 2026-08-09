@@ -466,6 +466,47 @@ func TestCreateGrant_CapabilityKindWithNoDepthSucceeds(t *testing.T) {
 	}
 }
 
+// TestCreateGrant_CapabilityKindRequiresTargetedScope is the require-target
+// rule decided 2026-08-09 (docs/capability-broker.md): a capability-kind
+// grant with an untargeted scope must be refused at creation, not silently
+// accepted as a grant that (per Covers' fail-closed target semantics) could
+// never authorize a targeted request anyway.
+func TestCreateGrant_CapabilityKindRequiresTargetedScope(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"git.sign"}, "capability", "", nil, "human-reviewer"); err == nil {
+		t.Fatal("CreateGrant() with kind=capability and an untargeted scope: want error, got nil (fail-closed: an untargeted capability scope is rejected at creation)")
+	}
+
+	// No partial grant left behind by the rejected call.
+	grants, err := s.ListGrants(ctx, "agent-a")
+	if err != nil {
+		t.Fatalf("ListGrants() error = %v", err)
+	}
+	if len(grants) != 0 {
+		t.Fatalf("ListGrants() after a rejected CreateGrant() = %+v, want none", grants)
+	}
+}
+
+// TestCreateGrant_MemoryKindUntargetedScopeStillSucceeds pins the "memory
+// scopes are unaffected" half of the same decision: an ordinary memory-kind
+// scope (which never carries a target) must keep working exactly as before,
+// even though it's syntactically "untargeted" in the same sense a rejected
+// capability scope is.
+func TestCreateGrant_MemoryKindUntargetedScopeStillSucceeds(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() with kind=memory and an untargeted (ordinary) scope: error = %v, want nil", err)
+	}
+	if g.Kind != GrantKindMemory {
+		t.Errorf("Kind = %q, want %q", g.Kind, GrantKindMemory)
+	}
+}
+
 func TestStagedDiffs_ProposeCommitAndSupersede(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
