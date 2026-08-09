@@ -2,11 +2,19 @@
 -- of issue #72, resolved in the 2026-08-09 decision log entry "Signing policy
 -- lives broker-side, in the consent plane," docs/capability-broker.md).
 --
--- One row per repository identifier — the same string shape as a capability
--- scope's target (e.g. `git.sign:github.com/abradner/chuvar`, per the
--- 2026-08-09 scope-grammar decision), though this table is keyed on the bare
--- repo string rather than a scope value: nothing here depends on
--- internal/scope's colon-target grammar landing, which is still unbuilt.
+-- One row per repository identifier, keyed on the bare repo string (the
+-- target half of a capability scope like `git.sign:github.com/abradner/chuvar`,
+-- per the 2026-08-09 scope-grammar decision) rather than a scope value:
+-- nothing here depends on internal/scope's colon-target grammar landing, which
+-- is still unbuilt. What IS enforced today: internal/api's validateRepo
+-- canonicalizes-or-rejects the repo to that bare target form — lowercase host,
+-- host/owner/repo shape, no URL scheme, no `.git` suffix, no trailing slash, no
+-- `..` segment — on both the write and the read path, so a `required` policy
+-- can never be set under one spelling and evaded under a divergent one. That
+-- canonicalization is API-layer only; the column below is a plain TEXT PRIMARY
+-- KEY with no CHECK for the shape (unlike policy, which has both), so validateRepo
+-- is its sole enforcement. Full repo-identifier grammar unification with
+-- internal/scope's target validation is tracked in issue #98.
 --
 -- policy is a closed vocabulary — required/preferred/off — and the CHECK
 -- constraint below is the enforcement (AGENTS.md §6's deletion test):
