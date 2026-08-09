@@ -56,6 +56,11 @@ func TestValidate_Target(t *testing.T) {
 		{"target with shell metacharacter rejected", "git.sign:host;rm -rf", true},
 		{"target with at-sign (scp-style) rejected", "git.sign:user@host", true},
 		{"invalid operation segment with valid target still rejected", "Git.Sign:github.com/a/b", true},
+		{"target is a bare traversal segment", "fs.write:..", true},
+		{"target with leading traversal segment", "fs.write:../../../etc/passwd", true},
+		{"target with embedded traversal segment", "fs.write:code/../../../etc/passwd", true},
+		{"target with trailing traversal segment", "fs.write:code/worktrees/..", true},
+		{"target with dot-dot as part of a longer segment is not traversal", "fs.write:code/foo..bar/baz", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

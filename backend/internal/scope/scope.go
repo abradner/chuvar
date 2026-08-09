@@ -55,6 +55,17 @@ var segmentPattern = regexp.MustCompile(`^[a-z0-9_]+$`)
 //   - No `~` (shell/library-specific home-directory expansion — not part of
 //     this grammar; the fs.write:~/code/worktrees/** example in the decision
 //     doc is explicitly aspirational, not committed).
+//   - No `..` path segment. The charset alone allows `.` and `/`, which
+//     together spell directory traversal ("../../../etc/passwd") even though
+//     Covers only ever does exact-string comparison today and grants no
+//     unintended access by itself. This package is the one chokepoint every
+//     downstream target consumer shares (see above), including the future
+//     fs.write:~/code/worktrees/** operation class the decision log names —
+//     the day a consumer treats a target as a filesystem path prefix instead
+//     of an opaque string, a validated `..` becomes a real escape, and this
+//     is the only place that can still catch it. Checked separately from
+//     targetPattern (see hasTraversalSegment) because it's a structural rule
+//     about path segments, not a charset rule.
 //
 // What it does allow: letters (both cases — unlike operation segments,
 // targets are expected to hold hostnames and repo paths like
@@ -64,6 +75,22 @@ var segmentPattern = regexp.MustCompile(`^[a-z0-9_]+$`)
 // the decided example without inventing grammar the decision didn't commit
 // to.
 var targetPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
+// hasTraversalSegment reports whether target contains a literal ".." path
+// segment — i.e. target itself is "..", or ".." appears between two "/"
+// (or at either end). This is a structural check, not a charset one: "/"
+// and "." are both individually allowed (repo paths and hostnames need
+// them), but the segment ".." specifically is directory-traversal syntax
+// and has no legitimate meaning for any target this package currently
+// documents (hostnames, repo paths) — see targetPattern's doc comment.
+func hasTraversalSegment(target string) bool {
+	for _, seg := range strings.Split(target, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
 
 // MaxLength bounds how long a single scope string can be — operation, the
 // colon, and target together, since they share one TEXT column and no
@@ -94,11 +121,11 @@ func split(s Scope) (op string, target string, hasTarget bool) {
 // before the first colon, or the whole string if there is no colon) must be
 // non-empty, dot-delimited, lowercase alphanumeric/underscore segments —
 // exactly the pre-existing rule, unchanged. If a colon is present, the
-// target (everything after the first colon) must additionally be non-empty
-// and match the conservative charset in targetPattern. The whole string,
-// including any target, is bounded by MaxLength. Validate does not check
-// segments or targets against any known taxonomy — there isn't a fixed one
-// (yet).
+// target (everything after the first colon) must additionally be non-empty,
+// match the conservative charset in targetPattern, and contain no ".." path
+// segment (see hasTraversalSegment). The whole string, including any
+// target, is bounded by MaxLength. Validate does not check segments or
+// targets against any known taxonomy — there isn't a fixed one (yet).
 func Validate(s Scope) error {
 	if s == "" {
 		return fmt.Errorf("scope: empty scope is not valid")
@@ -122,6 +149,9 @@ func Validate(s Scope) error {
 		}
 		if !targetPattern.MatchString(target) {
 			return fmt.Errorf("scope: invalid target %q in %q (targets must be letters/digits/./-/_ or /)", target, s)
+		}
+		if hasTraversalSegment(target) {
+			return fmt.Errorf("scope: target %q in %q contains a %q path segment (directory traversal is not a valid target)", target, s, "..")
 		}
 	}
 	return nil
