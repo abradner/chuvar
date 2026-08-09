@@ -11,10 +11,23 @@ import (
 	"strings"
 )
 
-// Scope is a dot-delimited hierarchical access scope.
+// Scope is a dot-delimited hierarchical access scope, with an optional
+// colon-delimited target: `<dotted-operation>[:<target>]` — e.g.
+// "git.sign:github.com/abradner/chuvar" (capability-broker.md, "Scope
+// grammar: dotted operation, optional colon-delimited target", 2026-08-09).
+// Memory scopes never carry a target and are untouched by this addition.
 type Scope string
 
 var segmentPattern = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+// targetPattern is deliberately looser than segmentPattern: a target names
+// something in another system's own namespace (a repo path, a host), not a
+// chuvar scope segment, so it needs to hold '/' and '.' at minimum for a
+// value like "github.com/abradner/chuvar". Exact-match targets only, per the
+// decision — this pattern exists to bound what can be stored and compared,
+// not to define a glob/path-pattern grammar (there isn't one yet, and the
+// decision is explicit that there shouldn't be until a real need names one).
+var targetPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 
 // MaxLength bounds how long a single scope string can be. No real taxonomy needs
 // anywhere near this many characters — it exists to stop a pathological input from
@@ -23,9 +36,36 @@ var segmentPattern = regexp.MustCompile(`^[a-z0-9_]+$`)
 // read (the store package, added later in this series).
 const MaxLength = 256
 
-// Validate checks that s is well-formed: non-empty, bounded length, dot-delimited,
-// lowercase alphanumeric/underscore segments. It does not check the segments
-// against any known taxonomy — there isn't a fixed one (yet).
+// split divides s into its operation and target parts at the first ':'. The
+// second return value is false when s carries no target at all (a bare
+// memory-style scope, or a capability scope with no target restriction) —
+// distinct from a target that happens to be the empty string, which split
+// itself never produces since Validate rejects a trailing bare ':'.
+func (s Scope) split() (op string, target string, hasTarget bool) {
+	str := string(s)
+	idx := strings.IndexByte(str, ':')
+	if idx < 0 {
+		return str, "", false
+	}
+	return str[:idx], str[idx+1:], true
+}
+
+// Operation returns the dotted-operation part of s, stripping any
+// colon-delimited target. For a scope with no target it is s unchanged.
+// Exported for callers that implement exactly one operation class and must
+// refuse every other (brokerd pins requests to "git.sign" with this —
+// authorizing purely on Covers would let a grant row seeded with an
+// unrelated operation's scope exercise an operation its human never named).
+func (s Scope) Operation() Scope {
+	op, _, _ := s.split()
+	return Scope(op)
+}
+
+// Validate checks that s is well-formed: non-empty, bounded length, a
+// dot-delimited lowercase alphanumeric/underscore operation, with an optional
+// ':'-delimited target. It does not check the operation segments or the
+// target against any known taxonomy — there isn't a fixed one (yet), for
+// either half.
 func Validate(s Scope) error {
 	if s == "" {
 		return fmt.Errorf("scope: empty scope is not valid")
@@ -36,7 +76,28 @@ func Validate(s Scope) error {
 		// where the bound exists to avoid unbounded work on bad input.
 		return fmt.Errorf("scope: exceeds max length %d (got %d characters)", MaxLength, len(s))
 	}
-	segments := strings.Split(string(s), ".")
+	op, target, hasTarget := s.split()
+	if hasTarget && !targetPattern.MatchString(target) {
+		return fmt.Errorf("scope: invalid target %q in %q (must be non-empty and match %s)", target, s, targetPattern)
+	}
+	if hasTarget {
+		// Reject path-traversal-shaped '/'-segments ("." and "..") in a
+		// target outright. Inert today — Covers matches targets by exact
+		// string equality only (the 2026-08-09 decision: no globs, no path
+		// patterns) — but the same colon-delimited grammar is the one a
+		// future capability class with path-shaped targets (the design doc's
+		// own fs.write example) would layer prefix/path semantics onto, and
+		// a stored target that aliases another path under such semantics
+		// must never have been storable in the first place. Closing it at
+		// validation time costs nothing and removes a foot-gun a later
+		// operation class would otherwise inherit silently.
+		for _, seg := range strings.Split(target, "/") {
+			if seg == "." || seg == ".." {
+				return fmt.Errorf("scope: invalid target %q in %q (path-traversal segments %q are not allowed)", target, s, seg)
+			}
+		}
+	}
+	segments := strings.Split(op, ".")
 	for _, seg := range segments {
 		if !segmentPattern.MatchString(seg) {
 			return fmt.Errorf("scope: invalid segment %q in %q (segments must be lowercase alphanumeric/underscore)", seg, s)
@@ -45,15 +106,38 @@ func Validate(s Scope) error {
 	return nil
 }
 
-// Covers reports whether the granted scope g authorizes the requested scope r —
-// either an exact match, or g is an ancestor of r in the dotted hierarchy. Granting
-// "projects.spritz" authorizes "projects.spritz.read" and "projects.spritz.write",
-// but not "projects.spritzy" (segment-boundary match, not a raw string prefix).
+// Covers reports whether the granted scope g authorizes the requested scope r.
+// The operation half keeps its original hierarchical semantics unchanged:
+// either an exact match, or g's operation is an ancestor of r's in the dotted
+// hierarchy (granting "projects.spritz" authorizes "projects.spritz.read",
+// not "projects.spritzy" — segment-boundary match, not a raw string prefix).
+//
+// The target half is new: a grant with no target (hasTarget false — every
+// existing memory scope, plus an operation-wide capability grant) covers a
+// request regardless of that request's target, same as before this scope
+// gained targets at all. A grant that does specify a target only covers a
+// request for that exact target — never a request with no target specified,
+// and never a different one. Exact-match only, per the 2026-08-09 decision:
+// no prefix/glob matching on targets.
 func (g Scope) Covers(r Scope) bool {
+	gOp, gTarget, gHasTarget := g.split()
+	rOp, rTarget, rHasTarget := r.split()
+	if !opCovers(gOp, rOp) {
+		return false
+	}
+	if !gHasTarget {
+		return true
+	}
+	return rHasTarget && gTarget == rTarget
+}
+
+// opCovers is Covers' pre-target-grammar logic, applied to the operation half
+// of each scope only.
+func opCovers(g, r string) bool {
 	if g == r {
 		return true
 	}
-	return strings.HasPrefix(string(r), string(g)+".")
+	return strings.HasPrefix(r, g+".")
 }
 
 // AnyCovers reports whether any scope in granted covers r.

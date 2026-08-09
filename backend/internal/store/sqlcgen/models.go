@@ -24,6 +24,18 @@ type AuditLog struct {
 	GrantRequestID *string
 }
 
+type CapabilityGrantIdentity struct {
+	GrantID        string
+	CommitterEmail string
+	CreatedAt      time.Time
+}
+
+type CapabilityGrantToken struct {
+	GrantID   string
+	TokenHash []byte
+	CreatedAt time.Time
+}
+
 type DataKey struct {
 	Purpose    string
 	WrappedKey []byte

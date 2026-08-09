@@ -21,6 +21,17 @@ func TestValidate(t *testing.T) {
 		{"leading dot", ".projects", true},
 		{"uppercase", "Projects.Spritz", true},
 		{"whitespace", "projects spritz", true},
+		{"targeted capability scope", "git.sign:github.com/abradner/chuvar", false},
+		{"target with dots, slashes, hyphens", "git.sign:github.com/abradner/chuvar-repo.git", false},
+		{"empty target after colon", "git.sign:", true},
+		{"target with whitespace", "git.sign:not a target", true},
+		{"target with colon", "git.sign:host:port/path", true},
+		{"invalid operation with target present", "Git.Sign:github.com/x", true},
+		{"target of a lone dot-dot", "git.sign:..", true},
+		{"target with a dot-dot path segment", "git.sign:github.com/../other-org/repo", true},
+		{"target with a lone-dot path segment", "git.sign:github.com/./repo", true},
+		{"target with a trailing dot-dot segment", "git.sign:github.com/abradner/..", true},
+		{"dots inside a target name are fine", "git.sign:github.com/abradner/chuvar..mirror", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -91,6 +102,71 @@ func TestScope_Covers(t *testing.T) {
 				t.Errorf("%q.Covers(%q) = %v, want %v", tt.granted, tt.request, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestScope_Covers_Target(t *testing.T) {
+	tests := []struct {
+		name    string
+		granted Scope
+		request Scope
+		want    bool
+	}{
+		{
+			"exact target match",
+			"git.sign:github.com/abradner/chuvar", "git.sign:github.com/abradner/chuvar", true,
+		},
+		{
+			"different target, same operation, denied",
+			"git.sign:github.com/abradner/chuvar", "git.sign:github.com/other/repo", false,
+		},
+		{
+			"targeted grant does not cover an untargeted request",
+			"git.sign:github.com/abradner/chuvar", "git.sign", false,
+		},
+		{
+			"untargeted grant covers any target",
+			"git.sign", "git.sign:github.com/abradner/chuvar", true,
+		},
+		{
+			"untargeted grant covers an untargeted request",
+			"git.sign", "git.sign", true,
+		},
+		{
+			"target exact-match only, no prefix match",
+			"git.sign:github.com/abradner", "git.sign:github.com/abradner/chuvar", false,
+		},
+		{
+			"operation hierarchy still applies alongside a target",
+			"git:github.com/abradner/chuvar", "git.sign:github.com/abradner/chuvar", true,
+		},
+		{
+			"same target, different operation, denied",
+			"git.sign:github.com/abradner/chuvar", "git.push:github.com/abradner/chuvar", false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.granted.Covers(tt.request); got != tt.want {
+				t.Errorf("%q.Covers(%q) = %v, want %v", tt.granted, tt.request, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScope_Operation(t *testing.T) {
+	tests := []struct {
+		s    Scope
+		want Scope
+	}{
+		{"git.sign:github.com/abradner/chuvar", "git.sign"},
+		{"git.sign", "git.sign"},
+		{"identity.basic", "identity.basic"},
+	}
+	for _, tt := range tests {
+		if got := tt.s.Operation(); got != tt.want {
+			t.Errorf("%q.Operation() = %q, want %q", tt.s, got, tt.want)
+		}
 	}
 }
 

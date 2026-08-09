@@ -321,7 +321,7 @@ func TestServiceRolesCanRunTheBootSchemaCheck(t *testing.T) {
 	admin := adminPool(t)
 	ctx := context.Background()
 
-	for _, role := range []string{"chuvar_agent", "chuvar_app"} {
+	for _, role := range []string{"chuvar_agent", "chuvar_app", "chuvar_broker"} {
 		t.Run(role, func(t *testing.T) {
 			pool := connectAs(t, admin, role)
 			require.NoError(t, CheckSchema(ctx, pool),
@@ -337,7 +337,7 @@ func TestServiceRolesCannotWriteTheVersionTable(t *testing.T) {
 	admin := adminPool(t)
 	ctx := context.Background()
 
-	for _, role := range []string{"chuvar_agent", "chuvar_app"} {
+	for _, role := range []string{"chuvar_agent", "chuvar_app", "chuvar_broker"} {
 		t.Run(role, func(t *testing.T) {
 			pool := connectAs(t, admin, role)
 			_, err := pool.Exec(ctx, `UPDATE schema_migrations SET dirty = false`)
@@ -387,4 +387,163 @@ func TestAgentRoleCannotReadOtherSubjectsProposals(t *testing.T) {
 	// The generated columns it does need remain readable.
 	var n int
 	require.NoError(t, agent.QueryRow(ctx, `SELECT count(id) FROM staged_diffs`).Scan(&n))
+}
+
+// --- chuvar_broker (brokerd, issues #95/#79) ---
+//
+// seedCapabilityGrant inserts a minimal, fully-provisioned capability grant
+// (grants row plus its scope, identity, and token content) as admin, the
+// same four-piece shape internal/broker's own loadCapabilityGrants query
+// requires — see that package's migration comment. Returns the grant id.
+func seedCapabilityGrant(t *testing.T, admin *pgxpool.Pool) string {
+	t.Helper()
+	ctx := context.Background()
+
+	var id string
+	require.NoError(t, admin.QueryRow(ctx,
+		`INSERT INTO grants (subject, kind, depth, expires_at) VALUES ('agent-broker', 'capability', NULL, NULL) RETURNING id`,
+	).Scan(&id))
+	_, err := admin.Exec(ctx, `INSERT INTO grant_scopes (grant_id, scope) VALUES ($1, 'git.sign')`, id)
+	require.NoError(t, err)
+	_, err = admin.Exec(ctx, `INSERT INTO capability_grant_identities (grant_id, committer_email) VALUES ($1, 'agent@example.com')`, id)
+	require.NoError(t, err)
+	_, err = admin.Exec(ctx, `INSERT INTO capability_grant_tokens (grant_id, token_hash) VALUES ($1, decode('aa', 'hex'))`, id)
+	require.NoError(t, err)
+	return id
+}
+
+// Mirrors TestAgentRoleCanDoItsActualJob: everything internal/broker's
+// loadCapabilityGrants and insertSignAuditLog legitimately do must work, or
+// the role is a breakage rather than a constraint.
+func TestBrokerRoleCanDoItsActualJob(t *testing.T) {
+	admin := adminPool(t)
+	grantID := seedCapabilityGrant(t, admin)
+	broker := connectAs(t, admin, "chuvar_broker")
+	ctx := context.Background()
+
+	t.Run("read capability grant content — the loadCapabilityGrants join", func(t *testing.T) {
+		var subject, committerEmail string
+		var tokenHash []byte
+		require.NoError(t, broker.QueryRow(ctx, `
+			SELECT g.subject, ci.committer_email, ct.token_hash
+			FROM grants g
+			JOIN capability_grant_identities ci ON ci.grant_id = g.id
+			JOIN capability_grant_tokens ct ON ct.grant_id = g.id
+			WHERE g.id = $1`, grantID,
+		).Scan(&subject, &committerEmail, &tokenHash))
+		require.Equal(t, "agent-broker", subject)
+		require.Equal(t, "agent@example.com", committerEmail)
+
+		var n int
+		require.NoError(t, broker.QueryRow(ctx, `SELECT count(*) FROM grant_scopes WHERE grant_id = $1`, grantID).Scan(&n))
+		require.Equal(t, 1, n)
+	})
+
+	t.Run("append to audit_log — insertSignAuditLog", func(t *testing.T) {
+		_, err := broker.Exec(ctx,
+			`INSERT INTO audit_log (event_type, subject, grant_id, scopes) VALUES ('capability_signed', 'agent-broker', $1, ARRAY['git.sign'])`,
+			grantID)
+		require.NoError(t, err, "the broker role could not append to audit_log")
+	})
+}
+
+// Mirrors TestAgentRoleCannotReadSecretTables and extends it: brokerd has no
+// business anywhere near the facts path at all (internal/broker's package
+// doc — "never imports/touches facts"), which chuvar_agent's own table
+// (facts, fact_scopes ARE readable there) does not cover.
+func TestBrokerRoleCannotReadFactsOrSecretTables(t *testing.T) {
+	admin := adminPool(t)
+	broker := connectAs(t, admin, "chuvar_broker")
+	ctx := context.Background()
+
+	for _, table := range []string{"facts", "fact_scopes", "staged_diffs", "grant_requests", "reviewer_tokens", "data_keys"} {
+		t.Run(table, func(t *testing.T) {
+			var n int
+			err := broker.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&n)
+			require.Error(t, err, "the broker role could read %s", table)
+			require.ErrorContains(t, err, "permission denied")
+		})
+	}
+}
+
+// Append-only from the broker's side too, same posture and same reasoning
+// as TestAgentRoleCanAppendButNotReadAuditLog: it can attest what it
+// signed but never read the trail back, including its own past entries.
+func TestBrokerRoleCanAppendButNotReadAuditLog(t *testing.T) {
+	admin := adminPool(t)
+	broker := connectAs(t, admin, "chuvar_broker")
+	ctx := context.Background()
+
+	_, err := broker.Exec(ctx,
+		`INSERT INTO audit_log (event_type, subject, scopes) VALUES ('capability_signed', 'agent-broker', ARRAY['git.sign'])`)
+	require.NoError(t, err, "the broker role could not append to audit_log")
+
+	var n int
+	err = broker.QueryRow(ctx, `SELECT count(*) FROM audit_log`).Scan(&n)
+	require.Error(t, err, "the broker role could read audit_log")
+}
+
+// brokerd only ever reads grants/grant_scopes/capability_grant_* — it has no
+// grant-creation surface (issue #96) and must not be able to widen, revoke,
+// or otherwise mutate what it reads, mirroring
+// TestAgentRoleCannotGrantItselfScopes' "cannot grant itself scopes"
+// property for a role with an even narrower legitimate job.
+func TestBrokerRoleCannotWriteAnythingItReads(t *testing.T) {
+	admin := adminPool(t)
+	grantID := seedCapabilityGrant(t, admin)
+	broker := connectAs(t, admin, "chuvar_broker")
+	ctx := context.Background()
+
+	_, err := broker.Exec(ctx,
+		`INSERT INTO grants (subject, kind, depth, expires_at) VALUES ('rogue', 'capability', NULL, NULL)`)
+	require.Error(t, err, "the broker role could insert a grant")
+	require.ErrorContains(t, err, "permission denied")
+
+	_, err = broker.Exec(ctx, `UPDATE grants SET revoked_at = NULL WHERE id = $1`, grantID)
+	require.Error(t, err, "the broker role could un-revoke/modify a grant")
+
+	_, err = broker.Exec(ctx, `INSERT INTO grant_scopes (grant_id, scope) VALUES ($1, 'git.push')`, grantID)
+	require.Error(t, err, "the broker role could widen a grant's scopes")
+
+	_, err = broker.Exec(ctx,
+		`UPDATE capability_grant_identities SET committer_email = 'attacker@example.com' WHERE grant_id = $1`, grantID)
+	require.Error(t, err, "the broker role could rewrite a grant's authorized committer identity")
+
+	_, err = broker.Exec(ctx, `DELETE FROM capability_grant_tokens WHERE grant_id = $1`, grantID)
+	require.Error(t, err, "the broker role could delete a grant's socket-auth token")
+}
+
+// Mirrors TestAgentRoleHasNoDDL: brokerd must not be able to reshape the
+// schema — it holds decrypted signing key material, which makes an
+// unexpected DDL foothold a worse outcome here than for most roles, not a
+// lesser concern.
+func TestBrokerRoleHasNoDDL(t *testing.T) {
+	admin := adminPool(t)
+	broker := connectAs(t, admin, "chuvar_broker")
+	ctx := context.Background()
+
+	_, err := broker.Exec(ctx, `CREATE TABLE e8_probe_broker (id int)`)
+	require.Error(t, err, "the broker role could create a table")
+
+	_, err = broker.Exec(ctx, `DROP TABLE IF EXISTS grants`)
+	require.Error(t, err, "the broker role could drop a table")
+}
+
+// Mirrors TestNewTablesAreAgentInvisibleButAppWritable's asymmetry
+// assertion for the third role: a table added later must not become
+// broker-readable by default either — AGENTS.md §3.6's "widening the
+// agent's view is always a deliberate act" now applies to chuvar_broker
+// too (20260809150000_broker_role.up.sql's closing comment).
+func TestNewTablesAreBrokerInvisible(t *testing.T) {
+	admin := adminPool(t)
+	ctx := context.Background()
+
+	_, err := admin.Exec(ctx, `CREATE TABLE IF NOT EXISTS e8_future_table_broker (id int)`)
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), `DROP TABLE IF EXISTS e8_future_table_broker`) })
+
+	broker := connectAs(t, admin, "chuvar_broker")
+	var n int
+	err = broker.QueryRow(ctx, `SELECT count(*) FROM e8_future_table_broker`).Scan(&n)
+	require.Error(t, err, "a newly created table was readable by the broker role by default")
 }
