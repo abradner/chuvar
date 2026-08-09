@@ -21,12 +21,37 @@ import (
 // escapes, not a defensive nicety.
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `_`, `\_`, `%`, `\%`)
 
+// validateMemoryFactScopes enforces that every scope destined for a memory
+// fact is untargeted (scope.ValidateMemory). This is the precondition
+// scopePrefixes below silently relies on: it builds `<scope>.%` LIKE patterns
+// that treat the whole scope string as a dotted path with no notion of the
+// ":" target delimiter, so a targeted fact scope ("git.sign:repo.child")
+// would be matched by a grant's ancestor prefix ("git.sign:repo.%") exactly
+// as if the target were more dotted segments — a cross-target read Covers
+// forbids in Go, leaking in through SQL. Enforced at the fact write paths
+// (ProposeDiff, ApproveStagedDiff) so the read paths never have to. Found in
+// review of #99.
+func validateMemoryFactScopes(scopes []string) error {
+	for _, s := range scopes {
+		if err := scope.ValidateMemory(scope.Scope(s)); err != nil {
+			return fmt.Errorf("store: fact scope: %w", err)
+		}
+	}
+	return nil
+}
+
 // scopePrefixes converts grantedScopes into LIKE patterns that match a scope's
 // dotted descendants (e.g. "projects.spritz" -> "projects.spritz.%"), escaping
 // LIKE metacharacters. Shared by SearchFacts and findDedupeCandidate — both need
 // identical scope-visibility semantics, since the dedupe candidate search is a
 // second read path with the same confidentiality requirement as search: a fact
 // outside the caller's grants must not be observable through it either.
+//
+// Every scope reaching here is untargeted: fact scopes are validated by
+// validateMemoryFactScopes at write time, and grantedScopes come from memory
+// grants (validateScopesForKind rejects targeted memory-grant scopes).
+// Capability scopes never reach this function — they authorize via brokerd's
+// exact-match Covers, not this LIKE path.
 func scopePrefixes(grantedScopes []string) []string {
 	prefixes := make([]string, len(grantedScopes))
 	for i, g := range grantedScopes {

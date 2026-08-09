@@ -46,6 +46,16 @@ func (s *Store) ProposeDiff(ctx context.Context, subject, content string, scopes
 	if len(scopes) == 0 {
 		return StagedDiff{}, fmt.Errorf("store: diff must include at least one scope")
 	}
+	// A fact is always a memory-kind object, so its scopes must be untargeted
+	// (see scope.ValidateMemory): the fact-visibility LIKE queries below and in
+	// SearchFacts match scopes target-blind, so a targeted fact scope would be
+	// readable across targets. Reject at propose time for a clean early error;
+	// ApproveStagedDiff/CommitDiff re-checks at the actual fact-creation
+	// chokepoint so a staged_diffs row inserted some other way (psql, fixture)
+	// can't smuggle a targeted scope onto a live fact. Found in review of #99.
+	if err := validateMemoryFactScopes(scopes); err != nil {
+		return StagedDiff{}, err
+	}
 
 	if targetFactID != nil {
 		visible, err := s.factVisibleToScopes(ctx, *targetFactID, proposerGrantedScopes)
@@ -360,6 +370,17 @@ func (s *Store) CommitDiff(ctx context.Context, diffID, decidedBy string, embedd
 	var summaryParam *string
 	if summary != "" {
 		summaryParam = &summary
+	}
+
+	// The fact-creation chokepoint for the untargeted-memory-scope invariant
+	// (see ProposeDiff and scope.ValidateMemory). ProposeDiff already rejects
+	// targeted scopes, but this diff's proposed_scopes is plain TEXT[] with no
+	// format CHECK, so a row that reached the table any other way (psql, a
+	// fixture, a future import) must not be committable into a live fact
+	// carrying a target the visibility SQL would match target-blind. Checked
+	// before InsertFact so a bad diff writes nothing at all.
+	if err := validateMemoryFactScopes(diff.ProposedScopes); err != nil {
+		return Fact{}, err
 	}
 
 	factRow, err := qtx.InsertFact(ctx, sqlcgen.InsertFactParams{

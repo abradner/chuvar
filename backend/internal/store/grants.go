@@ -108,37 +108,48 @@ func validateKindAndDepth(kind, depth string) (GrantKind, string, error) {
 	return GrantKind(kind), depth, nil
 }
 
-// validateCapabilityScopes rejects a capability-kind grant (or grant
-// request) whose scopes aren't well-formed capability scopes — most
-// importantly, an untargeted one (decided 2026-08-09,
-// docs/capability-broker.md: "Capability scope Covers is fail-closed on
-// target; untargeted capability scopes are rejected at grant creation" —
-// see scope.ValidateCapability's doc comment for the full "why here, not in
-// scope.Validate" reasoning). A no-op for every other kind: memory scopes
-// keep being validated wherever they're validated today (internal/api,
-// internal/mcptools, via scope.Validate) — unchanged by this function,
-// which only exists for the one kind that has an extra rule.
+// validateScopesForKind rejects a grant (or grant request) whose scopes are
+// malformed for its kind. The two kinds have opposite, dual target rules and
+// both are fail-closed:
+//
+//   - capability: every scope MUST carry a target (decided 2026-08-09,
+//     docs/capability-broker.md: "Capability scope Covers is fail-closed on
+//     target; untargeted capability scopes are rejected at grant creation" —
+//     see scope.ValidateCapability's doc comment). An untargeted capability
+//     scope is a grant that can never cover the targeted request a real
+//     capability operation makes.
+//   - memory: no scope may carry a target (see scope.ValidateMemory). A
+//     targeted memory scope would be matched target-blind by the
+//     fact-visibility LIKE queries (scopePrefixes, facts.go), reintroducing
+//     the exact cross-target read Covers forbids — found in review of #99.
 //
 // Called from every path in this package that persists or reads back a
-// capability-kind grant's scopes: CreateGrant, RequestGrant (so a bad
-// request is refused before it's even staged, rather than accepted and
-// only rejected — confusingly, at approval time by someone who didn't
-// write it) and ApproveGrantRequest (so a grant_requests row that reached
-// the table some other way than RequestGrant — a fixture, an operator's
-// psql, a future bulk-import path; requested_scopes is plain TEXT[] with
-// no format CHECK constraint — can never be approved into a live
-// capability grant with an ambiguous, un-coverable scope). This is the
-// store-package analogue of the same defense-in-depth brokerd's own grant
-// cache load path needs: scopes read back from the database are exactly as
-// untrusted as scopes handed in fresh, because the database itself has no
-// format constraint to lean on.
-func validateCapabilityScopes(kind GrantKind, scopes []string) error {
-	if kind != GrantKindCapability {
-		return nil
-	}
+// grant's scopes: CreateGrant, RequestGrant (so a bad request is refused
+// before it's even staged, rather than accepted and only rejected —
+// confusingly, at approval time by someone who didn't write it) and
+// ApproveGrantRequest (so a grant_requests row that reached the table some
+// other way than RequestGrant — a fixture, an operator's psql, a future
+// bulk-import path; requested_scopes is plain TEXT[] with no format CHECK
+// constraint — can never be approved into a live grant with a malformed
+// scope). Scopes read back from the database are exactly as untrusted as
+// scopes handed in fresh, because the database itself has no format
+// constraint to lean on.
+func validateScopesForKind(kind GrantKind, scopes []string) error {
 	for _, s := range scopes {
-		if err := scope.ValidateCapability(scope.Scope(s)); err != nil {
-			return fmt.Errorf("store: capability grant scope: %w", err)
+		var err error
+		switch kind {
+		case GrantKindCapability:
+			err = scope.ValidateCapability(scope.Scope(s))
+		case GrantKindMemory:
+			err = scope.ValidateMemory(scope.Scope(s))
+		default:
+			// An unknown kind reached persistence — validateKindAndDepth is
+			// supposed to have rejected it upstream, but fail closed here
+			// rather than silently skip scope validation for it.
+			return fmt.Errorf("store: cannot validate scopes for unknown grant kind %q", kind)
+		}
+		if err != nil {
+			return fmt.Errorf("store: %s grant scope: %w", kind, err)
 		}
 	}
 	return nil
@@ -179,7 +190,7 @@ func (s *Store) CreateGrant(ctx context.Context, subject string, scopes []string
 	if err != nil {
 		return Grant{}, err
 	}
-	if err := validateCapabilityScopes(validKind, scopes); err != nil {
+	if err := validateScopesForKind(validKind, scopes); err != nil {
 		return Grant{}, err
 	}
 	if actor == "" {
