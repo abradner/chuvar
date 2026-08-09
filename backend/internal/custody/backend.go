@@ -20,7 +20,18 @@ import (
 // justifies an interface here under AGENTS.md §3.3: the file backend below
 // (headless Linux — the Pi), an OS keychain backend (macOS, where keychain
 // ACLs bind to the requesting application), and a password-manager backend
-// (1Password, with biometric release). Only the file backend exists today.
+// (1Password, with biometric release — OnePasswordBackend, below).
+//
+// The macOS keychain backend is a design note, not code yet: it would shell
+// out to (or cgo-bind) `security find-generic-password`, storing the key
+// under a service/account pair with an access-control-list entry scoped to
+// the calling binary's code-signature — the same "human-present unlock"
+// shape as the other two backends, satisfied by the OS prompting Touch
+// ID/password the first time a *newly signed* binary asks for the item.
+// Sealed() would report true. Not implemented because this fleet is
+// Linux-only today (AGENTS.md §2); the interface is already
+// implementation-compatible with it, which is the point of deciding the
+// interface now rather than when the second platform actually lands.
 type Backend interface {
 	// Unseal returns raw master key material of length KeyLen. Implementations
 	// that require a human-present ceremony block here, which is the one point
@@ -117,18 +128,15 @@ func (b *FileBackend) Unseal(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("custody: stat key file: %w", err)
 	}
 
-	// Regular files only. A path pointing at a FIFO or a character device turns
-	// os.ReadFile into an unbounded blocking read, so a misconfigured path (or
-	// one an attacker can influence) becomes a boot that never completes rather
-	// than one that fails. Refusing is both safer and far easier to diagnose.
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("custody: key file %s is not a regular file (mode %s); "+
-			"refusing to read it", path, info.Mode().Type())
-	}
-
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return nil, fmt.Errorf("custody: key file %s has mode %04o; it must not be readable "+
-			"or writable by group or other (chmod 600)", path, perm)
+	// Regular files only, not group/other readable. A path pointing at a FIFO
+	// or a character device turns os.ReadFile into an unbounded blocking read,
+	// so a misconfigured path (or one an attacker can influence) becomes a
+	// boot that never completes rather than one that fails; refusing is both
+	// safer and far easier to diagnose. checkPrivateFileMode is shared with
+	// AgeBackend below — see its doc comment for why the same check applies
+	// to every key-bearing file this package reads, not just this one.
+	if err := checkPrivateFileMode(info, path); err != nil {
+		return nil, err
 	}
 
 	raw, err := os.ReadFile(path)
@@ -246,4 +254,50 @@ func (e *Ephemeral) Unseal(ctx context.Context) ([]byte, error) {
 	// earlier in the same process. FileBackend is unaffected because it returns
 	// a freshly decoded slice per call.
 	return bytes.Clone(e.key), nil
+}
+
+// checkPrivateFileMode enforces "not readable or writable by group or other"
+// on every key-bearing file this package reads from disk — FileBackend's key
+// file, AgeBackend's ciphertext file, and AgeBackend's passphrase file all
+// share this exact check, deliberately: a secret (or, for AgeBackend's
+// ciphertext, low-entropy material an attacker could otherwise attack
+// offline) readable by another local user is the same failure mode no matter
+// which backend produced it, and config.Secret's <KEY>_FILE reads apply the
+// identical rule at the config layer — one posture, checked the same way
+// everywhere it appears.
+func checkPrivateFileMode(info fs.FileInfo, path string) error {
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("custody: %s is not a regular file (mode %s); refusing to read it",
+			path, info.Mode().Type())
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("custody: %s has mode %04o; it must not be readable or writable by "+
+			"group or other (chmod 600)", path, perm)
+	}
+	return nil
+}
+
+// readPrivateFile reads a secret from disk, refusing loose permissions first
+// via checkPrivateFileMode and trimming the trailing newline any editor or
+// `echo` leaves behind — the same shape config.Secret uses to read a
+// required credential's <KEY>_FILE, reproduced here rather than imported so
+// this package stays free of a dependency on internal/config's env-var
+// lookup semantics, which don't apply to an explicit file path.
+func readPrivateFile(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("custody: stat %s: %w", path, err)
+	}
+	if err := checkPrivateFileMode(info, path); err != nil {
+		return "", err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("custody: read %s: %w", path, err)
+	}
+	v := strings.TrimSpace(string(raw))
+	if v == "" {
+		return "", fmt.Errorf("custody: %s is empty", path)
+	}
+	return v, nil
 }
