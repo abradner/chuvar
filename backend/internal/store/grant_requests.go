@@ -78,7 +78,7 @@ func (s *Store) RequestGrant(ctx context.Context, subject string, scopes []strin
 	if err != nil {
 		return GrantRequest{}, err
 	}
-	if err := validateCapabilityScopes(validKind, scopes); err != nil {
+	if err := validateScopesForKind(validKind, scopes); err != nil {
 		return GrantRequest{}, err
 	}
 	if subject == "" {
@@ -197,9 +197,9 @@ func (s *Store) ApproveGrantRequest(ctx context.Context, id, decidedBy string) (
 	// is plain TEXT[] with no format CHECK constraint, so a pending request
 	// can reach this table by a path RequestGrant's own validation never ran
 	// on (a fixture, an operator's psql, a future bulk-import surface) —
-	// see validateCapabilityScopes's doc comment. Checked before any write in
+	// see validateScopesForKind's doc comment. Checked before any write in
 	// this transaction, so a rejection here leaves nothing to roll back.
-	if err := validateCapabilityScopes(GrantKind(req.Kind), req.RequestedScopes); err != nil {
+	if err := validateScopesForKind(GrantKind(req.Kind), req.RequestedScopes); err != nil {
 		return Grant{}, fmt.Errorf("store: grant request %s: %w", id, err)
 	}
 

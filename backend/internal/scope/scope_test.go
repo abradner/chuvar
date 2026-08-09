@@ -158,6 +158,36 @@ func TestValidateCapability(t *testing.T) {
 	}
 }
 
+// TestValidateMemory exercises the dual rule to TestValidateCapability: a
+// memory scope with a colon-delimited target is rejected, on top of everything
+// Validate already checks. This is the guard that keeps the fact-visibility
+// LIKE queries (store.scopePrefixes) — which match scopes target-blind — from
+// ever seeing a targeted scope. Found in review of #99; see ValidateMemory's
+// doc comment.
+func TestValidateMemory(t *testing.T) {
+	tests := []struct {
+		name    string
+		scope   Scope
+		wantErr bool
+	}{
+		{"untargeted memory scope is valid", "identity.basic", false},
+		{"untargeted dotted memory scope is valid", "projects.spritz.read", false},
+		{"scope with underscore segment is valid", "identity.date_of_birth", false},
+		{"targeted scope is rejected — the whole point of this function", "git.sign:github.com/abradner/chuvar", true},
+		{"a target that looks like more dotted segments is still rejected", "projects.spritz:extra.child", true},
+		{"empty scope still rejected (delegates to Validate)", "", true},
+		{"empty target after colon still rejected", "projects.spritz:", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateMemory(tt.scope)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateMemory(%q) error = %v, wantErr %v", tt.scope, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestAnyCovers(t *testing.T) {
 	granted := []Scope{"identity.basic", "projects.spritz"}
 

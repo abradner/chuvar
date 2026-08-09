@@ -192,21 +192,68 @@ func Validate(s Scope) error {
 // keep behaving exactly as they do today — see TestScope_Covers and
 // TestValidate). The require-target rule is specific to capability-kind
 // scopes, which only the caller can identify — this package has no
-// "kind" of its own — so every caller that accepts or loads a
+// "kind" of its own — so every caller that accepts or persists a
 // capability-kind grant's scopes must call ValidateCapability instead of
 // (or in addition to) Validate. That includes the future capability-grant
-// creation surface (currently gated, issue #96) and every surface that
-// exists today and persists or reads back a capability-kind grant's
-// scopes — a grant row inserted straight into the database (a fixture, or
-// an operator's psql) with a bare untargeted scope must be refused loudly
-// wherever it is next read, not silently kept as a grant that can never
-// cover anything.
+// creation surface (currently gated, issue #96) and the write chokepoints
+// that exist today: store.CreateGrant, store.RequestGrant and
+// store.ApproveGrantRequest (via validateScopesForKind), plus brokerd's
+// grant-cache load path — the one place a capability grant is turned into
+// live signing authority. That last one is what actually defends against a
+// grant row inserted straight into the database (a fixture, or an
+// operator's psql) with a bare untargeted scope: brokerd refuses to cache
+// it, so it can never authorize a signature, even though the ordinary
+// listing reads (store.ListGrants and friends) surface rows as-stored
+// without re-validating — those are display/renewal-expiry paths, not
+// authorization paths (GrantedScopes, the memory read authorizer, filters
+// kind='memory' and never sees a capability row at all). Enforcement lives
+// at the write-and-authorize chokepoints, not on every read; the listing
+// reads are legible, not load-bearing.
 func ValidateCapability(s Scope) error {
 	if err := Validate(s); err != nil {
 		return err
 	}
 	if _, _, hasTarget := split(s); !hasTarget {
 		return fmt.Errorf("scope: capability scope %q must specify a target (a bare operation with no %q-delimited target is not a valid capability scope, decided 2026-08-09 — see docs/capability-broker.md)", s, ":")
+	}
+	return nil
+}
+
+// ValidateMemory checks that s is well-formed (via Validate) AND, in
+// addition, that s carries NO target — the exact dual of ValidateCapability.
+// It is the enforcement point for an invariant this package's SQL consumers
+// silently depend on: memory-fact visibility is filtered in Postgres by
+// scopePrefixes (internal/store/facts.go), which turns each granted scope
+// into a `<scope>.%` LIKE pattern. That predicate treats the WHOLE scope
+// string as an opaque dotted path — it has no notion of the ":" target
+// delimiter this workstream added. So a targeted scope reaching a memory
+// grant or a memory fact would be matched by the SQL as if the target were
+// just more dotted segments: a grant for "git.sign:repo" would make
+// scopePrefixes emit "git.sign:repo.%", which LIKE-matches a fact scoped
+// "git.sign:repo.child" — precisely the cross-target read that Covers'
+// fail-closed target rule forbids in Go, leaking back in through the SQL
+// path that never learned about targets.
+//
+// Rather than teach every LIKE query target-aware Covers semantics (a second
+// copy of the matching rule, in SQL, that would drift from this one — the
+// exact anti-pattern principle 7 warns against), we keep the invariant the
+// SQL already assumes and make it true at the boundary: memory scopes are
+// untargeted, so the SQL path only ever sees the untargeted scopes its
+// prefix logic was written for. Targeted scopes belong exclusively to
+// capability grants, which are never fed to scopePrefixes (they run through
+// brokerd's exact-match Covers, not the memory LIKE path).
+//
+// Existing memory scopes ("identity.basic", "projects.spritz.read", …) carry
+// no colon and pass unchanged; this only rejects the newly-representable
+// targeted form for the one kind that must not carry it. Callers that accept
+// or persist a memory-kind scope (a memory grant's scopes, a proposed fact's
+// scopes) must call ValidateMemory rather than bare Validate.
+func ValidateMemory(s Scope) error {
+	if err := Validate(s); err != nil {
+		return err
+	}
+	if _, _, hasTarget := split(s); hasTarget {
+		return fmt.Errorf("scope: memory scope %q must not specify a %q-delimited target (targets belong to capability scopes only; a targeted memory scope would be matched target-blind by the fact-visibility SQL — see ValidateMemory)", s, ":")
 	}
 	return nil
 }
