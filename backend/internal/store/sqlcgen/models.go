@@ -31,6 +31,11 @@ type DataKey struct {
 	RotatedAt  *time.Time
 }
 
+type EnrollmentLatch struct {
+	ID        bool
+	LatchedAt time.Time
+}
+
 type Fact struct {
 	ID                 string
 	Content            string

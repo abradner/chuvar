@@ -273,7 +273,14 @@ func (a *API) requireStrongFactor(next http.HandlerFunc) http.HandlerFunc {
 // an unconditional route wrapper; both factors must be accepted everywhere
 // one is (the 2026-08-09 decision, docs/decisions.md), including there.
 func (a *API) verifySecondFactor(w http.ResponseWriter, r *http.Request) bool {
-	if r.Header.Get(webauthnAssertionHeader) != "" {
+	// TrimSpace before the emptiness check, matching verifyTOTPCode: a
+	// whitespace-only assertion header (a stray space pasted alongside — or in
+	// place of — a code) is non-empty as sent, so without trimming it forces
+	// the WebAuthn branch and a caller presenting a perfectly valid TOTP code
+	// gets a spurious 401 instead of having their code checked. The factor a
+	// request presents is which header carries real content, not which one is
+	// merely present. Found in review.
+	if strings.TrimSpace(r.Header.Get(webauthnAssertionHeader)) != "" {
 		return a.verifyWebAuthnAssertionHeader(w, r)
 	}
 	return a.verifyTOTPCode(w, r)
@@ -334,7 +341,10 @@ func (a *API) requireExistingSecondFactor(next http.HandlerFunc) http.HandlerFun
 			writeError(w, http.StatusForbidden, errNoEnrolledFactor)
 			return
 		}
-		if r.Header.Get(webauthnAssertionHeader) != "" {
+		// TrimSpace before the emptiness check, same reason as verifySecondFactor:
+		// a whitespace-only assertion header must not force the WebAuthn branch
+		// and deny a caller who presented a valid TOTP code. Found in review.
+		if strings.TrimSpace(r.Header.Get(webauthnAssertionHeader)) != "" {
 			if !a.verifyWebAuthnAssertionHeader(w, r) {
 				return
 			}

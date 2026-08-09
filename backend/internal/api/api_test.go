@@ -87,7 +87,7 @@ func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -122,7 +122,7 @@ func testServerWithBootstrapToken(t *testing.T) (*httptest.Server, string) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -298,6 +298,65 @@ func TestRequireTOTP_WhitespaceOnlyHeaderTreatedAsMissing(t *testing.T) {
 	body := decodeInto[errorResponse](t, resp)
 	if body.Error != errTOTPRequired.Error() {
 		t.Errorf("error = %q, want %q (whitespace-only should read as \"required\", not \"invalid\")", body.Error, errTOTPRequired.Error())
+	}
+}
+
+// The two tests below exercise the whitespace-assertion-header fix at the unit
+// level, calling the factor-selection helpers directly rather than over the
+// wire. That is deliberate: Go's HTTP server trims leading/trailing spaces and
+// tabs from header values before any handler sees them, so a whitespace-only
+// header sent over a real connection already arrives empty. The branch-selection
+// bug this fix closes — choosing the WebAuthn path on a present-but-blank
+// assertion header, and thereby ignoring a valid TOTP code with a spurious 401 —
+// is only observable when the header reaches the code still carrying whitespace,
+// which is exactly what a direct call with httptest.NewRequest reproduces.
+func newTestAPIWithReviewer(t *testing.T) (*API, store.AuthenticatedReviewer) {
+	t.Helper()
+	_, st := testServer(t)
+	a := New(st, embed.Stub{}, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t))
+	reviewer, ok, err := st.AuthenticateReviewerToken(context.Background(), testAuthToken)
+	if err != nil || !ok {
+		t.Fatalf("authenticating seeded reviewer: ok=%v err=%v", ok, err)
+	}
+	return a, reviewer
+}
+
+// reqWithFactor builds an authenticated request carrying a valid TOTP code plus
+// whatever assertion-header value the test wants to probe — set directly, so
+// (unlike a wire request) whitespace survives to the handler.
+func reqWithFactor(t *testing.T, reviewer store.AuthenticatedReviewer, assertion string) *http.Request {
+	t.Helper()
+	code, err := totp.GenerateCode(testTOTPSecret, time.Now())
+	if err != nil {
+		t.Fatalf("totp.GenerateCode() error = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/tokens", nil)
+	req = req.WithContext(context.WithValue(req.Context(), reviewerContextKey{}, reviewer))
+	req.Header.Set("X-Chuvar-TOTP-Code", code)
+	req.Header.Set(webauthnAssertionHeader, assertion)
+	return req
+}
+
+func TestVerifySecondFactor_WhitespaceAssertionHeaderHonoursTOTP(t *testing.T) {
+	a, reviewer := newTestAPIWithReviewer(t)
+	req := reqWithFactor(t, reviewer, "   ")
+	rr := httptest.NewRecorder()
+	if !a.verifySecondFactor(rr, req) {
+		t.Fatalf("verifySecondFactor with a whitespace-only assertion header and a valid TOTP code = false (status %d), want true (whitespace must not force the WebAuthn path)", rr.Code)
+	}
+}
+
+func TestRequireExistingSecondFactor_WhitespaceAssertionHeaderHonoursTOTP(t *testing.T) {
+	a, reviewer := newTestAPIWithReviewer(t)
+	req := reqWithFactor(t, reviewer, "   ")
+	rr := httptest.NewRecorder()
+	called := false
+	a.requireExistingSecondFactor(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})(rr, req)
+	if !called {
+		t.Fatalf("requireExistingSecondFactor with a whitespace-only assertion header and a valid TOTP code did not reach next (status %d), want the valid TOTP code honoured", rr.Code)
 	}
 }
 
@@ -993,7 +1052,7 @@ func TestWithRequestTimeout_CancelsSlowHandlerContext(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -1199,6 +1258,47 @@ func TestCreateToken_RevokingEveryEnrolledDeviceDoesNotReopenTheGate(t *testing.
 	resp = doJSONWithAuth(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "attacker-device"}, bootstrapTokenValue)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("POST /api/tokens after revoking every enrolled device: status = %d, want 401 (revocation must not reopen enrollment)", resp.StatusCode)
+	}
+}
+
+// TestCreateToken_FactorResetLeavesGateClosedViaLatch is the durable-latch
+// regression test: clearing every factor row (the documented break-glass
+// recovery) drops both ever-enrolled counts to zero, but the append-only
+// enrollment latch survives it, so createToken's gate ("latch OR counts > 0")
+// stays closed and a factorless bootstrap token cannot self-enroll during the
+// re-bootstrap window. This is principle 12 applied to the enrollment gate:
+// the gate counts ever-enrolled, and recovery must take a separate, deliberate
+// latch reset — never reopen the gate as a byproduct of clearing factors.
+func TestCreateToken_FactorResetLeavesGateClosedViaLatch(t *testing.T) {
+	srv, bootstrapTokenValue := testServerWithBootstrapToken(t)
+
+	// Bootstrap mints the operator's first enrolled device; enrolling its TOTP
+	// secret sets the durable latch.
+	enrolled := decodeInto[createTokenResponse](t, doJSONWithAuth(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "operator-phone"}, bootstrapTokenValue))
+	if enrolled.Token == "" {
+		t.Fatal("expected the first device token to be created")
+	}
+
+	// Simulate the break-glass recovery's factor-clearing step directly: null
+	// every TOTP secret and delete every passkey. Both ever-enrolled counts go
+	// to zero — the latch must not.
+	ctx := context.Background()
+	pool, err := db.Open(ctx, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `UPDATE reviewer_tokens SET totp_secret_enc = NULL`); err != nil {
+		t.Fatalf("clearing totp secrets: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM webauthn_credentials`); err != nil {
+		t.Fatalf("deleting webauthn credentials: %v", err)
+	}
+
+	// The gate stays closed: a factorless bearer token still cannot self-enroll.
+	resp := doJSONWithAuth(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "attacker-device"}, bootstrapTokenValue)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("POST /api/tokens after a full factor reset: status = %d, want 401 (durable latch must keep the gate closed)", resp.StatusCode)
 	}
 }
 

@@ -96,6 +96,26 @@ func (s *Store) CreateWebAuthnCredential(
 	if label == "" {
 		return WebAuthnCredential{}, fmt.Errorf("store: webauthn credential label must not be empty")
 	}
+	// Validate the identifying inputs at the store boundary rather than letting
+	// an empty value reach Postgres. reviewer_token_id is a NOT NULL FK, and
+	// credential_id/public_key are NOT NULL BYTEA — a nil []byte is sent as SQL
+	// NULL by pgx and fails at the driver as an opaque constraint violation,
+	// while an empty-but-non-nil []byte would silently persist a credential with
+	// no usable identifier or key (a row that can never satisfy an assertion but
+	// still counts toward the enrollment latch). Either way the caller bug is
+	// this function's inputs; name it here. reviewerTokenID is always derived
+	// from the authenticated request context by the one caller
+	// (webauthnRegisterFinish), never from the request body — this guards a
+	// programming regression, not untrusted input.
+	if reviewerTokenID == "" {
+		return WebAuthnCredential{}, fmt.Errorf("store: webauthn credential reviewer token id must not be empty")
+	}
+	if len(credentialID) == 0 {
+		return WebAuthnCredential{}, fmt.Errorf("store: webauthn credential id must not be empty")
+	}
+	if len(publicKey) == 0 {
+		return WebAuthnCredential{}, fmt.Errorf("store: webauthn credential public key must not be empty")
+	}
 	if transports == nil {
 		transports = []string{}
 	}
@@ -107,7 +127,21 @@ func (s *Store) CreateWebAuthnCredential(
 		// than NULL (see the migration's default), not "value unknown."
 		aaguid = []byte{}
 	}
-	row, err := s.q.InsertWebAuthnCredential(ctx, sqlcgen.InsertWebAuthnCredentialParams{
+	// Insert and latch in one transaction: enrolling a passkey is enrolling a
+	// second factor, so it must set the durable ever-enrolled latch the same way
+	// TOTP enrollment does (CreateReviewerToken), and atomically for the same
+	// reason — a credential that committed without its latch would let a factor
+	// reset reopen createToken's gate (principle 12; see the enrollment_latch
+	// migration). SetEnrollmentLatch is idempotent, so re-latching on every
+	// subsequent credential is a harmless no-op.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return WebAuthnCredential{}, fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op if already committed
+	qtx := s.q.WithTx(tx)
+
+	row, err := qtx.InsertWebAuthnCredential(ctx, sqlcgen.InsertWebAuthnCredentialParams{
 		ReviewerTokenID: reviewerTokenID,
 		Label:           label,
 		CredentialID:    credentialID,
@@ -125,6 +159,12 @@ func (s *Store) CreateWebAuthnCredential(
 			return WebAuthnCredential{}, ErrWebAuthnCredentialAlreadyRegistered
 		}
 		return WebAuthnCredential{}, fmt.Errorf("store: insert webauthn credential: %w", err)
+	}
+	if err := qtx.SetEnrollmentLatch(ctx); err != nil {
+		return WebAuthnCredential{}, fmt.Errorf("store: set enrollment latch: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return WebAuthnCredential{}, fmt.Errorf("store: commit tx: %w", err)
 	}
 	return toWebAuthnCredential(row), nil
 }

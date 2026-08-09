@@ -39,6 +39,12 @@ type Querier interface {
 	// are revoked, never deleted) — so this count only ever grows.
 	CountEverEnrolledWebAuthnCredentials(ctx context.Context) (int64, error)
 	DenyGrantRequest(ctx context.Context, arg DenyGrantRequestParams) (int64, error)
+	// The durable half of createToken's enrollment gate. Unlike
+	// CountEverEnrolledReviewerTokens/CountEverEnrolledWebAuthnCredentials, which
+	// read mutable factor rows the break-glass recovery clears, this survives a
+	// factor reset — so the gate stays closed against a factorless bootstrap or a
+	// stolen bearer token racing the operator during re-enrollment.
+	EnrollmentLatchSet(ctx context.Context) (bool, error)
 	FactVisibleToScopes(ctx context.Context, arg FactVisibleToScopesParams) (bool, error)
 	// embedding_1/embedding_2 are the same repeated-named-param workaround used
 	// elsewhere in this migration (see facts.sql's SearchFacts) — bound to the
@@ -212,6 +218,13 @@ type Querier interface {
 	// so this always matches, but a provenance projection shouldn't be able to drop
 	// an otherwise-visible fact from the result set if that ever changes.
 	SearchFacts(ctx context.Context, arg SearchFactsParams) ([]SearchFactsRow, error)
+	// Idempotent set-once: the first enrollment inserts the singleton row, every
+	// later one conflicts on the pinned primary key and does nothing — latched_at
+	// is never re-stamped, and no second row is ever created. Deliberately never
+	// an UPDATE/DELETE path: the latch only ever goes from unset to set over the
+	// lifetime of a deployment (principle 12), so clearing it is an out-of-band
+	// operator action, not something any store method exposes.
+	SetEnrollmentLatch(ctx context.Context) error
 	SupersedeFact(ctx context.Context, arg SupersedeFactParams) error
 	TouchReviewerToken(ctx context.Context, id string) error
 	UpdateWebAuthnCredentialCounter(ctx context.Context, arg UpdateWebAuthnCredentialCounterParams) error

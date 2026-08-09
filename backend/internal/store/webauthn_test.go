@@ -118,6 +118,42 @@ func TestWebAuthnCredential_DuplicateCredentialIDRejected(t *testing.T) {
 	}
 }
 
+// TestWebAuthnCredential_RejectsEmptyIdentifiers pins the store-boundary
+// validation added in review: reviewer_token_id, credential_id and public_key
+// must be non-empty, so an empty/nil value is rejected with a clear error here
+// rather than reaching Postgres as an opaque NOT-NULL/FK driver failure (nil
+// []byte) or silently persisting an unusable row (empty-but-non-nil []byte).
+func TestWebAuthnCredential_RejectsEmptyIdentifiers(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+	reviewer := seedReviewer(t, s, "device-a")
+
+	cases := []struct {
+		name         string
+		reviewerID   string
+		credentialID []byte
+		publicKey    []byte
+	}{
+		{"empty reviewer id", "", []byte("cred"), []byte("pub")},
+		{"nil credential id", reviewer, nil, []byte("pub")},
+		{"empty credential id", reviewer, []byte{}, []byte("pub")},
+		{"nil public key", reviewer, []byte("cred"), nil},
+		{"empty public key", reviewer, []byte("cred"), []byte{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := s.CreateWebAuthnCredential(ctx, tc.reviewerID, "key",
+				tc.credentialID, tc.publicKey, "none", nil, nil, 0, false, false)
+			if err == nil {
+				t.Fatalf("CreateWebAuthnCredential(%s) succeeded, want a validation error", tc.name)
+			}
+			if err == ErrWebAuthnCredentialAlreadyRegistered {
+				t.Fatalf("CreateWebAuthnCredential(%s) = ErrWebAuthnCredentialAlreadyRegistered, want a boundary validation error", tc.name)
+			}
+		})
+	}
+}
+
 // TestWebAuthnCredential_RevokedCredentialIDIsReusable pins the partial
 // unique index's purpose: uniqueness only needs to hold among live rows, so
 // re-registering the exact same physical authenticator after revoking its

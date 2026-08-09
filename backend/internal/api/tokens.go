@@ -151,11 +151,21 @@ func generateToken() (string, error) {
 // The tradeoff: losing every enrolled device is not self-service recoverable
 // over the API. Minting a replacement needs a factor the operator no longer
 // has, and REVIEWER_BOOTSTRAP_TOKEN can't help — a fresh bootstrap token
-// still faces a nonzero ever-enrolled count. That is deliberate: an
-// API-reachable recovery path is indistinguishable from the attack above.
-// Recovery is a direct database action (clear totp_secret_enc and delete
-// webauthn_credentials rows — both counts must reach zero), which suits this
-// deployment's single operator with DB access; see docs/operations.md.
+// still faces the gate. That is deliberate: an API-reachable recovery path is
+// indistinguishable from the attack above. Recovery is a direct database
+// action, which suits this deployment's single operator with DB access; see
+// docs/operations.md.
+//
+// Crucially the counts are not the only lock. They read mutable factor rows,
+// and recovery clears those rows — so on their own they would reopen this gate
+// the moment recovery ran, letting a surviving stolen bearer token race the
+// operator and self-enroll factorless. The durable enrollment_latch, set the
+// first time any factor is ever enrolled and ORed into the gate below, is what
+// closes that window: recovery does not touch it, so this gate stays shut
+// across a factor reset (principle 12, "the enrollment gate counts
+// ever-enrolled"). Reopening enrollment therefore takes TWO deliberate operator
+// actions — clear the factor rows AND separately reset the latch — never one,
+// and never a byproduct of the other. Found in review.
 func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 	everEnrolledTOTP, err := a.Store.CountEverEnrolledReviewerTokens(r.Context())
 	if err != nil {
@@ -167,7 +177,24 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, http.StatusInternalServerError, "createToken", "could not check enrollment status", err)
 		return
 	}
-	if everEnrolledTOTP+everEnrolledWebAuthn > 0 && !a.verifySecondFactor(w, r) {
+	// The durable half of the gate. The two counts above read mutable factor
+	// rows (totp_secret_enc, webauthn_credentials), which the documented
+	// break-glass recovery (docs/operations.md) clears to reopen enrollment for
+	// an operator who has lost every device — after which both return to zero.
+	// The latch does not: it is set the first time any factor is ever enrolled
+	// and recovery does not touch it, so ORing it in here keeps this gate closed
+	// across a factor reset. Without it, a still-active stolen bearer token (or
+	// a fresh factorless bootstrap token) could race the operator through the
+	// reopened gate and self-enroll with no second factor — the exact append-
+	// only property principle 12 demands ("the enrollment gate counts
+	// ever-enrolled"). Resetting the latch is a separate, deliberate operator
+	// action, never a byproduct of the factor reset — see docs/operations.md.
+	latched, err := a.Store.EnrollmentLatchSet(r.Context())
+	if err != nil {
+		writeStoreError(w, http.StatusInternalServerError, "createToken", "could not check enrollment status", err)
+		return
+	}
+	if (latched || everEnrolledTOTP+everEnrolledWebAuthn > 0) && !a.verifySecondFactor(w, r) {
 		return
 	}
 
