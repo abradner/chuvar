@@ -105,6 +105,59 @@ func TestValidate_TargetMaxLength(t *testing.T) {
 	}
 }
 
+// TestScope_Operation proves the accessor strips exactly the colon-delimited
+// target and nothing else, for both targeted and untargeted (memory-style)
+// scopes.
+func TestScope_Operation(t *testing.T) {
+	tests := []struct {
+		s    Scope
+		want Scope
+	}{
+		{"git.sign:github.com/abradner/chuvar", "git.sign"},
+		{"git.sign", "git.sign"},
+		{"identity.basic", "identity.basic"},
+		{"git.sign:host:1234", "git.sign"}, // only the first colon is the delimiter
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.s), func(t *testing.T) {
+			if got := tt.s.Operation(); got != tt.want {
+				t.Errorf("%q.Operation() = %q, want %q", tt.s, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateCapability exercises the require-target rule decided
+// 2026-08-09 (docs/capability-broker.md): a capability scope with no
+// colon-delimited target is rejected, on top of everything Validate already
+// checks. This is the guard that makes an untargeted capability grant
+// unrepresentable at grant-creation time (see the scope package's
+// ValidateCapability doc comment for why the rule lives here and not in
+// Validate).
+func TestValidateCapability(t *testing.T) {
+	tests := []struct {
+		name    string
+		scope   Scope
+		wantErr bool
+	}{
+		{"targeted capability scope is valid", "git.sign:github.com/abradner/chuvar", false},
+		{"untargeted scope is rejected — the whole point of this function", "git.sign", true},
+		{"untargeted dotted scope is rejected too", "projects.spritz", true},
+		{"empty scope still rejected (delegates to Validate)", "", true},
+		{"malformed operation still rejected even with a target", "Git.Sign:github.com/a/b", true},
+		{"malformed target still rejected", "git.sign:not a target", true},
+		{"empty target after colon still rejected", "git.sign:", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateCapability(tt.scope)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateCapability(%q) error = %v, wantErr %v", tt.scope, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestAnyCovers(t *testing.T) {
 	granted := []Scope{"identity.basic", "projects.spritz"}
 

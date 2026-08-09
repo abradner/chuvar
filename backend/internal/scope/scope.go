@@ -117,6 +117,20 @@ func split(s Scope) (op string, target string, hasTarget bool) {
 	return str[:idx], str[idx+1:], true
 }
 
+// Operation returns the dotted-operation part of s, stripping any
+// colon-delimited target. For a scope with no target, Operation returns s
+// unchanged. Exported for callers that pin a request to exactly one
+// operation before ever consulting Covers — e.g. a capability broker binary
+// that implements a single operation class (git.sign) and must refuse every
+// other one, including a syntactically-covered descendant like
+// "git.sign.extra": authorizing purely on Covers would let a grant row
+// seeded with an unrelated operation's scope exercise an operation its
+// human never named it for.
+func (s Scope) Operation() Scope {
+	op, _, _ := split(s)
+	return Scope(op)
+}
+
 // Validate checks that s is well-formed. The operation part (everything
 // before the first colon, or the whole string if there is no colon) must be
 // non-empty, dot-delimited, lowercase alphanumeric/underscore segments —
@@ -153,6 +167,46 @@ func Validate(s Scope) error {
 		if hasTraversalSegment(target) {
 			return fmt.Errorf("scope: target %q in %q contains a %q path segment (directory traversal is not a valid target)", target, s, "..")
 		}
+	}
+	return nil
+}
+
+// ValidateCapability checks that s is well-formed (via Validate) AND, in
+// addition, that s carries a target. This is the require-target rule
+// decided 2026-08-09 (docs/capability-broker.md decision log, "Capability
+// scope Covers is fail-closed on target; untargeted capability scopes are
+// rejected at grant creation"): Covers is fail-closed on target presence —
+// an untargeted grant does not cover a targeted request, and a targeted
+// grant does not cover an untargeted one — so an untargeted *capability*
+// scope would be a grant that structurally can never authorize the
+// targeted request a real capability operation (git.sign:<repo>, and every
+// operation class named in the design doc) actually makes. Rather than
+// pick a meaning for that dead-or-ambiguous state after the fact (fail
+// open and let it mean "any target," which is exactly the over-scoped
+// grant this workstream exists to prevent — see the decision log entry),
+// this function makes the state unrepresentable at the one place a
+// capability grant's scopes are accepted: one chokepoint per property.
+//
+// Validate itself does NOT enforce this: Validate is also the grammar
+// check for memory scopes, which legitimately have no target (and must
+// keep behaving exactly as they do today — see TestScope_Covers and
+// TestValidate). The require-target rule is specific to capability-kind
+// scopes, which only the caller can identify — this package has no
+// "kind" of its own — so every caller that accepts or loads a
+// capability-kind grant's scopes must call ValidateCapability instead of
+// (or in addition to) Validate. That includes the future capability-grant
+// creation surface (currently gated, issue #96) and every surface that
+// exists today and persists or reads back a capability-kind grant's
+// scopes — a grant row inserted straight into the database (a fixture, or
+// an operator's psql) with a bare untargeted scope must be refused loudly
+// wherever it is next read, not silently kept as a grant that can never
+// cover anything.
+func ValidateCapability(s Scope) error {
+	if err := Validate(s); err != nil {
+		return err
+	}
+	if _, _, hasTarget := split(s); !hasTarget {
+		return fmt.Errorf("scope: capability scope %q must specify a target (a bare operation with no %q-delimited target is not a valid capability scope, decided 2026-08-09 — see docs/capability-broker.md)", s, ":")
 	}
 	return nil
 }

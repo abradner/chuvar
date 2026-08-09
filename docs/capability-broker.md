@@ -644,3 +644,53 @@ Exception records (the `preferred`-mode degradation artifact): the signing shim 
 local append-only JSONL record at failure time — which works while the broker is down, the
 property a grant structurally cannot have — and records are reconciled into `audit_log` on
 next broker contact.
+
+### 2026-08-09 — Capability scope `Covers` is fail-closed on target; untargeted capability scopes are rejected at grant creation
+
+Two independent implementations of the 2026-08-09 "Scope grammar" decision above disagreed on
+exactly the case that decision left implicit: what does an untargeted grant (`git.sign`, no
+`:target`) authorize once *some* scopes in the system carry targets? One read it as "covers any
+target" (fail open); the other as "covers nothing that has a target" (fail closed). Both passed
+their own tests, because neither had a test for the case where they diverged. Resolved by the
+operator, reconciling the two:
+
+**`Covers` is fail-closed on target presence.** Whether the granted scope has a target must
+match whether the requested scope has one — `gHasTarget != rHasTarget` is an unconditional
+`false`. An untargeted grant does **not** cover a targeted request (no silent all-targets
+grant hiding behind a bare operation name), and symmetrically a targeted grant does not cover
+an untargeted request (there is no target on the request to compare against "the identical
+target"). When both are targeted, the targets must be byte-for-byte identical — no prefix,
+glob, or case-insensitive matching, per the existing "exact-match targets only" rule. When
+neither has a target, this reduces exactly to the pre-existing dotted-ancestor `opCovers`
+check with no target logic in the path at all.
+
+**An untargeted capability scope is rejected at validation, not interpreted at `Covers`
+time.** Given fail-closed `Covers`, a capability grant with no target could never authorize
+anything a real capability operation actually requests (every capability operation this doc
+names — `git.sign:<repo>`, the `fs.write` example — has a natural target) — it would be a
+dead grant at best. Rather than let that ambiguous, functionally-inert state exist and decide
+ad hoc what it "means," `scope.ValidateCapability` refuses it outright: a capability-kind
+scope with no `:`-delimited target is a validation error, full stop. This is enforced today at
+every place a capability-kind grant's scopes are persisted or read back —
+`store.CreateGrant`, `store.RequestGrant`, and `store.ApproveGrantRequest` (the last as
+defense-in-depth: `grant_requests.requested_scopes` is plain `TEXT[]` with no format CHECK
+constraint, so a row inserted directly — a fixture, an operator's psql, a future bulk-import
+path — must still be refused loudly at approval, not silently approved into an inert grant)
+— and is the function the future capability-grant creation surface (gated, issue #96) must
+also call.
+
+**The fail-open alternative was rejected.** Interpreting a bare `git.sign` as "sign for any
+repository" would have made the grant strictly more powerful than any grant a human could
+have intended to approve for a single named repository — exactly the over-scoped-grant failure
+mode this workstream exists to close ("What this converges on," point 5, above), reintroduced
+at the target layer the moment targets existed at all. Fail-closed `Covers` plus
+reject-at-creation is the "one chokepoint per property" reading of the same principle: rather
+than two functions (`Covers` and some future creation check) each partially encoding "what is
+a valid capability grant," the ambiguous state is unrepresentable before `Covers` ever runs.
+
+**Memory scopes are unaffected.** `scope.Validate` (the grammar check every memory scope goes
+through today, in `internal/api` and `internal/mcptools`) does not require a target and is
+untouched — memory scopes never carry one, and `validateCapabilityScopes` (the `store`-package
+wiring above) is a no-op for `kind = memory`, unchanged from main. `TestScope_Covers` and the
+new capability-kind store tests both pin this down as an explicit regression case, not an
+assumption.
