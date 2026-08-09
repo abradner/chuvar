@@ -145,6 +145,17 @@ func loadSigningKey(ctx context.Context) (*keyring.SigningKey, error) {
 		return nil, fmt.Errorf("brokerd: unsealing the signing key: %w "+
 			"(set CHUVAR_BROKER_SIGNING_KEY_CREATE=1 on a first run to mint one)", err)
 	}
+	// Unseal returns the decoded seed in an ordinary Go heap slice; keyring.Load
+	// COPIES it into guarded (mlock'd, non-dumpable) memory but does not clear
+	// this caller's copy. Left alone, a full reusable signing seed lingers on
+	// the normal heap until some later GC happens to overwrite the arena —
+	// exactly the plaintext-secret-at-rest-in-RAM surface PR_SET_DUMPABLE(0) and
+	// the guarded buffer exist to deny (principle 9). clear() zeroes it the
+	// moment loadSigningKey returns, on both the success and Load-error paths,
+	// so the unguarded copy's lifetime is this one function rather than "until
+	// GC." The guarded copy inside SigningKey is unaffected; only this slice is
+	// wiped.
+	defer clear(raw)
 	key, err := keyring.Load(raw)
 	if err != nil {
 		return nil, fmt.Errorf("brokerd: loading signing key into guarded memory: %w", err)
