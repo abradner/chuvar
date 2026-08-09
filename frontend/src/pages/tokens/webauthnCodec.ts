@@ -24,9 +24,17 @@ export function base64urlToBuffer(b64url: string): ArrayBuffer {
 
 export function bufferToBase64url(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  // Chunk-and-join rather than a per-byte `binary += String.fromCharCode(b)`:
+  // that concat is O(n²) (each += reallocates and recopies the growing string).
+  // Converting a bounded slice at a time with String.fromCharCode(...chunk) and
+  // joining once is linear. The chunk stays well under the argument-count limit
+  // browsers impose on spread/apply, so no "too many function arguments" risk.
+  const CHUNK = 0x8000;
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    parts.push(String.fromCharCode(...bytes.subarray(i, i + CHUNK)));
+  }
+  return btoa(parts.join("")).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 // Wire shapes live in api/client.ts (every other wire-format interface in

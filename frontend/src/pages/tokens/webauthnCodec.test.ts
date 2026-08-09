@@ -27,6 +27,18 @@ describe("base64url <-> ArrayBuffer", () => {
     expect(encoded).not.toMatch(/[+/=]/);
   });
 
+  it("round-trips a buffer larger than the encoder's chunk size", () => {
+    // Guards the chunk-and-join rewrite of bufferToBase64url (the per-byte
+    // concat it replaced was O(n²)): a payload spanning multiple 0x8000-byte
+    // chunks, with a deliberately non-multiple length, must still encode and
+    // decode identically across the chunk boundaries.
+    const n = 0x8000 * 2 + 5;
+    const bytes = new Uint8Array(n);
+    for (let i = 0; i < n; i++) bytes[i] = (i * 31 + 7) & 0xff;
+    const roundTripped = base64urlToBuffer(bufferToBase64url(bytes.buffer));
+    expect(new Uint8Array(roundTripped)).toEqual(bytes);
+  });
+
   it("decodes a value with URL-unsafe-looking characters replaced back correctly", () => {
     // Bytes chosen so the base64 alphabet naturally produces '+'/'/' in
     // standard encoding, to prove the '-'/'_' substitution round-trips.

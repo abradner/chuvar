@@ -71,6 +71,25 @@ describe("usePasskeys", () => {
     });
   });
 
+  it("reports not-supported when navigator.credentials lacks get(), even if create() exists", async () => {
+    // Regression for the support check that only probed create(): this hook
+    // also calls get() for assertions, so a browser exposing create() but not
+    // get() must report unsupported up front rather than claiming support and
+    // throwing at the first assertion.
+    Object.defineProperty(navigator, "credentials", {
+      value: { create: vi.fn() }, // no get()
+      writable: true,
+      configurable: true,
+    });
+
+    const { result } = renderHook(() => usePasskeys());
+    await act(async () => {});
+
+    expect(result.current.supported).toBe(false);
+    // An unsupported browser has nothing to list — the fetch must be skipped.
+    expect(api.listWebAuthnCredentials).not.toHaveBeenCalled();
+  });
+
   it("refuses a second register() while one is already in flight, even called directly", async () => {
     let resolveBegin!: (o: CredentialCreationOptionsJSON) => void;
     vi.mocked(api.webauthnRegisterBegin).mockReturnValueOnce(new Promise((resolve) => (resolveBegin = resolve)));

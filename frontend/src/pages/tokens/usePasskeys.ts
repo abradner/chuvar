@@ -21,7 +21,18 @@ export type { WebAuthnCredential };
 // would be pointless work for a value that's already been true or false
 // since the page loaded.
 function browserSupportsPasskeys(): boolean {
-  return typeof window !== "undefined" && "PublicKeyCredential" in window && typeof navigator?.credentials?.create === "function";
+  // Both create() and get() are checked, not just create(): this hook drives
+  // both ceremonies (registration uses create, assertion uses get), so a
+  // browser exposing only one would pass a create-only check and then throw at
+  // runtime the first time an assertion is attempted — reporting "supported"
+  // and then failing is worse than reporting "not supported" up front. Found in
+  // review.
+  return (
+    typeof window !== "undefined" &&
+    "PublicKeyCredential" in window &&
+    typeof navigator?.credentials?.create === "function" &&
+    typeof navigator?.credentials?.get === "function"
+  );
 }
 
 // describeCeremonyError turns the two ceremony-specific failure shapes
