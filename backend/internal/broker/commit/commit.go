@@ -46,7 +46,23 @@ var treeOrParentPattern = regexp.MustCompile(`^[0-9a-f]{40}$|^[0-9a-f]{64}$`)
 // tolerates in a name — this is the boundary that decides what may be
 // signed, and a stricter parser that refuses an unusual-but-legal commit is
 // a far smaller problem than a looser one that accepts something ambiguous.
-var identityLinePattern = regexp.MustCompile(`^(.+) <([^<>\s]*)> (\d+) ([+-]\d{4})$`)
+//
+// The name half is restricted to [^<>]+ — no angle brackets — specifically
+// so a line can contain at most one "<...>" pair. Real git's own ident-line
+// parser (ident.c) does not require this: fed a line with two bracket pairs
+// ("Real Name <legit@example.com> <attacker@evil.com> 1723190400 +0000"),
+// verified empirically against git 2.47.3 (`git show -s --format=%ce` on
+// the identical bytes via `git hash-object -w --literally`), it resolves
+// the FIRST pair as the identity while still finding the trailing
+// timestamp — a fallback-heavy algorithm this package has no reason to
+// reproduce. A naive greedy Go regex resolves the opposite: `(.+) <...>`
+// backtracks to the RIGHTMOST pair. Rather than chase git's exact fallback
+// behaviour (or risk another subtly-wrong reimplementation of it), any line
+// with more than one bracket pair is refused outright as ambiguous — an
+// agent authorized for one committer_email must never be able to construct
+// a payload whose signed identity, as brokerd computes it, differs from
+// what every downstream git tool displays.
+var identityLinePattern = regexp.MustCompile(`^([^<>]+) <([^<>\s]*)> (\d+) ([+-]\d{4})$`)
 
 // ErrMalformed wraps every structural parse failure, so callers (the
 // broker's sign handler) can distinguish "this isn't a commit object at
@@ -74,6 +90,13 @@ func malformed(format string, args ...any) error {
 // otherwise-well-formed commit over a header this package doesn't recognise
 // would make brokerd reject legitimate commits from any git version or
 // extension newer than this parser.
+//
+// "gpgsig" is not the only real git signature header: gpgsig-sha256 is a
+// second, independent signature git writes for SHA-256 commit objects (the
+// hash-function-transition mirror signature). A payload carrying only a
+// gpgsig-sha256 header — and no plain gpgsig header — already claims to be
+// signed exactly as much as one carrying gpgsig, so it is refused for the
+// same reason.
 func Parse(payload []byte) (*Commit, error) {
 	headerBlock, message, ok := bytes.Cut(payload, []byte("\n\n"))
 	if !ok {
@@ -137,8 +160,8 @@ func Parse(payload []byte) (*Commit, error) {
 	// Every remaining header (if any) is tolerated but must not be gpgsig —
 	// see this function's doc comment.
 	for ; idx < len(lines); idx++ {
-		if hasKey(lines[idx], "gpgsig") {
-			return nil, malformed("payload already carries a gpgsig header; refusing to sign a commit that claims to already be signed")
+		if hasKey(lines[idx], "gpgsig") || hasKey(lines[idx], "gpgsig-sha256") {
+			return nil, malformed("payload already carries a gpgsig/gpgsig-sha256 header; refusing to sign a commit that claims to already be signed")
 		}
 	}
 

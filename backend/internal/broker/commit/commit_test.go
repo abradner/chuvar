@@ -215,6 +215,49 @@ func TestParse_Rejects(t *testing.T) {
 			),
 		},
 		{
+			// gpgsig-sha256 is git's real second signature header (used for
+			// SHA-256 commit objects / the hash-function transition). A
+			// commit carrying only this header, and no plain "gpgsig"
+			// header, must be refused for the exact same reason as above —
+			// it already claims to be signed.
+			"gpgsig-sha256 header present — refuse to co-sign an already-signed commit",
+			build(
+				"tree "+validTree,
+				"author Agent <agent@example.com> 1723190400 +0000",
+				"committer Agent <agent@example.com> 1723190400 +0000",
+				"gpgsig-sha256 -----BEGIN SSH SIGNATURE-----\n someb64\n -----END SSH SIGNATURE-----",
+			),
+		},
+		{
+			// Verified against git 2.47.3: `git show -s --format=%ce` on
+			// this exact payload (written via `git hash-object -w
+			// --literally`) reports committer email "legit@example.com" —
+			// the FIRST bracket pair — not "attacker@evil.com". A regex
+			// that greedily matches the rightmost "<...>" pair as the
+			// email would extract "attacker@evil.com" instead, letting a
+			// grant authorized only for "attacker@evil.com" sign a payload
+			// that every downstream git tool displays as authored by a
+			// different, ungranted identity. Rather than replicate git's
+			// own ident-line fallback parsing (which tolerates the
+			// resulting date ambiguity in ways this package has no reason
+			// to reproduce), a line with more than one bracket pair is
+			// refused outright as ambiguous.
+			"committer line has two bracket pairs (spoofed identity)",
+			build(
+				"tree "+validTree,
+				"author Agent <agent@example.com> 1723190400 +0000",
+				"committer Real Name <legit@example.com> <attacker@evil.com> 1723190400 +0000",
+			),
+		},
+		{
+			"author line has two bracket pairs (same ambiguity, author side)",
+			build(
+				"tree "+validTree,
+				"author Real Name <legit@example.com> <attacker@evil.com> 1723190400 +0000",
+				"committer Agent <agent@example.com> 1723190400 +0000",
+			),
+		},
+		{
 			"no blank line separating headers from message",
 			[]byte("tree " + validTree + "\n" +
 				"author Agent <agent@example.com> 1723190400 +0000\n" +
