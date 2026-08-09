@@ -79,3 +79,21 @@ plaintext is shown once.
 
 See [`docs/operations.md`](docs/operations.md) for adding and revoking devices,
 and for the break-glass procedure if every enrolled device is lost.
+
+## Passkeys (WebAuthn)
+
+Decided 2026-08-09 ([docs/decisions.md](docs/decisions.md)): a passkey is an
+additional, additive second factor alongside TOTP, not a replacement — every
+mutation gate above accepts either a valid TOTP code or a valid WebAuthn
+assertion. Enroll one from the tokens page in the approval UI once a device
+token is authenticated; adding a passkey **always** requires proving a factor
+the calling device token has already enrolled (its TOTP code, or an existing
+passkey), so a stolen bearer token alone can never add its own second factor
+— including the bootstrap token, which has no factor and is refused outright.
+
+The Relying Party ID/origin default to the same host `CORS_ALLOWED_ORIGIN`
+already trusts (`http://localhost:5173` → RP ID `localhost` in dev); override
+with `WEBAUTHN_RP_ID`/`WEBAUTHN_RP_DISPLAY_NAME` if the deployment's real
+origin differs. A regressed sign counter on any credential (the standard
+cloned-authenticator signal) revokes that credential immediately — enroll a
+replacement rather than expecting it to recover.

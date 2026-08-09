@@ -9,9 +9,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/abradner/chuvar/backend/internal/api"
 	"github.com/abradner/chuvar/backend/internal/config"
@@ -74,9 +78,14 @@ func run() error {
 		allowedOrigin = "http://localhost:5173"
 	}
 
+	wa, err := newWebAuthn(allowedOrigin)
+	if err != nil {
+		return err
+	}
+
 	// TODO: swap for a real Summarizer once the Research track lands one, same as
 	// embed.Stub below.
-	a := api.New(st, embed.Stub{}, summarize.Stub{}, allowedOrigin, cfg.RequestTimeout)
+	a := api.New(st, embed.Stub{}, summarize.Stub{}, allowedOrigin, cfg.RequestTimeout, wa)
 
 	// Read/Write/IdleTimeout and ReadHeaderTimeout all come from cfg.RequestTimeout
 	// rather than being left at the zero-value http.Server default (no timeout at
@@ -93,6 +102,58 @@ func run() error {
 
 	slog.Info("apiserver: listening", "addr", cfg.HTTPAddr, "allowedOrigin", allowedOrigin)
 	return server.ListenAndServe()
+}
+
+// newWebAuthn builds the Relying Party configuration every WebAuthn
+// (passkey) ceremony validates against — strict RP ID and origin checking is
+// the whole security property (internal/api/webauthn.go's package comment),
+// so this is deliberately derived from the same allowedOrigin CORS already
+// trusts rather than a second, independently-configured origin:
+// AGENTS.md's one-chokepoint principle — "which origin is real" should have
+// one answer that can't silently drift from CORS_ALLOWED_ORIGIN, not two.
+// The dev default (allowedOrigin's own default above) is
+// http://localhost:5173, a loopback origin — matching how the frontend is
+// actually served in development (Vite's dev server on localhost) — so RP ID
+// defaults to "localhost", the conventional WebAuthn RP ID for local dev
+// (browsers treat http://localhost as a secure context specifically to make
+// this work without TLS).
+//
+// WEBAUTHN_RP_ID overrides the derived value for deployments where the
+// public origin's hostname isn't the right RP ID (e.g. a path-based reverse
+// proxy) — same override-with-a-derived-default shape as CORS_ALLOWED_ORIGIN
+// itself. webauthn.New validates the resulting config eagerly (fails boot on
+// a missing RP ID or origin), matching this package's fail-fast-on-missing-
+// config stance rather than deferring the failure to the first ceremony.
+func newWebAuthn(allowedOrigin string) (*webauthn.WebAuthn, error) {
+	u, err := url.Parse(allowedOrigin)
+	if err != nil || u.Hostname() == "" {
+		return nil, fmt.Errorf("apiserver: could not derive a WebAuthn RP ID from origin %q: %w", allowedOrigin, err)
+	}
+	rpID := os.Getenv("WEBAUTHN_RP_ID")
+	if rpID == "" {
+		rpID = u.Hostname()
+	}
+	rpDisplayName := os.Getenv("WEBAUTHN_RP_DISPLAY_NAME")
+	if rpDisplayName == "" {
+		rpDisplayName = "Chuvar"
+	}
+	wa, err := webauthn.New(&webauthn.Config{
+		RPID:          rpID,
+		RPDisplayName: rpDisplayName,
+		RPOrigins:     []string{allowedOrigin},
+		// Required, not preferred: this factor stands in for a TOTP code
+		// (requireStrongFactor accepts either), so it must carry the same
+		// "the human just proved presence right now" weight — a bare
+		// user-presence touch with no biometric/PIN would be a weaker
+		// factor than the code it's an alternative to.
+		AuthenticatorSelection: protocol.AuthenticatorSelection{
+			UserVerification: protocol.VerificationRequired,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("apiserver: configuring webauthn: %w", err)
+	}
+	return wa, nil
 }
 
 // openSealedStore unseals the master key, resolves the secrets DEK, and returns
@@ -174,8 +235,12 @@ func bootstrapReviewerToken(ctx context.Context, st *store.Store) error {
 	// No TOTP secret for the bootstrap token itself (empty string — see
 	// CreateReviewerToken): it's a break-glass way in, not a device meant for
 	// ongoing use. Its first job is authenticating a POST /api/tokens call to
-	// mint a real, TOTP-enrolled device token; requireTOTP-gated mutations stay
-	// unreachable on the bootstrap token alone.
+	// mint a real, TOTP-enrolled device token; requireStrongFactor-gated
+	// mutations stay unreachable on the bootstrap token alone — including via
+	// WebAuthn, because passkey registration (requireExistingSecondFactor,
+	// internal/api) refuses any token with no enrolled factor, so the
+	// bootstrap token can never mint itself the passkey that would otherwise
+	// pass those gates.
 	if _, err := st.CreateReviewerToken(ctx, "bootstrap", bootstrap, ""); err != nil {
 		return fmt.Errorf("apiserver: creating bootstrap reviewer token: %w", err)
 	}
@@ -183,11 +248,15 @@ func bootstrapReviewerToken(ctx context.Context, st *store.Store) error {
 	return nil
 }
 
-// warnIfNoEnrolledDevice logs a prominent warning when no device has ever
-// enrolled a TOTP secret, because that is the one state in which
-// POST /api/tokens accepts a bearer token alone (see internal/api's
-// createToken): with nothing to prove possession against, the enrollment gate
-// cannot be closed without making the system unbootstrappable.
+// warnIfNoEnrolledDevice logs a prominent warning when no second factor of
+// either kind — a TOTP secret or a WebAuthn credential — has ever been
+// enrolled, because that is the one state in which POST /api/tokens accepts
+// a bearer token alone (see internal/api's createToken, which checks the
+// same two counts): with nothing to prove possession against, the enrollment
+// gate cannot be closed without making the system unbootstrappable. Both
+// counts, matching the gate exactly — a warning keyed on a narrower signal
+// than the gate it warns about would keep firing after the gate had closed
+// (or worse, go quiet while it stood open).
 //
 // This is not just the fresh-install case. Every deployment that predates the
 // reviewer_totp migration lands here too: it adds the secret column as a
@@ -200,14 +269,18 @@ func bootstrapReviewerToken(ctx context.Context, st *store.Store) error {
 // A warning rather than a hard failure: refusing to start would break every
 // existing deployment on upgrade, turning a security gap into an outage.
 func warnIfNoEnrolledDevice(ctx context.Context, st *store.Store) error {
-	n, err := st.CountEverEnrolledReviewerTokens(ctx)
+	totpCount, err := st.CountEverEnrolledReviewerTokens(ctx)
 	if err != nil {
 		return fmt.Errorf("apiserver: checking for enrolled reviewer tokens: %w", err)
 	}
-	if n > 0 {
+	webauthnCount, err := st.CountEverEnrolledWebAuthnCredentials(ctx)
+	if err != nil {
+		return fmt.Errorf("apiserver: checking for enrolled webauthn credentials: %w", err)
+	}
+	if totpCount+webauthnCount > 0 {
 		return nil
 	}
-	slog.Warn("apiserver: SECURITY — no reviewer device has enrolled a TOTP secret, " +
+	slog.Warn("apiserver: SECURITY — no reviewer device has enrolled a second factor (TOTP or passkey), " +
 		"so POST /api/tokens currently accepts a bearer token alone and anything holding " +
 		"that token can mint and enroll its own device. Enrol one now: POST /api/tokens " +
 		"and scan the returned otpauth:// URI. See README.md.")

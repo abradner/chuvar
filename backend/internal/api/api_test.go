@@ -17,6 +17,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/webauthn"
+
 	"github.com/abradner/chuvar/backend/internal/custody"
 	"github.com/abradner/chuvar/backend/internal/db"
 	"github.com/abradner/chuvar/backend/internal/embed"
@@ -35,6 +38,39 @@ const testAuthToken = "test-token-do-not-use-in-prod"
 // package can compute a valid current code without coordinating on state.
 const testTOTPSecret = "JBSWY3DPEHPK3PXP"
 
+// testRPID/testOrigin are the WebAuthn Relying Party identity every test
+// server in this package validates ceremonies against — matching what a real
+// deployment's dev default resolves to (cmd/apiserver's newWebAuthn derives
+// RP ID "localhost" from the same http://localhost:5173 origin). Fixed
+// constants so every virtual-authenticator helper (webauthn_virtual_test.go)
+// can build clientDataJSON against a known value rather than threading it
+// through every test.
+const (
+	testRPID   = "localhost"
+	testOrigin = "http://localhost:5173"
+)
+
+// testWebAuthn builds the *webauthn.WebAuthn every testServer variant needs
+// to satisfy api.New's now-required WebAuthn field. User verification is
+// required, matching cmd/apiserver's real configuration (newWebAuthn's doc
+// comment on why: this factor stands in for a TOTP code, so it must carry
+// the same "the human just proved presence right now" weight).
+func testWebAuthn(t *testing.T) *webauthn.WebAuthn {
+	t.Helper()
+	wa, err := webauthn.New(&webauthn.Config{
+		RPID:          testRPID,
+		RPDisplayName: "Chuvar Test",
+		RPOrigins:     []string{testOrigin},
+		AuthenticatorSelection: protocol.AuthenticatorSelection{
+			UserVerification: protocol.VerificationRequired,
+		},
+	})
+	if err != nil {
+		t.Fatalf("webauthn.New() error = %v", err)
+	}
+	return wa
+}
+
 func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
 	url := os.Getenv("DATABASE_URL")
@@ -51,7 +87,7 @@ func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, grant_requests, data_keys`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -59,7 +95,7 @@ func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 	if _, err := st.CreateReviewerToken(ctx, "test-reviewer", testAuthToken, testTOTPSecret); err != nil {
 		t.Fatalf("seeding reviewer token: %v", err)
 	}
-	a := New(st, embed.Stub{}, summarize.Stub{}, "http://localhost:5173", 10*time.Second)
+	a := New(st, embed.Stub{}, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t))
 	srv := httptest.NewServer(a.Routes())
 	t.Cleanup(srv.Close)
 	return srv, st
@@ -86,7 +122,7 @@ func testServerWithBootstrapToken(t *testing.T) (*httptest.Server, string) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, grant_requests, data_keys`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -95,7 +131,7 @@ func testServerWithBootstrapToken(t *testing.T) (*httptest.Server, string) {
 	if _, err := st.CreateReviewerToken(ctx, "bootstrap", bootstrapToken, ""); err != nil {
 		t.Fatalf("seeding bootstrap token: %v", err)
 	}
-	a := New(st, embed.Stub{}, summarize.Stub{}, "http://localhost:5173", 10*time.Second)
+	a := New(st, embed.Stub{}, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t))
 	srv := httptest.NewServer(a.Routes())
 	t.Cleanup(srv.Close)
 	return srv, bootstrapToken
@@ -131,7 +167,7 @@ func doJSONWithAuth(t *testing.T, method, url string, body any, token string) *h
 	}
 	// Attach a valid current TOTP code whenever the request is authenticating as
 	// the seeded testAuthToken — harmless for routes that don't check it
-	// (requireTOTP only gates approve/create-grant), and means individual tests
+	// (requireStrongFactor only gates approve/create-grant), and means individual tests
 	// don't each have to compute one just to reach a gated handler.
 	if token == testAuthToken {
 		code, err := totp.GenerateCode(testTOTPSecret, time.Now())
@@ -294,7 +330,7 @@ func TestRequireTOTP_UnenrolledTokenRejected(t *testing.T) {
 
 	// A token created with no TOTP secret (the pre-this-batch default, and the
 	// bootstrap token's own shape) authenticates fine but must never pass a
-	// requireTOTP-gated route — that's the whole point of failing closed.
+	// requireStrongFactor-gated route — that's the whole point of failing closed.
 	if _, err := st.CreateReviewerToken(ctx, "no-totp-device", "no-totp-plaintext", ""); err != nil {
 		t.Fatalf("CreateReviewerToken() error = %v", err)
 	}
@@ -331,7 +367,7 @@ func TestRequireTOTP_DenyRevokeNotGated(t *testing.T) {
 		t.Fatalf("RequestGrant() error = %v", err)
 	}
 
-	// deny is deliberately not gated by requireTOTP (see api.go's Routes doc
+	// deny is deliberately not gated by requireStrongFactor (see api.go's Routes doc
 	// comment): it only reduces authority, not the self-escalation vector the
 	// gate exists for. doJSONWithAuth with no TOTP header must still succeed.
 	resp := doJSONWithAuth(t, http.MethodPost, srv.URL+"/api/grant-requests/"+req.ID+"/deny", nil, testAuthToken)
@@ -834,7 +870,7 @@ func TestRoutes_CORSAllowsTOTPHeader(t *testing.T) {
 	srv, _ := testServer(t)
 
 	// Without X-Chuvar-TOTP-Code in Access-Control-Allow-Headers, a browser's
-	// preflight for any requireTOTP-gated mutation (createGrant, approve*,
+	// preflight for any requireStrongFactor-gated mutation (createGrant, approve*,
 	// renewGrant) rejects the real request client-side before it reaches the
 	// server — the frontend's TOTP-gated actions would be unreachable
 	// cross-origin. Found in review.
@@ -886,7 +922,7 @@ func TestNew_WildcardOriginRejected(t *testing.T) {
 			t.Fatal("New() with CORS_ALLOWED_ORIGIN=\"*\": want panic, got none")
 		}
 	}()
-	New(nil, nil, nil, "*", 10*time.Second)
+	New(nil, nil, nil, "*", 10*time.Second, testWebAuthn(t))
 }
 
 func TestNew_NullOriginRejected(t *testing.T) {
@@ -895,7 +931,7 @@ func TestNew_NullOriginRejected(t *testing.T) {
 			t.Fatal(`New() with CORS_ALLOWED_ORIGIN="null": want panic, got none`)
 		}
 	}()
-	New(nil, nil, nil, "null", 10*time.Second)
+	New(nil, nil, nil, "null", 10*time.Second, testWebAuthn(t))
 }
 
 func TestNew_OriginWithPathRejected(t *testing.T) {
@@ -904,7 +940,7 @@ func TestNew_OriginWithPathRejected(t *testing.T) {
 			t.Fatal("New() with a CORS_ALLOWED_ORIGIN containing a path: want panic, got none")
 		}
 	}()
-	New(nil, nil, nil, "http://localhost:5173/app", 10*time.Second)
+	New(nil, nil, nil, "http://localhost:5173/app", 10*time.Second, testWebAuthn(t))
 }
 
 func TestNew_NonPositiveRequestTimeoutRejected(t *testing.T) {
@@ -913,7 +949,16 @@ func TestNew_NonPositiveRequestTimeoutRejected(t *testing.T) {
 			t.Fatal("New() with a zero RequestTimeout: want panic, got none")
 		}
 	}()
-	New(nil, nil, nil, "", 0)
+	New(nil, nil, nil, "", 0, testWebAuthn(t))
+}
+
+func TestNew_NilWebAuthnRejected(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("New() with a nil WebAuthn: want panic, got none")
+		}
+	}()
+	New(nil, nil, nil, "", 10*time.Second, nil)
 }
 
 // slowThenCheckContextEmbedder sleeps past the request timeout, then reports
@@ -948,7 +993,7 @@ func TestWithRequestTimeout_CancelsSlowHandlerContext(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, grant_requests, data_keys`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -960,7 +1005,7 @@ func TestWithRequestTimeout_CancelsSlowHandlerContext(t *testing.T) {
 	// RequestTimeout much shorter than the embedder's sleep: without
 	// withRequestTimeout wiring a.RequestTimeout into the handler's context, the
 	// embedder would just sleep out its full duration and report canceled=false.
-	a := New(st, slowThenCheckContextEmbedder{sleep: 200 * time.Millisecond, canceled: canceled}, summarize.Stub{}, "", 20*time.Millisecond)
+	a := New(st, slowThenCheckContextEmbedder{sleep: 200 * time.Millisecond, canceled: canceled}, summarize.Stub{}, "", 20*time.Millisecond, testWebAuthn(t))
 	srv := httptest.NewServer(a.Routes())
 	t.Cleanup(srv.Close)
 
@@ -1073,7 +1118,7 @@ func TestCreateToken_BootstrapTokenCreatesFirstEnrolledDeviceWithoutTOTP(t *test
 	srv, bootstrapToken := testServerWithBootstrapToken(t)
 
 	// The bootstrap token has no TOTP secret of its own — this is the one
-	// call requireTOTP-style gating must not block, or the operator could
+	// call requireStrongFactor-style gating must not block, or the operator could
 	// never mint a first real device via the API at all.
 	resp := doJSONWithAuth(t, http.MethodPost, srv.URL+"/api/tokens", createTokenRequest{Label: "first-device"}, bootstrapToken)
 	if resp.StatusCode != http.StatusCreated {

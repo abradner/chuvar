@@ -13,6 +13,12 @@ import (
 
 type Querier interface {
 	ApproveGrantRequest(ctx context.Context, arg ApproveGrantRequestParams) (int64, error)
+	// DELETE ... RETURNING makes single-use atomic: two concurrent finish calls
+	// for the same reviewer/purpose can never both see a row, since only one
+	// DELETE can match it. expires_at > now() folds the short-expiry check into
+	// the same statement rather than a separate read-then-check that would leave
+	// a window between them.
+	ConsumeWebAuthnChallenge(ctx context.Context, arg ConsumeWebAuthnChallengeParams) ([]byte, error)
 	CountActiveReviewerTokens(ctx context.Context) (int64, error)
 	// Deliberately NOT filtered on revoked_at: this counts whether a TOTP device
 	// has *ever* been enrolled, which is a monotonic, attacker-unlowerable signal.
@@ -22,12 +28,28 @@ type Querier interface {
 	// through the now-open gate. Revoked rows are never deleted, so this count
 	// only ever grows. See createToken (internal/api/tokens.go).
 	CountEverEnrolledReviewerTokens(ctx context.Context) (int64, error)
+	// Deliberately NOT filtered on revoked_at, mirroring
+	// CountEverEnrolledReviewerTokens (reviewer_tokens.sql) exactly and for the
+	// same reason: this feeds createToken's monotonic "has any second factor
+	// ever been enrolled on this deployment" gate, and an active-only count
+	// would let bearer-only revocation (of credentials or of their owning
+	// tokens) reopen that gate. Rows are never deleted by any API path — revoke
+	// sets revoked_at, and the ON DELETE CASCADE on reviewer_token_id can only
+	// fire on a reviewer_tokens DELETE, which no API endpoint performs (tokens
+	// are revoked, never deleted) — so this count only ever grows.
+	CountEverEnrolledWebAuthnCredentials(ctx context.Context) (int64, error)
 	DenyGrantRequest(ctx context.Context, arg DenyGrantRequestParams) (int64, error)
 	FactVisibleToScopes(ctx context.Context, arg FactVisibleToScopesParams) (bool, error)
 	// embedding_1/embedding_2 are the same repeated-named-param workaround used
 	// elsewhere in this migration (see facts.sql's SearchFacts) — bound to the
 	// identical value at the call site.
 	FindDedupeCandidate(ctx context.Context, arg FindDedupeCandidateParams) (FindDedupeCandidateRow, error)
+	// A regressed sign counter is treated as a clone signal and fails closed by
+	// revoking the credential in the same statement that flags it — a warning
+	// left live would mean the same possibly-cloned key keeps passing this gate
+	// on every subsequent call. See the webauthn_credentials migration's comment
+	// on clone_warning_at.
+	FlagWebAuthnCredentialCloneWarning(ctx context.Context, id string) error
 	GetDataKey(ctx context.Context, purpose string) (DataKey, error)
 	GetFact(ctx context.Context, id string) (GetFactRow, error)
 	GetGrantRequest(ctx context.Context, id string) (GrantRequest, error)
@@ -78,6 +100,7 @@ type Querier interface {
 	// agent enumerate every other subject's proposed content. Narrow here, and the
 	// grant narrows with it (see the least_privilege_roles migration).
 	InsertStagedDiff(ctx context.Context, arg InsertStagedDiffParams) (InsertStagedDiffRow, error)
+	InsertWebAuthnCredential(ctx context.Context, arg InsertWebAuthnCredentialParams) (WebauthnCredential, error)
 	ListGrantRequests(ctx context.Context, status string) ([]GrantRequest, error)
 	// Explicit-bound variant of ListGrantRequests for the /api/events SSE poll
 	// loop, same rationale as staged_diffs.sql's ListStagedDiffsBounded. The REST
@@ -144,6 +167,13 @@ type Querier interface {
 	// ListStagedDiffsPage) — fetching one extra row is how that caller answers
 	// "does another page exist" without a second query.
 	ListStagedDiffsPage(ctx context.Context, arg ListStagedDiffsPageParams) ([]StagedDiff, error)
+	// Returns every credential (active and revoked) owned by one reviewer token,
+	// oldest first — mirrors ListReviewerTokens's "show history, not just the
+	// live set" stance. Callers that need only live credentials (building a
+	// ceremony's allow/exclude list) filter revoked_at in Go rather than a second
+	// near-identical query — one source of truth for "what does this reviewer
+	// have" that both the ceremony and the listing endpoint read.
+	ListWebAuthnCredentialsForReviewer(ctx context.Context, reviewerTokenID string) ([]WebauthnCredential, error)
 	LoadGrantRequestForUpdate(ctx context.Context, id string) (LoadGrantRequestForUpdateRow, error)
 	LoadStagedDiffForUpdate(ctx context.Context, id string) (LoadStagedDiffForUpdateRow, error)
 	LockTargetFact(ctx context.Context, id string) (*time.Time, error)
@@ -166,8 +196,14 @@ type Querier interface {
 	// today (both API and MCP hardcode kind='memory'), so this filter is a latch
 	// closed before the door exists, not a live fix.
 	RenewGrant(ctx context.Context, arg RenewGrantParams) (Grant, error)
+	ReviewerHasActiveWebAuthnCredential(ctx context.Context, reviewerTokenID string) (bool, error)
+	// Per-reviewer, not the deployment-wide CountEverEnrolledReviewerTokens: this
+	// answers "does *this* token have a factor to demand", not "has anything ever
+	// been enrolled" — see requireExistingSecondFactor (internal/api).
+	ReviewerHasTOTP(ctx context.Context, id string) (pgtype.Bool, error)
 	RevokeGrant(ctx context.Context, id string) (int64, error)
 	RevokeReviewerToken(ctx context.Context, id string) (int64, error)
+	RevokeWebAuthnCredential(ctx context.Context, arg RevokeWebAuthnCredentialParams) (int64, error)
 	// Master-key rotation: replaces the wrapping without touching anything sealed
 	// under the DEK itself. The DEK's plaintext bytes are unchanged by definition,
 	// so no data is re-encrypted.
@@ -178,6 +214,11 @@ type Querier interface {
 	SearchFacts(ctx context.Context, arg SearchFactsParams) ([]SearchFactsRow, error)
 	SupersedeFact(ctx context.Context, arg SupersedeFactParams) error
 	TouchReviewerToken(ctx context.Context, id string) error
+	UpdateWebAuthnCredentialCounter(ctx context.Context, arg UpdateWebAuthnCredentialCounterParams) error
+	// One pending challenge per (reviewer, purpose): starting a new ceremony
+	// overwrites whatever the previous, presumably-abandoned one was rather than
+	// accumulating rows nothing will ever consume.
+	UpsertWebAuthnChallenge(ctx context.Context, arg UpsertWebAuthnChallengeParams) error
 }
 
 var _ Querier = (*Queries)(nil)

@@ -191,9 +191,9 @@ type renewGrantRequest struct {
 	TTLSeconds int `json:"ttl_seconds"`
 }
 
-// renewGrant handles POST /api/grants/{id}/renew, gated by requireTOTP —
+// renewGrant handles POST /api/grants/{id}/renew, gated by requireStrongFactor —
 // same self-escalation-prevention rationale as createGrant/
-// approveGrantRequest/approveStagedDiff (requireTOTP's doc comment).
+// approveGrantRequest/approveStagedDiff (requireStrongFactor's doc comment).
 // ttl_seconds is required, unlike createGrant's optional one: see
 // store.RenewGrant's doc comment for why renewing into "no expiry" isn't
 // allowed. renewed_by is the authenticated reviewer, not a request body

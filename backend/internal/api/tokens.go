@@ -75,7 +75,7 @@ type createTokenResponse struct {
 	Token string `json:"token"`
 	// TOTPEnrollURI is an otpauth:// URI for scanning into an authenticator app —
 	// same "shown exactly once" discipline as Token. This is the device-local
-	// second factor requireTOTP checks on approval mutations; a token minted
+	// second factor requireStrongFactor checks on approval mutations; a token minted
 	// without ever seeing this value can authenticate for reads but can never
 	// pass that gate; see the reviewer_totp migration's doc comment for why.
 	TOTPEnrollURI string `json:"totp_enroll_uri"`
@@ -110,21 +110,32 @@ func generateToken() (string, error) {
 // way to request a weak or predictable token) and returned once in the
 // response, alongside a fresh TOTP enrollment URI.
 //
-// Gated by TOTP conditionally, not via requireTOTP's unconditional wrap like
-// createGrant/approveGrantRequest/approveStagedDiff/renewGrant: once any
-// device has ever been enrolled (CountEverEnrolledReviewerTokens > 0), a valid
-// code is required from the caller, same as those routes. Below that — a fresh
+// Gated by a second factor conditionally, not via requireStrongFactor's
+// unconditional wrap like createGrant/approveGrantRequest/approveStagedDiff/
+// renewGrant: once any second factor of either kind has ever been enrolled
+// anywhere on this deployment (CountEverEnrolledReviewerTokens for TOTP,
+// CountEverEnrolledWebAuthnCredentials for passkeys), a valid factor — TOTP
+// code or WebAuthn assertion, same either-or as those routes
+// (verifySecondFactor) — is required from the caller. Below that — a fresh
 // install, or a deployment still carrying only pre-TOTP-migration tokens — no
-// code is required, because the bootstrap token this endpoint's first real
+// factor is required, because the bootstrap token this endpoint's first real
 // call authenticates with (cmd/apiserver's bootstrapReviewerToken) is
-// deliberately created with no TOTP secret of its own; an unconditional
-// requireTOTP wrap would make it impossible to ever mint the operator's first
-// enrolled device. Once that first device is enrolled the gate is permanently
-// closed — including against the bootstrap token itself, which (having no
-// secret) can never pass it again, correctly retiring it to break-glass
-// status. Closes the gap where a stolen bearer token alone could mint a fresh
-// token, read its otpauth:// URI from the response, and self-enroll,
-// defeating every other requireTOTP gate. Found in review.
+// deliberately created with no factor of its own; an unconditional
+// requireStrongFactor wrap would make it impossible to ever mint the
+// operator's first enrolled device. Once that first device is enrolled the
+// gate is permanently closed — including against the bootstrap token itself,
+// which (having no factor) can never pass it again, correctly retiring it to
+// break-glass status. Closes the gap where a stolen bearer token alone could
+// mint a fresh token, read its otpauth:// URI from the response, and
+// self-enroll, defeating every other second-factor gate. Found in review.
+//
+// Both counts, not just the TOTP one: a gate that only counted TOTP
+// enrollments would silently stand open in any state where passkeys are the
+// only factor ever enrolled (reachable today after a break-glass TOTP reset
+// that leaves credentials rows in place, and structurally the moment any
+// future change permits passkey-first enrollment) — the exact self-mint
+// escalation this gate exists to close, reopened for one factor kind.
+// Found in review.
 //
 // The count deliberately includes revoked tokens. An active-only count made
 // this gate re-openable by the very credential it defends against: revocation
@@ -138,20 +149,25 @@ func generateToken() (string, error) {
 // first version of this fix.
 //
 // The tradeoff: losing every enrolled device is not self-service recoverable
-// over the API. Minting a replacement needs a code the operator no longer has,
-// and REVIEWER_BOOTSTRAP_TOKEN can't help — a fresh bootstrap token still
-// faces a nonzero ever-enrolled count. That is deliberate: an API-reachable
-// recovery path is indistinguishable from the attack above. Recovery is a
-// direct database action (clear totp_secret_enc on a token row, or delete the
-// enrolled rows), which suits this deployment's single operator with DB
-// access; see docs/operations.md.
+// over the API. Minting a replacement needs a factor the operator no longer
+// has, and REVIEWER_BOOTSTRAP_TOKEN can't help — a fresh bootstrap token
+// still faces a nonzero ever-enrolled count. That is deliberate: an
+// API-reachable recovery path is indistinguishable from the attack above.
+// Recovery is a direct database action (clear totp_secret_enc and delete
+// webauthn_credentials rows — both counts must reach zero), which suits this
+// deployment's single operator with DB access; see docs/operations.md.
 func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
-	everEnrolled, err := a.Store.CountEverEnrolledReviewerTokens(r.Context())
+	everEnrolledTOTP, err := a.Store.CountEverEnrolledReviewerTokens(r.Context())
 	if err != nil {
 		writeStoreError(w, http.StatusInternalServerError, "createToken", "could not check enrollment status", err)
 		return
 	}
-	if everEnrolled > 0 && !a.verifyTOTPCode(w, r) {
+	everEnrolledWebAuthn, err := a.Store.CountEverEnrolledWebAuthnCredentials(r.Context())
+	if err != nil {
+		writeStoreError(w, http.StatusInternalServerError, "createToken", "could not check enrollment status", err)
+		return
+	}
+	if everEnrolledTOTP+everEnrolledWebAuthn > 0 && !a.verifySecondFactor(w, r) {
 		return
 	}
 
@@ -198,7 +214,7 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 // multiple devices, no role model yet" reason as every other route (package
 // comment); the operator is expected not to hand device tokens to anyone else.
 //
-// Left bearer-only (no requireTOTP) on the stance that revocation only ever
+// Left bearer-only (no requireStrongFactor) on the stance that revocation only ever
 // reduces authority. That stance is a real invariant, not just a convention:
 // createToken's enrollment gate is keyed on a count this endpoint must not be
 // able to lower, which is why that count includes revoked tokens. Before
