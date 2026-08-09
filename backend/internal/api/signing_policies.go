@@ -40,14 +40,28 @@ func toSigningPolicyView(p store.RepoSigningPolicy) signingPolicyView {
 }
 
 // validateRepo rejects an empty, oversized, or whitespace-containing repo
-// identifier before it reaches the store. This is politeness, not
-// enforcement (AGENTS.md §6's deletion test): there is no DB CHECK backing a
-// repo identifier's shape — like the scope taxonomy (§3.4), it isn't a closed
-// vocabulary — so store.UpsertSigningPolicy/GetSigningPolicy's own
-// repo == "" checks are the real floor, not this function. Deleting this
-// function would turn a malformed request into a less legible failure
-// further down the stack, never make a new state possible that the store
-// layer doesn't already guard.
+// identifier before it reaches the store. Unlike the `policy` column (a
+// closed vocabulary backed by both a DB CHECK constraint and API validation
+// — see the migration's doc comment), repo has no DB CHECK behind it: the
+// signing_policies migration only constrains it as NOT NULL PRIMARY KEY, and
+// neither store.UpsertSigningPolicy nor store.GetSigningPolicy checks its
+// length or content — UpsertSigningPolicy's own repo == "" guard covers only
+// the empty case. So the deletion test (AGENTS.md §6) does not apply
+// uniformly to this function's three branches:
+//   - The empty check IS politeness only: deleting it would surface a less
+//     legible failure (UpsertSigningPolicy's "repo must not be empty" error,
+//     or on the read path a 404 that reads as "no policy set" rather than a
+//     400 "repo is required"), never a new possible state — the store layer
+//     already guards emptiness on the write path, and an empty string
+//     matches no row on the read path either way.
+//   - The length and whitespace checks are NOT backed by the store or by any
+//     DB constraint. They are the sole enforcement of those two properties.
+//     Deleting either branch (or this function) would let an
+//     unbounded-length or whitespace-containing repo string reach
+//     signing_policies unchecked — a genuinely new state, not just a less
+//     legible failure — with no error raised anywhere in the write path to
+//     reveal it. Do not delete them on the belief that something further
+//     down the stack already guards this; nothing does.
 func validateRepo(repo string) error {
 	if repo == "" {
 		return fmt.Errorf("repo is required")

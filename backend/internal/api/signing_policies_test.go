@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -194,5 +195,45 @@ func TestGetSigningPolicy_NotGatedByTOTP(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /api/signing-policies/{repo} with no TOTP header: status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestValidateRepo unit-tests validateRepo directly rather than only through
+// the HTTP round trip TestUpsertSigningPolicy_OversizedRepoRejected/
+// TestUpsertSigningPolicy_WhitespaceInRepoRejected exercise. It exists to pin
+// down validateRepo's doc comment: unlike the empty-repo case (backed by
+// store.UpsertSigningPolicy's own repo == "" guard), the length and
+// whitespace checks are NOT backed by the store or any DB constraint —
+// validateRepo is their only enforcement. This test (and the two HTTP-level
+// tests above) is what would catch a future edit that deletes those branches
+// on the mistaken belief that something further down the stack still guards
+// them.
+func TestValidateRepo(t *testing.T) {
+	oversized := strings.Repeat("a", maxRepoLength+1)
+
+	cases := []struct {
+		name    string
+		repo    string
+		wantErr bool
+	}{
+		{"valid", "github.com/abradner/chuvar", false},
+		{"empty", "", true},
+		{"oversized", oversized, true},
+		{"at max length", strings.Repeat("a", maxRepoLength), false},
+		{"space", "github.com/abradner/chu var", true},
+		{"tab", "github.com/abradner/chu\tvar", true},
+		{"newline", "github.com/abradner/chu\nvar", true},
+		{"unicode whitespace (NBSP)", "github.com/abradner/chu var", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateRepo(tc.repo)
+			if tc.wantErr && err == nil {
+				t.Fatalf("validateRepo(%q) = nil, want an error", tc.repo)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("validateRepo(%q) = %v, want nil", tc.repo, err)
+			}
+		})
 	}
 }
