@@ -41,7 +41,8 @@ func (q *Queries) FactVisibleToScopes(ctx context.Context, arg FactVisibleToScop
 }
 
 const findDedupeCandidate = `-- name: FindDedupeCandidate :one
-SELECT f.id, f.content, f.embedding <=> $1::vector AS distance
+SELECT f.id, f.content, f.embedding <=> $1::vector AS distance,
+    (SELECT array_agg(fs.scope) FROM fact_scopes fs WHERE fs.fact_id = f.id)::text[] AS scopes
 FROM facts f
 WHERE f.invalid_at IS NULL AND f.embedding IS NOT NULL
   AND EXISTS (SELECT 1 FROM fact_scopes fs WHERE fs.fact_id = f.id)
@@ -65,11 +66,21 @@ type FindDedupeCandidateRow struct {
 	ID       string
 	Content  string
 	Distance pgtype.Float8
+	Scopes   []string
 }
 
 // embedding_1/embedding_2 are the same repeated-named-param workaround used
 // elsewhere in this migration (see facts.sql's SearchFacts) — bound to the
 // identical value at the call site.
+//
+// scopes is returned (same array_agg subselect facts.sql's SearchFacts already
+// uses) so the caller can compute the candidate's effective depth for THIS
+// proposer via the same effectiveDepth logic SearchFacts uses — see
+// staged_diffs.go's findDedupeCandidate for why: the WHERE clause below still
+// only filters by scope (matching every granted depth, on purpose — dedupe
+// must catch a duplicate even against a fact the proposer can only read at
+// summary depth), so depth-based disclosure has to happen in Go, after this
+// query, not by narrowing the candidate set here.
 func (q *Queries) FindDedupeCandidate(ctx context.Context, arg FindDedupeCandidateParams) (FindDedupeCandidateRow, error) {
 	row := q.db.QueryRow(ctx, findDedupeCandidate,
 		arg.Embedding1,
@@ -78,7 +89,12 @@ func (q *Queries) FindDedupeCandidate(ctx context.Context, arg FindDedupeCandida
 		arg.Embedding2,
 	)
 	var i FindDedupeCandidateRow
-	err := row.Scan(&i.ID, &i.Content, &i.Distance)
+	err := row.Scan(
+		&i.ID,
+		&i.Content,
+		&i.Distance,
+		&i.Scopes,
+	)
 	return i, err
 }
 

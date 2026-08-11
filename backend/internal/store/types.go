@@ -51,6 +51,18 @@ const (
 	DedupeNovel         DedupeVerdict = "novel"
 	DedupeDuplicate     DedupeVerdict = "duplicate"
 	DedupeContradiction DedupeVerdict = "contradiction"
+
+	// DedupeNeedsReview is the verdict a propose_write caller sees in place of
+	// DedupeDuplicate/DedupeContradiction when the matched candidate fact is
+	// NOT one the proposer could otherwise read past summary depth. It never
+	// appears in a staged_diffs row — see the dedupe_verdict CHECK constraint
+	// in the init migration, which intentionally still lists only novel/
+	// duplicate/contradiction, and staged_diffs.go's discloseDedupeResult,
+	// which computes this value only for the copy of the verdict returned to
+	// the caller, after the accurate value has already been persisted. Fixes
+	// GitHub issue #83 — see findDedupeCandidate's doc comment for the full
+	// threat model.
+	DedupeNeedsReview DedupeVerdict = "needs_review"
 )
 
 type DiffStatus string

@@ -181,16 +181,20 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 		scopeStrs[i] = string(sc)
 	}
 
-	// The subject's current granted scopes gate both the dedupe candidate search
-	// and target_fact_id visibility inside ProposeDiff — see that function's doc
-	// comment. Fetched here rather than inside the store layer because Bouncer
-	// already owns "what does this subject need to act" plumbing (Embedder,
-	// Classifier); Store just persists what it's handed.
-	grantedScopes, err := b.Store.GrantedScopes(ctx, subject)
+	// The subject's current granted (scope, depth) pairs gate the dedupe
+	// candidate search, target_fact_id visibility, AND how much of the dedupe
+	// result the subject is allowed to learn — see ProposeDiff's doc comment.
+	// Fetched here rather than inside the store layer because Bouncer already
+	// owns "what does this subject need to act" plumbing (Embedder, Classifier);
+	// Store just persists what it's handed. GrantedScopeDepths, not the flatter
+	// GrantedScopes, because depth is what closes the propose_write
+	// content-confirmation oracle (GitHub issue #83) — ProposeDiff derives the
+	// scope-only list it also needs from this itself.
+	granted, err := b.Store.GrantedScopeDepths(ctx, subject)
 	if err != nil {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: granted scopes: %w", err)
+		return store.StagedDiff{}, fmt.Errorf("bouncer: granted scope depths: %w", err)
 	}
-	diff, err := b.Store.ProposeDiff(ctx, subject, content, scopeStrs, vec, targetFactID, grantedScopes)
+	diff, err := b.Store.ProposeDiff(ctx, subject, content, scopeStrs, vec, targetFactID, granted)
 	if err != nil {
 		return store.StagedDiff{}, fmt.Errorf("bouncer: stage diff: %w", err)
 	}

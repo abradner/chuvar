@@ -306,7 +306,7 @@ func TestProposeWrite_TargetOutsideSubjectGrantsRejected(t *testing.T) {
 	}
 
 	// This is the actual wiring under test: ProposeWrite must fetch agent-b's real
-	// granted scopes (via Store.GrantedScopes) and pass them through to
+	// granted scope depths (via Store.GrantedScopeDepths) and pass them through to
 	// Store.ProposeDiff, which is what rejects the out-of-grant target. A unit
 	// test with a fake/hardcoded scopes list wouldn't catch a wiring mistake here
 	// (wrong subject, wrong variable, argument left out) the way this does.
@@ -320,6 +320,81 @@ func TestProposeWrite_TargetOutsideSubjectGrantsRejected(t *testing.T) {
 	// ValidationError, or mcptools.propose_write would show a store-originated
 	// error verbatim, the exact leak the taxonomy exists to prevent.
 	wantNotValidationError(t, err)
+}
+
+// TestProposeWrite_DedupeDisclosureUsesRealGrantDepth proves the actual
+// production wiring for GitHub issue #83, not just the store-layer unit tests
+// (store_test.go's TestProposeDiff_DedupeDisclosureSuppressedAtSummaryDepth and
+// siblings, which pass depth in directly): ProposeWrite must fetch the
+// subject's REAL granted depths via Store.GrantedScopeDepths (not the flatter
+// Store.GrantedScopes it used before this fix) and thread them all the way
+// through to the verdict a caller of the MCP tool actually receives. A wiring
+// mistake here (e.g. reverting to GrantedScopes, or fetching depths for the
+// wrong subject) wouldn't be caught by the store-layer tests alone.
+func TestProposeWrite_DedupeDisclosureUsesRealGrantDepth(t *testing.T) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set; skipping bouncer integration test")
+	}
+	if err := db.Migrate(url); err != nil {
+		t.Fatalf("db.Migrate() error = %v", err)
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits, capability_grant_identities, capability_grant_tokens`); err != nil {
+		t.Fatalf("truncating tables: %v", err)
+	}
+
+	st := store.New(pool)
+	b := New(st, embed.Stub{}, PassthroughClassifier{})
+
+	content := "user's blood type is O+"
+
+	// agent-a holds a real full-depth grant and stages/commits the fact.
+	if _, err := st.CreateGrant(ctx, "agent-a", []string{"identity.medical"}, "memory", "full", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() (agent-a) error = %v", err)
+	}
+	first, err := b.ProposeWrite(ctx, "agent-a", content, []scope.Scope{"identity.medical"}, nil)
+	if err != nil {
+		t.Fatalf("ProposeWrite() (original) error = %v", err)
+	}
+	// CommitDiff takes the embedding as a separate argument rather than
+	// re-deriving it from the diff's content (see CommitDiff's own doc comment)
+	// — a nil embedding here would leave the committed fact's embedding column
+	// NULL, which findDedupeCandidate's WHERE clause explicitly excludes
+	// (embedding IS NOT NULL), making the fact invisible to dedupe regardless of
+	// this test's actual subject. Compute the same deterministic vector
+	// ProposeWrite used so the fact is a real dedupe candidate.
+	vec, err := (embed.Stub{}).Embed(ctx, content)
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	if _, err := st.CommitDiff(ctx, first.ID, "human-reviewer", vec, ""); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	// agent-b holds a real grant over the same scope, but only at summary depth.
+	if _, err := st.CreateGrant(ctx, "agent-b", []string{"identity.medical"}, "memory", "summary", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() (agent-b) error = %v", err)
+	}
+
+	guess, err := b.ProposeWrite(ctx, "agent-b", content, []scope.Scope{"identity.medical"}, nil)
+	if err != nil {
+		t.Fatalf("ProposeWrite() (guess) error = %v", err)
+	}
+	if guess.DedupeVerdict == nil {
+		t.Fatal("ProposeWrite() verdict for a real summary-depth grant = nil, want needs_review")
+	}
+	if *guess.DedupeVerdict != store.DedupeNeedsReview {
+		t.Fatalf("ProposeWrite() verdict for a real summary-depth grant = %q, want needs_review", *guess.DedupeVerdict)
+	}
+	if guess.DedupeCandidateFactID != nil {
+		t.Fatalf("ProposeWrite() leaked candidate fact ID %s to a real summary-depth grant", *guess.DedupeCandidateFactID)
+	}
 }
 
 func TestProposeWrite_EndToEnd(t *testing.T) {

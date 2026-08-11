@@ -39,11 +39,15 @@ func registerProposeWrite(s *mcp.Server, subject string, b *bouncer.Bouncer) {
 			"it runs the bouncer pipeline (classify, embed, dedupe) and queues a diff that a human " +
 			"must explicitly approve before it becomes a real, readable fact. The dedupe_verdict in " +
 			"the response tells you what happened: novel (new fact), duplicate (matches an existing " +
-			"fact exactly, will likely be rejected as redundant), or contradiction (semantically close " +
-			"to an existing fact but not identical — flagged for human review rather than auto-merged). " +
-			"Proposals are rate-limited per subject: if status=RATE_LIMITED comes back (no diff_id), " +
-			"you've proposed too many facts too quickly — wait for the current window to pass before " +
-			"retrying rather than looping on this call.",
+			"fact exactly, will likely be rejected as redundant), contradiction (semantically close " +
+			"to an existing fact but not identical — flagged for human review rather than auto-merged), " +
+			"or needs_review (this proposal is close to something already on file, but you don't hold " +
+			"deep enough access to that fact to be told which kind of match it is or its ID — a human " +
+			"will review it; this is not a hint you can resolve by proposing variations of the same " +
+			"guess). candidate_fact_id is only ever populated for duplicate/contradiction, never for " +
+			"needs_review. Proposals are rate-limited per subject: if status=RATE_LIMITED comes back " +
+			"(no diff_id), you've proposed too many facts too quickly — wait for the current window " +
+			"to pass before retrying rather than looping on this call.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    false,
 			DestructiveHint: &falsePtr, // stages a diff, never mutates committed facts

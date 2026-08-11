@@ -49,6 +49,15 @@ type Querier interface {
 	// embedding_1/embedding_2 are the same repeated-named-param workaround used
 	// elsewhere in this migration (see facts.sql's SearchFacts) — bound to the
 	// identical value at the call site.
+	//
+	// scopes is returned (same array_agg subselect facts.sql's SearchFacts already
+	// uses) so the caller can compute the candidate's effective depth for THIS
+	// proposer via the same effectiveDepth logic SearchFacts uses — see
+	// staged_diffs.go's findDedupeCandidate for why: the WHERE clause below still
+	// only filters by scope (matching every granted depth, on purpose — dedupe
+	// must catch a duplicate even against a fact the proposer can only read at
+	// summary depth), so depth-based disclosure has to happen in Go, after this
+	// query, not by narrowing the candidate set here.
 	FindDedupeCandidate(ctx context.Context, arg FindDedupeCandidateParams) (FindDedupeCandidateRow, error)
 	// A regressed sign counter is treated as a clone signal and fails closed by
 	// revoking the credential in the same statement that flags it — a warning
