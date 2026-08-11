@@ -40,7 +40,16 @@ func testStore(t *testing.T) (*Store, *pgxpool.Pool) {
 
 	// Isolate each test: truncate everything before it runs rather than after, so a
 	// failed run leaves data behind to inspect.
-	_, err = pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys, propose_write_rate_limits`)
+	// capability_grant_identities/capability_grant_tokens (added by
+	// 20260809140000_capability_grant_signing) FK-reference grants with ON
+	// DELETE CASCADE — that only governs DELETE, not TRUNCATE, so a bare
+	// TRUNCATE of grants now fails with "cannot truncate a table
+	// referenced in a foreign key constraint" unless the referencing
+	// tables are named here too. This package never writes either table
+	// (internal/broker does, on its own), so they're always empty when
+	// this runs; listed for the TRUNCATE, not because any test here
+	// exercises them.
+	_, err = pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys, propose_write_rate_limits, capability_grant_identities, capability_grant_tokens`)
 	if err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}

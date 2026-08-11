@@ -18,13 +18,14 @@ just goes stale:
 
 ## Least-privilege database roles
 
-Three roles, so no service holds authority it does not use:
+Four roles, so no service holds authority it does not use:
 
 | Role | Used by | Can | Cannot |
 |---|---|---|---|
 | owner (`chuvar`) | `cmd/migrate` only | everything, including DDL | — |
 | `chuvar_app` | `apiserver` | all DML; read `reviewer_tokens`, `data_keys` | DDL; write `schema_migrations` |
 | `chuvar_agent` | `mcpserver` | read grants/scopes/facts; append `audit_log`; stage diffs and grant requests | **write grants**; read `reviewer_tokens`, `data_keys`, `audit_log`; read **other subjects' proposals**; DDL |
+| `chuvar_broker` | `brokerd` | read `grants`/`grant_scopes`/`capability_grant_identities`/`capability_grant_tokens`; append `audit_log` | anything touching `facts`/`fact_scopes`/`staged_diffs`; read `reviewer_tokens`, `data_keys`, or its own `audit_log` writes back; DDL |
 
 `chuvar_agent` holds only *column-level* `SELECT` (`id`, `status`, `created_at`) on
 `staged_diffs` and `grant_requests`, so it can learn the id of what it wrote and nothing
@@ -59,13 +60,15 @@ docker compose exec postgres psql -U chuvar -d chuvar
 ```
 
 ```sql
-ALTER ROLE chuvar_app   WITH LOGIN PASSWORD 'generate-a-real-one';
-ALTER ROLE chuvar_agent WITH LOGIN PASSWORD 'generate-a-different-one';
+ALTER ROLE chuvar_app    WITH LOGIN PASSWORD 'generate-a-real-one';
+ALTER ROLE chuvar_agent  WITH LOGIN PASSWORD 'generate-a-different-one';
+ALTER ROLE chuvar_broker WITH LOGIN PASSWORD 'generate-yet-another-one';
 ```
 
 Then point each service at its own role — `apiserver` at `chuvar_app`, `mcpserver` at
-`chuvar_agent`, `cmd/migrate` at the owner — via their `DATABASE_URL`. The warning stops
-when a service is no longer over-privileged, which is how you confirm it took effect.
+`chuvar_agent`, `brokerd` at `chuvar_broker`, `cmd/migrate` at the owner — via their
+`DATABASE_URL`. The warning stops when a service is no longer over-privileged, which is
+how you confirm it took effect.
 
 ### Rotating the database password
 

@@ -129,6 +129,7 @@ adding a binary or moving work between them, place it on this table:
 | `cmd/apiserver` | operator | `chuvar_app` — DML, no DDL | **no** — `db.CheckSchema` only | **yes** — only process that verifies TOTP |
 | `cmd/migrate` | operator | owner — the only role with DDL | yes (that's its whole job) | no |
 | `cmd/mcpserver` | **an agent host** | `chuvar_agent` — narrow (see below) | **no** — `db.CheckSchema` only | **no** |
+| `cmd/brokerd` | operator | `chuvar_broker` — narrow (see below) | **no** — `db.CheckSchema` only | **yes** — holds a decrypted git-signing key in guarded process memory (`internal/broker/keyring`) |
 | `cmd/approver`, `cmd/pushbridge` | operator | none — `CHUVAR_API_TOKEN` only | no | no |
 
 **Exactly one binary migrates.** `cmd/migrate` holds DDL; nothing else does, including
@@ -152,8 +153,18 @@ itself every scope — but the connection still exists. Removing it entirely is 
 (mcpserver becomes an API client with an agent-class token). Until then: never widen
 `chuvar_agent`, and never add a new root-of-trust to any binary an agent launches.
 
+`chuvar_broker` (brokerd, issues #95/#79) is narrower still and touches a disjoint
+set of tables: SELECT on `grants`, `grant_scopes`, `capability_grant_identities`,
+`capability_grant_tokens`; INSERT-without-SELECT on `audit_log`, same append-only
+posture as `chuvar_agent`. No access to `facts`/`fact_scopes`/`staged_diffs` at
+all — brokerd never touches the facts path (`internal/broker`'s package doc) — nor
+to `reviewer_tokens`/`data_keys`. See
+`internal/db/migrations/20260809150000_broker_role.up.sql` and
+`docs/operations.md`'s role table for the provisioning step.
+
 New tables are granted to `chuvar_app` automatically (`ALTER DEFAULT PRIVILEGES`) and to
-`chuvar_agent` **never** — widening the agent's view is always a deliberate act.
+`chuvar_agent`/`chuvar_broker` **never** — widening either role's view is always a
+deliberate act.
 
 ### 3.7 Credentials Come From Files, Not the Environment
 Every required credential — `DATABASE_URL`, `CHUVAR_API_TOKEN`,
