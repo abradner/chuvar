@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -83,6 +85,22 @@ func toWebAuthnCredential(row sqlcgen.WebauthnCredential) WebAuthnCredential {
 // from the authenticated request context, never from the request body —
 // accepting a caller-supplied owner here would let one reviewer token enroll
 // a credential it doesn't hold against another's identity.
+//
+// actor is who's enrolling it — required, and logged to audit_log
+// (webauthn_credential_enrolled) inside the SAME transaction as the credential
+// insert and the latch set (see below): before this parameter existed, the
+// caller (webauthnRegisterFinish) logged the audit event itself via the
+// separate pool-level Store.LogAudit AFTER this method had already committed.
+// A LogAudit failure in that shape left a live, usable passkey with no audit
+// row and the endpoint returning 500 — and a retry with the same authenticator
+// could only ever 409 on the unique credential_id constraint, since the
+// credential itself had already been persisted. Every other mutation in this
+// package (CreateGrant, RevokeGrant, RejectDiff, CommitDiff) logs its own
+// audit event inside its own transaction via the internal logAudit helper
+// (see audit.go's doc comment) so the mutation and its audit row commit or
+// roll back as one unit; this brings passkey enrollment in line with that
+// established pattern instead of being the one mutation in the repo that
+// wasn't. Found in review.
 func (s *Store) CreateWebAuthnCredential(
 	ctx context.Context,
 	reviewerTokenID, label string,
@@ -92,9 +110,13 @@ func (s *Store) CreateWebAuthnCredential(
 	aaguid []byte,
 	signCount uint32,
 	backupEligible, backupState bool,
+	actor string,
 ) (WebAuthnCredential, error) {
 	if label == "" {
 		return WebAuthnCredential{}, fmt.Errorf("store: webauthn credential label must not be empty")
+	}
+	if actor == "" {
+		return WebAuthnCredential{}, fmt.Errorf("store: actor must not be empty")
 	}
 	// Validate the identifying inputs at the store boundary rather than letting
 	// an empty value reach Postgres. reviewer_token_id is a NOT NULL FK, and
@@ -163,6 +185,22 @@ func (s *Store) CreateWebAuthnCredential(
 	if err := qtx.SetEnrollmentLatch(ctx); err != nil {
 		return WebAuthnCredential{}, fmt.Errorf("store: set enrollment latch: %w", err)
 	}
+
+	// Built from the just-inserted row, not caller input — credential_id below
+	// is the stored (post-insert) value, same one InsertWebAuthnCredential
+	// returned, so the audit row can never disagree with what actually
+	// committed.
+	detail, err := json.Marshal(map[string]string{
+		"credential_id": base64.RawURLEncoding.EncodeToString(row.CredentialID),
+		"label":         label,
+	})
+	if err != nil {
+		return WebAuthnCredential{}, fmt.Errorf("store: marshal webauthn enrollment audit detail: %w", err)
+	}
+	if err := logAudit(ctx, qtx, "webauthn_credential_enrolled", actor, nil, nil, nil, nil, nil, detail); err != nil {
+		return WebAuthnCredential{}, err
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return WebAuthnCredential{}, fmt.Errorf("store: commit tx: %w", err)
 	}
@@ -297,6 +335,92 @@ func (s *Store) UpdateWebAuthnCredentialCounter(ctx context.Context, credentialI
 func (s *Store) FlagWebAuthnCredentialCloneWarning(ctx context.Context, credentialID string) error {
 	if err := s.q.FlagWebAuthnCredentialCloneWarning(ctx, credentialID); err != nil {
 		return fmt.Errorf("store: flag webauthn credential clone warning: %w", err)
+	}
+	return nil
+}
+
+// RecordWebAuthnAssertionUse is UpdateWebAuthnCredentialCounter plus its
+// accompanying "webauthn_assertion_used" audit event, committed together in
+// one transaction — the assertion-verification analogue of
+// CreateWebAuthnCredential's atomic enrollment fix (see that method's doc
+// comment for the full rationale). Before this method existed,
+// verifyWebAuthnAssertionHeader (internal/api) called
+// UpdateWebAuthnCredentialCounter and the separate pool-level Store.LogAudit
+// as two independent round trips: a counter update is itself a state change
+// (it's what makes replay/clone detection possible on the next assertion),
+// so a LogAudit failure after it had already committed left that mutation
+// with no audit row — the same unaudited-mutation gap enrollment had, for
+// the same reason (this package's mutations are supposed to log atomically;
+// see audit.go's doc comment). UpdateWebAuthnCredentialCounter itself is
+// deliberately left as-is (still used directly by this package's own tests,
+// TestWebAuthnCredential_UpdateCounter) rather than folded into this method,
+// since a test asserting the counter update alone shouldn't also need an
+// actor and a well-formed audit detail to satisfy this method's contract.
+//
+// credentialRowID is the store's internal row id (WebAuthnCredential.ID),
+// matching UpdateWebAuthnCredentialCounter's own parameter — not the raw
+// WebAuthn credential_id bytes, which live in detail if the caller chose to
+// include them. actor is who presented the assertion (the authenticated
+// reviewer's label, never anything request-body-supplied — AGENTS.md §6);
+// detail is the caller-marshaled audit payload, passed through unexamined
+// the same way every other logAudit call in this package treats it.
+func (s *Store) RecordWebAuthnAssertionUse(ctx context.Context, credentialRowID string, signCount uint32, actor string, detail []byte) error {
+	if actor == "" {
+		return fmt.Errorf("store: actor must not be empty")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op if already committed
+	qtx := s.q.WithTx(tx)
+
+	if err := qtx.UpdateWebAuthnCredentialCounter(ctx, sqlcgen.UpdateWebAuthnCredentialCounterParams{
+		ID:        credentialRowID,
+		SignCount: int64(signCount),
+	}); err != nil {
+		return fmt.Errorf("store: update webauthn credential counter: %w", err)
+	}
+	if err := logAudit(ctx, qtx, "webauthn_assertion_used", actor, nil, nil, nil, nil, nil, detail); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit tx: %w", err)
+	}
+	return nil
+}
+
+// FlagWebAuthnCredentialCloneWarningAudited is FlagWebAuthnCredentialCloneWarning
+// plus its accompanying "webauthn_clone_suspected" audit event, committed
+// together for the same reason RecordWebAuthnAssertionUse's doc comment
+// gives: fail-closed revocation on a suspected clone is itself an exercise of
+// authority over a credential (principle 6, "every exercise of authority is
+// audited") and must not be able to commit with no audit trail if the
+// separate audit write that used to follow it failed. As with
+// RecordWebAuthnAssertionUse, the unaudited FlagWebAuthnCredentialWarning
+// stays in place for this package's own direct tests
+// (TestWebAuthnCredential_FlagCloneWarningFailsClosed).
+func (s *Store) FlagWebAuthnCredentialCloneWarningAudited(ctx context.Context, credentialRowID, actor string, detail []byte) error {
+	if actor == "" {
+		return fmt.Errorf("store: actor must not be empty")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op if already committed
+	qtx := s.q.WithTx(tx)
+
+	if err := qtx.FlagWebAuthnCredentialCloneWarning(ctx, credentialRowID); err != nil {
+		return fmt.Errorf("store: flag webauthn credential clone warning: %w", err)
+	}
+	if err := logAudit(ctx, qtx, "webauthn_clone_suspected", actor, nil, nil, nil, nil, nil, detail); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit tx: %w", err)
 	}
 	return nil
 }

@@ -91,7 +91,7 @@ func TestEnrollmentLatch_SetByPasskeyEnrollment(t *testing.T) {
 	mustLatchSet(t, s, false, "before any passkey is enrolled")
 
 	if _, err := s.CreateWebAuthnCredential(ctx, reviewer, "yubikey",
-		[]byte("cred-id"), []byte("pub-key"), "none", nil, nil, 0, false, false); err != nil {
+		[]byte("cred-id"), []byte("pub-key"), "none", nil, nil, 0, false, false, "test-actor"); err != nil {
 		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
 	}
 	mustLatchSet(t, s, true, "after enrolling a passkey")

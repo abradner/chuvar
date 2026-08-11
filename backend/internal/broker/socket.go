@@ -148,9 +148,25 @@ func handleConn(ctx context.Context, conn *net.UnixConn, handle Handler) {
 		return
 	}
 
-	if err := conn.SetDeadline(time.Now().Add(connDeadline)); err != nil {
+	deadline := time.Now().Add(connDeadline)
+	if err := conn.SetDeadline(deadline); err != nil {
 		slog.Warn("broker: setting connection deadline failed", "error", err)
 	}
+	// conn.SetDeadline only bounds the socket I/O below — it has no effect
+	// on ctx, which is the daemon's own lifetime context, threaded all the
+	// way through handle -> Broker.Sign -> pool.Exec for the audit-log
+	// write. Without deriving a per-connection context here, a valid-token
+	// caller whose audit write stalls (a slow, unreachable, or
+	// pool-exhausted database) keeps this goroutine — and the fd, and
+	// whatever memory it holds — alive indefinitely, long past the
+	// advertised 10s connDeadline: SetDeadline fires on the next I/O
+	// attempt, but pool.Exec isn't socket I/O and never sees it. Deriving
+	// WithDeadline from ctx using the identical deadline makes "10s, no
+	// matter what this connection is doing" true of the whole request
+	// path, not just the socket read/write around it. Found in round-2
+	// review.
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 
 	// bufio.Scanner, not bufio.Reader.ReadString: ReadString has no bound on
 	// how much it will buffer while searching for the delimiter — a caller

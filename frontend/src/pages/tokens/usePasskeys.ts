@@ -48,6 +48,30 @@ function describeCeremonyError(e: unknown): string {
   return String(e);
 }
 
+// promptForTotpFactor is the shared "ask for a TOTP code" ceremony both
+// register() branches below use — one when this is the device's first
+// passkey (no assertion possible yet), the other as the fallback when an
+// existing passkey couldn't be asserted. null means abort register()
+// entirely: either the operator cancelled the prompt (same quiet-abort
+// stance as every other prompt-cancel path in this hook) or typed a blank
+// code, in which case setError is called first so the refusal is visible —
+// the server would only bounce a blank/missing code with the same message
+// less directly.
+function promptForTotpFactor(
+  promptMessage: string,
+  blankErrorMessage: string,
+  setError: (e: string | null) => void,
+): SecondFactor | null {
+  const totpInput = window.prompt(promptMessage);
+  if (totpInput === null) return null;
+  const totpCode = totpInput.trim();
+  if (!totpCode) {
+    setError(blankErrorMessage);
+    return null;
+  }
+  return { totpCode };
+}
+
 export function usePasskeys() {
   const [credentials, setCredentials] = useState<WebAuthnCredential[]>([]);
   // Same "confirmed empty vs. haven't heard back yet vs. failed" distinction
@@ -111,34 +135,49 @@ export function usePasskeys() {
       try {
         // The server always demands a factor this device token has already
         // enrolled (requireExistingSecondFactor — there is deliberately no
-        // factorless path). Which factor is known client-side: if a live
-        // passkey exists, prove it via a real assertion ceremony (no typing);
-        // otherwise this is the device's first passkey and the TOTP secret
-        // enrolled when the token was minted is the only factor it can have.
-        let factor: SecondFactor;
+        // factorless path), and accepts EITHER a TOTP code or a WebAuthn
+        // assertion whenever both are enrolled: the assertion header only
+        // wins when it's actually present on the request (see that
+        // handler's doc comment), it isn't mandatory just because a passkey
+        // exists. If a live passkey exists, prefer proving it via a real
+        // assertion ceremony (no typing) — but when that can't be produced
+        // (cancelled, timed out, the authenticator isn't to hand, or any
+        // other ceremony failure), fall back to the same TOTP prompt the
+        // device's first-passkey path uses below, rather than dead-ending
+        // the operator into "revoke your only passkey before you can enroll
+        // a replacement." Every legitimately-minted reviewer token has a
+        // TOTP secret from createToken (see its doc comment), so this
+        // fallback is always available in practice. Found in review: the
+        // previous version demanded an assertion unconditionally whenever
+        // any active passkey existed, which is strictly more restrictive
+        // than what the server itself accepts.
+        let factor: SecondFactor | null = null;
         if (credentials.some((c) => c.active)) {
-          const assertionOptions = await api.webauthnAssertBegin();
-          const assertionCred = (await navigator.credentials.get(
-            decodeRequestOptions(assertionOptions),
-          )) as PublicKeyCredential | null;
-          if (!assertionCred) {
-            setError("The browser did not return an assertion.");
-            return false;
+          try {
+            const assertionOptions = await api.webauthnAssertBegin();
+            const assertionCred = (await navigator.credentials.get(
+              decodeRequestOptions(assertionOptions),
+            )) as PublicKeyCredential | null;
+            if (!assertionCred) {
+              throw new Error("The browser did not return an assertion.");
+            }
+            factor = { webauthnAssertion: encodeAssertionHeader(assertionCred) };
+          } catch {
+            factor = promptForTotpFactor(
+              "Could not use an existing passkey to authorize this (cancelled, unavailable, or the authenticator " +
+                "isn't to hand). Enter this device's TOTP code to authorize adding a passkey instead.",
+              "A TOTP code is required to enroll a passkey when no existing passkey is available to prove.",
+              setError,
+            );
           }
-          factor = { webauthnAssertion: encodeAssertionHeader(assertionCred) };
         } else {
-          // Cancel (null) aborts quietly, like every prompt-cancel path;
-          // blank is a real refusal the operator should see, since the
-          // server would only bounce it with the same message less directly.
-          const totpInput = window.prompt("Enter this device's TOTP code to authorize adding a passkey.");
-          if (totpInput === null) return false;
-          const totpCode = totpInput.trim();
-          if (!totpCode) {
-            setError("A TOTP code is required to enroll this device's first passkey.");
-            return false;
-          }
-          factor = { totpCode };
+          factor = promptForTotpFactor(
+            "Enter this device's TOTP code to authorize adding a passkey.",
+            "A TOTP code is required to enroll this device's first passkey.",
+            setError,
+          );
         }
+        if (factor === null) return false;
 
         const creationOptions = await api.webauthnRegisterBegin(factor);
 

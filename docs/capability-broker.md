@@ -671,13 +671,21 @@ names — `git.sign:<repo>`, the `fs.write` example — has a natural target) �
 dead grant at best. Rather than let that ambiguous, functionally-inert state exist and decide
 ad hoc what it "means," `scope.ValidateCapability` refuses it outright: a capability-kind
 scope with no `:`-delimited target is a validation error, full stop. This is enforced today at
-every place a capability-kind grant's scopes are persisted or read back —
-`store.CreateGrant`, `store.RequestGrant`, and `store.ApproveGrantRequest` (the last as
+the write-and-authorize chokepoints — `store.CreateGrant`, `store.RequestGrant`, and
+`store.ApproveGrantRequest` (the last as
 defense-in-depth: `grant_requests.requested_scopes` is plain `TEXT[]` with no format CHECK
 constraint, so a row inserted directly — a fixture, an operator's psql, a future bulk-import
 path — must still be refused loudly at approval, not silently approved into an inert grant)
 — and is the function the future capability-grant creation surface (gated, issue #96) must
 also call.
+
+The ordinary listing reads — `store.ListGrants`, `ListGrantsPage`,
+`ListGrantsNearingExpiry` — deliberately do **not** re-validate: they surface rows
+as stored, for display and renewal-expiry sweeps, and are not authorization paths.
+(`GrantedScopes`, the memory read authorizer, filters `kind='memory'` in SQL and never
+sees a capability row at all.) So this rule is not a direct-SQL defense on *every* read;
+what makes a malformed row inserted straight into the database unable to authorize
+anything is brokerd refusing to cache it — see `scope.ValidateCapability`'s doc comment.
 
 **The fail-open alternative was rejected.** Interpreting a bare `git.sign` as "sign for any
 repository" would have made the grant strictly more powerful than any grant a human could

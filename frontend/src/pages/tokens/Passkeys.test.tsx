@@ -189,6 +189,39 @@ describe("TokensPage (Passkeys section) — supported browser", () => {
     expect(window.prompt).not.toHaveBeenCalled();
   });
 
+  // Task: the server (requireExistingSecondFactor) accepts a valid TOTP code
+  // to authorize enrolling a backup passkey even when the reviewer already
+  // has an active passkey — the assertion header only wins when it's
+  // actually present. An earlier version of this hook unconditionally
+  // demanded an assertion whenever any active passkey existed, with no
+  // fallback, so an operator whose authenticator was lost or simply not to
+  // hand could not enroll a backup passkey without first revoking the
+  // existing credential. This proves the fix: when the assertion ceremony
+  // can't produce a credential, the hook falls back to the same TOTP prompt
+  // the device's first-passkey path uses.
+  it("falls back to a TOTP prompt to authorize a backup passkey when the existing passkey's assertion is unavailable", async () => {
+    vi.mocked(api.listWebAuthnCredentials).mockResolvedValue([activeCredential]);
+    vi.mocked(api.webauthnAssertBegin).mockResolvedValue(sampleRequestOptions());
+    // The operator's authenticator isn't to hand — the assertion ceremony
+    // itself never completes.
+    vi.mocked(navigator.credentials.get).mockRejectedValue(new DOMException("cancelled", "NotAllowedError"));
+    vi.mocked(api.webauthnRegisterBegin).mockResolvedValue(sampleCreationOptions());
+    vi.mocked(navigator.credentials.create).mockResolvedValue(fakeAttestationCredential("backup-cred-id"));
+    vi.mocked(api.webauthnRegisterFinish).mockResolvedValue({ ...activeCredential, id: "backup-cred-id", label: "backup-key" });
+
+    render(<TokensPage />);
+    await screen.findByText("yubikey");
+
+    await userEvent.type(screen.getByPlaceholderText("yubikey-5c"), "backup-key");
+    await userEvent.click(screen.getByRole("button", { name: "Add passkey" }));
+
+    expect(await screen.findByText("backup-key")).toBeInTheDocument();
+    expect(navigator.credentials.get).toHaveBeenCalledTimes(1);
+    // Fell back to the TOTP code from the prompt, not a (failed) assertion.
+    expect(api.webauthnRegisterBegin).toHaveBeenCalledWith({ totpCode: "123456" });
+    expect(window.prompt).toHaveBeenCalledTimes(1);
+  });
+
   it("surfaces the server's refusal when the factor is rejected", async () => {
     vi.mocked(api.listWebAuthnCredentials).mockResolvedValue([]);
     vi.mocked(api.webauthnRegisterBegin).mockRejectedValue(new ApiError(401, "invalid or expired TOTP code"));

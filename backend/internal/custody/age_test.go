@@ -48,6 +48,52 @@ func TestAgeBackendCreatesKeyWhenAllowed(t *testing.T) {
 	require.Equal(t, key, again)
 }
 
+// TestAgeBackendCreateWipesKeyOnO_EXCLCollision exercises the bug this
+// package's create() fix addresses: GenerateKey succeeds near the top of
+// create, but until this fix nothing cleared that key on any of create's
+// roughly ten error returns — including the O_EXCL collision below, which is
+// the easiest of them to force deterministically (no need to fail age
+// encryption or mock the filesystem: just pre-create the destination file so
+// os.OpenFile's O_EXCL flag rejects it).
+//
+// createDebugKey gives the test a handle on the same backing array
+// create()'s defer clears — the array itself, not a copy — so once create
+// returns, reading through that same handle shows whatever the defer left
+// behind. That is a real, in-process assertion that this specific call's
+// generated key is zero by the time create returns an error, which is
+// exactly the property the bug violated.
+//
+// What this does NOT prove: that no other copy of the key ever existed
+// anywhere in the process. GenerateKey's own internal buffer, or any copy
+// age.Encrypt/scrypt made of key material during a *different* failure
+// (this test only forces the O_EXCL path, before key is ever handed to
+// age.Encrypt), are both outside what this test exercises.
+func TestAgeBackendCreateWipesKeyOnO_EXCLCollision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "master.key.age")
+	// Pre-create the destination so create()'s os.OpenFile(..., O_EXCL, ...)
+	// collides, standing in for "a concurrent boot already won the race."
+	require.NoError(t, os.WriteFile(path, []byte("already here"), 0o600))
+
+	var captured []byte
+	createDebugKey = func(key []byte) { captured = key }
+	t.Cleanup(func() { createDebugKey = nil })
+
+	b := &AgeBackend{}
+	_, err := b.create(path, "a passphrase")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "create age key file")
+
+	require.Len(t, captured, KeyLen, "hook never fired with a full-length key — test set up wrong")
+	for i, c := range captured {
+		require.Zerof(t, c, "generated key byte %d was not wiped on the O_EXCL collision path", i)
+	}
+
+	// The collision must not have clobbered what was already at path.
+	onDisk, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "already here", string(onDisk))
+}
+
 func TestAgeBackendRefusesToCreateByDefault(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "master.key.age")
 	b := &AgeBackend{Path: path, Passphrase: "correct horse battery staple"}

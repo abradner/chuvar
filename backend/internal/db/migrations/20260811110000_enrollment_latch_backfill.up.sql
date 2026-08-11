@@ -1,0 +1,53 @@
+-- Backfills the durable enrollment latch (20260810000000_enrollment_latch)
+-- for deployments that already had a second factor enrolled BEFORE that
+-- migration ran. The original migration only CREATE TABLEs — nothing
+-- inserts a row for enrollment that already existed at the moment it was
+-- applied, because the latch is otherwise only ever set as a side effect of
+-- a *new* enrollment (store.CreateReviewerToken, store.CreateWebAuthnCredential).
+-- On an upgraded deployment that already had a TOTP secret or a passkey
+-- enrolled, the latch therefore starts unset, and stays unset until the next
+-- time someone enrolls a factor — which may be never.
+--
+-- Undetected on a fresh install (an empty database has nothing to backfill,
+-- and latches for real on first enrollment) and masked everywhere else by
+-- createToken's live counts (CountEverEnrolledReviewerTokens,
+-- CountEverEnrolledWebAuthnCredentials) — both non-zero, so the gate reads
+-- correctly right up until the documented break-glass recovery
+-- (docs/operations.md) clears those rows. At that point the counts go to
+-- zero AND the latch is (on an unbackfilled upgrade) also unset, so Step 1 of
+-- recovery alone — not Step 1 *and* the separate, deliberate Step 2 latch
+-- reset — fully reopens createToken's gate. That collapses the documented
+-- two-action safety property into one, and makes docs/operations.md's claim
+-- that "the durable latch ... is now what preserves the enrollment gate
+-- across a reset" false for exactly the deployments it matters most for:
+-- upgraded ones with real enrollment history. This migration makes that
+-- claim true retroactively, not just for anyone who enrolls after
+-- 20260810000000 lands — principle 12, "the enrollment gate counts
+-- ever-enrolled," applies to enrollment that happened before the latch
+-- existed too.
+--
+-- "Ever enrolled" is matched exactly to the two counts this stands in for
+-- (CountEverEnrolledReviewerTokens in reviewer_tokens.sql,
+-- CountEverEnrolledWebAuthnCredentials in webauthn.sql): neither is filtered
+-- on revoked_at, because revocation is bearer-only ("only reduces
+-- authority") and an active-only definition would have let a stolen bearer
+-- token revoke every device and erase the deployment's enrollment history.
+-- Matching that here means checking totp_secret_enc IS NOT NULL across ALL
+-- reviewer_tokens rows (revoked or not) and the mere EXISTENCE of any
+-- webauthn_credentials row (revoked or not, and rows are never deleted by
+-- any API path) — the same monotonic, attacker-unlowerable signal, just
+-- read once at migration time instead of continuously.
+--
+-- Idempotent and singleton-safe, matching the original migration's shape:
+-- INSERT ... ON CONFLICT DO NOTHING against the pinned id=true row, and the
+-- SELECT ... WHERE EXISTS(...) means the INSERT produces zero rows (not an
+-- error, not a latch) when there is nothing to backfill — a genuine fresh
+-- install, or a deployment that never got past the factorless bootstrap
+-- token, must NOT come out of this migration latched, or first-run
+-- bootstrap (createToken's carve-out for the very first enrollment) would
+-- break the moment this migration ships.
+INSERT INTO enrollment_latch (id)
+SELECT true
+WHERE EXISTS (SELECT 1 FROM reviewer_tokens WHERE totp_secret_enc IS NOT NULL)
+   OR EXISTS (SELECT 1 FROM webauthn_credentials)
+ON CONFLICT (id) DO NOTHING;

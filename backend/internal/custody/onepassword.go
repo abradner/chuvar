@@ -132,6 +132,16 @@ func opChildEnv() []string {
 	return env
 }
 
+// unsealDebugStdout, when non-nil, is invoked with the exact byte slice
+// Unseal captures from `op`'s stdout buffer, immediately after cmd.Run()
+// returns — before Unseal even looks at whether it failed. It exists solely
+// so tests can hold a reference to the very backing array the following
+// `defer clear(b64)` wipes, and confirm that wipe actually ran by the time
+// Unseal returns — including on the failure path, which is what this
+// package's tests need to verify but otherwise have no way to observe from
+// outside the function. A single nil check; never set outside tests.
+var unsealDebugStdout func(b64 []byte)
+
 // Unseal shells out to `op read` for Reference. It never logs or otherwise
 // persists what comes back — the returned bytes are the only place the key
 // material touches this process.
@@ -160,10 +170,30 @@ func (b *OnePasswordBackend) Unseal(ctx context.Context) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	runErr := cmd.Run()
+
+	// Capture stdout's backing array and register its wipe *before* looking
+	// at runErr, not after: `op` can write some or all of the base64 key to
+	// stdout and only then exit nonzero — e.g. this call's context is
+	// cancelled after output has begun — and a defer installed only on the
+	// success path would never run for that case, leaving key material
+	// sitting in stdout's buffer. Registering it here instead means both the
+	// success and the failure return below wipe whatever landed in the
+	// buffer, on every return path from this point on. Decode straight from
+	// these mutable bytes — not stdout.String(), which would make an
+	// immutable string copy of the key that the GC later abandons without
+	// zeroing.
+	b64 := stdout.Bytes()
+	defer clear(b64)
+	if unsealDebugStdout != nil {
+		unsealDebugStdout(b64)
+	}
+
+	if runErr != nil {
 		// stderr is `op`'s own diagnostic text ("not signed in", "item not
-		// found", ...) — never the secret value itself, since a failing read
-		// produced no value to leak in the first place. Still truncated
+		// found", ...) — never the secret value itself in the common case
+		// where the failing read produced no output at all; b64 above is
+		// what covers the rarer case where it did. Still truncated
 		// defensively: this package doesn't control the shape of `op`'s
 		// error output, and an oversized or unexpected message shouldn't be
 		// able to blow up a log line downstream.
@@ -172,20 +202,14 @@ func (b *OnePasswordBackend) Unseal(ctx context.Context) ([]byte, error) {
 			msg = msg[:200] + "…"
 		}
 		if msg != "" {
-			return nil, fmt.Errorf("custody: op read %s: %w: %s", b.Reference, err, msg)
+			return nil, fmt.Errorf("custody: op read %s: %w: %s", b.Reference, runErr, msg)
 		}
-		return nil, fmt.Errorf("custody: op read %s: %w", b.Reference, err)
+		return nil, fmt.Errorf("custody: op read %s: %w", b.Reference, runErr)
 	}
 
-	// op wrote the base64-encoded key into stdout's buffer. Decode straight
-	// from those mutable bytes — not stdout.String(), which makes an immutable
-	// string copy of the key that the GC later abandons without zeroing — and
-	// wipe op's response buffer, plus any intermediate slice that held decoded
-	// key bytes, on every return path. The returned `key` is the sole copy of
-	// the master key that leaves this process.
-	b64 := stdout.Bytes()
-	defer clear(b64)
-
+	// The intermediate decoded-key slice below is wiped on its own error
+	// paths too — the returned `key` is the sole copy of the master key that
+	// leaves this process.
 	key := make([]byte, base64.StdEncoding.DecodedLen(len(b64)))
 	n, err := base64.StdEncoding.Decode(key, bytes.TrimSpace(b64))
 	if err != nil {

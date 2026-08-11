@@ -206,6 +206,14 @@ func (b *AgeBackend) Unseal(ctx context.Context) ([]byte, error) {
 	return raw, nil
 }
 
+// createDebugKey, when non-nil, is invoked with the freshly generated master
+// key immediately after GenerateKey succeeds inside create, before the defer
+// below that wipes it on every failure path installs. It exists solely so
+// tests can hold a reference to the exact backing array that defer clears,
+// and confirm the wipe actually ran on a forced error path. A single nil
+// check; never set outside tests.
+var createDebugKey func(key []byte)
+
 func (b *AgeBackend) create(path, passphrase string) ([]byte, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("custody: create age key directory: %w", err)
@@ -214,6 +222,21 @@ func (b *AgeBackend) create(path, passphrase string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if createDebugKey != nil {
+		createDebugKey(key)
+	}
+	// Every return between here and the success path below fails to mint the
+	// key file, and none of them used to clear the freshly generated master
+	// key — it was left on the ordinary heap for the GC to abandon unwiped,
+	// same class of gap Unseal's clear(raw) calls above already close for
+	// its own error paths. keyMinted disarms this defer only once ownership
+	// of key genuinely transfers to the caller, on the success return below.
+	keyMinted := false
+	defer func() {
+		if !keyMinted {
+			clear(key)
+		}
+	}()
 
 	recipient, err := age.NewScryptRecipient(passphrase)
 	if err != nil {
@@ -271,5 +294,6 @@ func (b *AgeBackend) create(path, passphrase string) ([]byte, error) {
 	slog.Warn("custody: minted a new age-sealed master key — back up both the key file and "+
 		"its passphrase before sealing anything; losing either means losing every secret "+
 		"sealed under it", "path", path)
+	keyMinted = true // ownership of key transfers to the caller from here
 	return key, nil
 }

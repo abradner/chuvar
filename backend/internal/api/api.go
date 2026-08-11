@@ -165,7 +165,15 @@ func (a *API) Routes() http.Handler {
 	top.HandleFunc("GET /api/events", a.streamEvents)
 	top.Handle("/", a.withRequestTimeout(mux))
 
-	return a.cors(a.requireAuth(a.limitBody(top)))
+	// rejectUncleanSigningPolicyPath (signing_policies.go) has to wrap top
+	// from the outside, not sit inside either mux.HandleFunc registration
+	// above: net/http.ServeMux cleans and redirects a request path (doubled
+	// slashes, "."/".." segments) in its own findHandler, before dispatch
+	// reaches any registered pattern — including top's own "/" pattern that
+	// forwards into mux. See that function's doc comment for why this closes
+	// finding 3 of the round-2 signing-policies review. Scoped to
+	// /api/signing-policies; every other route is unaffected.
+	return a.cors(a.requireAuth(a.limitBody(rejectUncleanSigningPolicyPath(top))))
 }
 
 // withRequestTimeout bounds the context every handler receives at a.RequestTimeout.
