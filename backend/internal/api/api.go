@@ -29,6 +29,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
+
 	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/store"
 	"github.com/abradner/chuvar/backend/internal/summarize"
@@ -56,16 +58,27 @@ type API struct {
 	// see withRequestTimeout. Required (New panics if <= 0): the zero value would
 	// mean "no timeout," silently undoing the whole point of this field.
 	RequestTimeout time.Duration
+
+	// WebAuthn holds the Relying Party configuration (RP ID, RP origins) that
+	// every registration/assertion ceremony validates against — see webauthn.go.
+	// Required (New panics if nil): a nil value would mean every ceremony
+	// endpoint panics on first use instead of failing at boot, and RP ID/origin
+	// validation is exactly the property that must never be silently absent
+	// (AGENTS.md §6, "every network-facing default must be secure by default").
+	WebAuthn *webauthn.WebAuthn
 }
 
-func New(st *store.Store, emb embed.Embedder, summ summarize.Summarizer, allowedOrigin string, requestTimeout time.Duration) *API {
+func New(st *store.Store, emb embed.Embedder, summ summarize.Summarizer, allowedOrigin string, requestTimeout time.Duration, wa *webauthn.WebAuthn) *API {
 	if requestTimeout <= 0 {
 		panic("api: RequestTimeout must be positive — a zero or negative value disables request cancellation entirely")
 	}
 	if err := validateAllowedOrigin(allowedOrigin); err != nil {
 		panic("api: " + err.Error())
 	}
-	return &API{Store: st, Embedder: emb, Summarizer: summ, AllowedOrigin: allowedOrigin, RequestTimeout: requestTimeout}
+	if wa == nil {
+		panic("api: WebAuthn must not be nil — construct it with webauthn.New and the deployment's RP ID/origins")
+	}
+	return &API{Store: st, Embedder: emb, Summarizer: summ, AllowedOrigin: allowedOrigin, RequestTimeout: requestTimeout, WebAuthn: wa}
 }
 
 // validateAllowedOrigin rejects anything that isn't either empty (CORS disabled)
@@ -111,15 +124,15 @@ func validateAllowedOrigin(origin string) error {
 func (a *API) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/staged-diffs", a.listStagedDiffs)
-	mux.HandleFunc("POST /api/staged-diffs/{id}/approve", a.requireTOTP(a.approveStagedDiff))
+	mux.HandleFunc("POST /api/staged-diffs/{id}/approve", a.requireStrongFactor(a.approveStagedDiff))
 	mux.HandleFunc("POST /api/staged-diffs/{id}/reject", a.rejectStagedDiff)
 	mux.HandleFunc("GET /api/facts/{id}", a.getFact)
 	mux.HandleFunc("GET /api/grants", a.listGrants)
-	mux.HandleFunc("POST /api/grants", a.requireTOTP(a.createGrant))
+	mux.HandleFunc("POST /api/grants", a.requireStrongFactor(a.createGrant))
 	mux.HandleFunc("POST /api/grants/{id}/revoke", a.revokeGrant)
-	mux.HandleFunc("POST /api/grants/{id}/renew", a.requireTOTP(a.renewGrant))
+	mux.HandleFunc("POST /api/grants/{id}/renew", a.requireStrongFactor(a.renewGrant))
 	mux.HandleFunc("GET /api/grant-requests", a.listGrantRequests)
-	mux.HandleFunc("POST /api/grant-requests/{id}/approve", a.requireTOTP(a.approveGrantRequest))
+	mux.HandleFunc("POST /api/grant-requests/{id}/approve", a.requireStrongFactor(a.approveGrantRequest))
 	mux.HandleFunc("POST /api/grant-requests/{id}/deny", a.denyGrantRequest)
 	mux.HandleFunc("GET /api/tokens", a.listTokens)
 	mux.HandleFunc("POST /api/tokens", a.createToken)
@@ -132,7 +145,15 @@ func (a *API) Routes() http.Handler {
 	// the order they were added, so a more specific fixed-segment route would
 	// win over this wildcard regardless of which was registered first.
 	mux.HandleFunc("GET /api/signing-policies/{repo...}", a.getSigningPolicy)
-	mux.HandleFunc("POST /api/signing-policies", a.requireTOTP(a.upsertSigningPolicy))
+	mux.HandleFunc("POST /api/signing-policies", a.requireStrongFactor(a.upsertSigningPolicy))
+	// WebAuthn (passkey) ceremonies — see webauthn.go's package-level doc
+	// comment for the two-endpoint-per-ceremony shape and why the strong-
+	// factor gate sits on *begin*, not finish.
+	mux.HandleFunc("POST /api/webauthn/register/begin", a.requireExistingSecondFactor(a.webauthnRegisterBegin))
+	mux.HandleFunc("POST /api/webauthn/register/finish", a.webauthnRegisterFinish)
+	mux.HandleFunc("POST /api/webauthn/assert/begin", a.webauthnAssertBegin)
+	mux.HandleFunc("GET /api/webauthn/credentials", a.listWebAuthnCredentials)
+	mux.HandleFunc("POST /api/webauthn/credentials/{id}/revoke", a.revokeWebAuthnCredential)
 
 	// /api/events (events.go) is mounted outside withRequestTimeout deliberately:
 	// every other route is a quick request/response and benefits from a bounded
@@ -228,28 +249,138 @@ func (a *API) requireAuth(next http.Handler) http.Handler {
 	})
 }
 
-// requireTOTP gates a handler behind the device-local TOTP second factor, on
-// top of (never instead of) requireAuth. Applied only to mutations that grant
-// or extend authority (approve grant request, direct grant create, approve
-// staged diff, grant renewal) — the confused-deputy hole this closes is
-// self-escalation, not denial/revocation, so those paths stay bearer-only.
-// See the reviewer_totp migration's doc comment for why a second factor is
-// needed at all: the bearer token alone is readable by anything with shell
-// access to the reviewer's environment.
-func (a *API) requireTOTP(next http.HandlerFunc) http.HandlerFunc {
+// requireStrongFactor gates a handler behind a device-local second factor —
+// TOTP or WebAuthn, whichever the caller presents — on top of (never instead
+// of) requireAuth. Applied only to mutations that grant or extend authority
+// (approve grant request, direct grant create, approve staged diff, grant
+// renewal) — the confused-deputy hole this closes is self-escalation, not
+// denial/revocation, so those paths stay bearer-only. See the reviewer_totp
+// migration's doc comment for why a second factor is needed at all: the
+// bearer token alone is readable by anything with shell access to the
+// reviewer's environment.
+//
+// Renamed from requireTOTP (2026-08-09, WebAuthn addition): TOTP keeps
+// working unmodified — see verifyTOTPCode — and a WebAuthn assertion is now
+// an equally-accepted alternative, never a downgrade of what this gate
+// requires. Priority: X-Chuvar-WebAuthn-Assertion is checked first, so a
+// request carrying both headers succeeds only if the (more phishing-
+// resistant) assertion is itself valid, not merely the TOTP code.
+func (a *API) requireStrongFactor(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !a.verifyTOTPCode(w, r) {
+		if !a.verifySecondFactor(w, r) {
 			return
 		}
 		next(w, r)
 	}
 }
 
+// verifySecondFactor checks whichever second factor the request presents —
+// the WebAuthn assertion header when present, the TOTP code header otherwise
+// — writing the appropriate error response and returning false on any
+// failure. Factored out of requireStrongFactor so createToken (tokens.go)
+// can apply the identical either-factor check conditionally rather than as
+// an unconditional route wrapper; both factors must be accepted everywhere
+// one is (the 2026-08-09 decision, docs/decisions.md), including there.
+func (a *API) verifySecondFactor(w http.ResponseWriter, r *http.Request) bool {
+	// TrimSpace before the emptiness check, matching verifyTOTPCode: a
+	// whitespace-only assertion header (a stray space pasted alongside — or in
+	// place of — a code) is non-empty as sent, so without trimming it forces
+	// the WebAuthn branch and a caller presenting a perfectly valid TOTP code
+	// gets a spurious 401 instead of having their code checked. The factor a
+	// request presents is which header carries real content, not which one is
+	// merely present. Found in review.
+	if strings.TrimSpace(r.Header.Get(webauthnAssertionHeader)) != "" {
+		return a.verifyWebAuthnAssertionHeader(w, r)
+	}
+	return a.verifyTOTPCode(w, r)
+}
+
+// requireExistingSecondFactor gates WebAuthn credential *registration*
+// (webauthnRegisterBegin) — adding a passkey is itself a capability-widening
+// act (the new credential passes requireStrongFactor forever after), so it
+// must be proven by a second factor the calling reviewer token has already
+// enrolled: a valid TOTP code, or an assertion of an already-enrolled
+// passkey. A gate a stolen bearer token can pass equally well would not be a
+// second factor at all (the same reasoning the reviewer_totp migration's doc
+// comment gives for gating mutations, applied one step earlier: to gating
+// the enrollment of the factor itself).
+//
+// A caller with NO enrolled factor of either kind is refused outright — 403,
+// never a fall-through to bearer-only. There is deliberately no bootstrap
+// carve-out here, per-token or deployment-wide, because none is needed:
+// createToken enrolls a TOTP secret on every token it mints, so every
+// legitimately-minted reviewer token already holds a factor to prove. The
+// only tokens without one are the break-glass bootstrap token
+// (cmd/apiserver's bootstrapReviewerToken, created with no secret precisely
+// so requireStrongFactor-gated mutations stay unreachable on it) and tokens
+// predating the reviewer_totp migration — exactly the credentials that must
+// not be able to mint themselves a passkey. The first version of this gate
+// fell through to bearer-only when the caller had no factor, "bootstrap
+// parity with createToken"; that parity claim was false (createToken's
+// carve-out closes permanently via a deployment-wide monotonic count, the
+// per-token check never closes for a factorless token) and it let whoever
+// held the bootstrap bearer token self-enroll a passkey and pass every
+// strong-factor gate. Found in review.
+//
+// Which factor: the assertion header, when present, wins — same precedence
+// as requireStrongFactor, and for the same reason. This also means a
+// reviewer enrolled in both factors may prove either one; the two are
+// equally sufficient at every other gate (the 2026-08-09 decision,
+// docs/decisions.md), so demanding specifically TOTP here would be a
+// stricter rule than the mutations this enrollment ultimately unlocks.
+func (a *API) requireExistingSecondFactor(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reviewer := reviewerFromContext(r.Context())
+		hasTOTP, err := a.Store.ReviewerHasTOTP(r.Context(), reviewer.ID)
+		if err != nil {
+			writeStoreError(w, http.StatusInternalServerError, "requireExistingSecondFactor", "could not check enrollment status", err)
+			return
+		}
+		hasWebAuthn, err := a.Store.ReviewerHasActiveWebAuthnCredential(r.Context(), reviewer.ID)
+		if err != nil {
+			writeStoreError(w, http.StatusInternalServerError, "requireExistingSecondFactor", "could not check enrollment status", err)
+			return
+		}
+		if !hasTOTP && !hasWebAuthn {
+			// 403, not 401: no header this caller could send would change the
+			// answer — the token itself has no factor to prove. The message
+			// names the way out (principle: every denial says which kind of
+			// no it is) without weakening anything: minting an enrolled token
+			// is itself gated by createToken's ever-enrolled check.
+			writeError(w, http.StatusForbidden, errNoEnrolledFactor)
+			return
+		}
+		// TrimSpace before the emptiness check, same reason as verifySecondFactor:
+		// a whitespace-only assertion header must not force the WebAuthn branch
+		// and deny a caller who presented a valid TOTP code. Found in review.
+		if strings.TrimSpace(r.Header.Get(webauthnAssertionHeader)) != "" {
+			if !a.verifyWebAuthnAssertionHeader(w, r) {
+				return
+			}
+			next(w, r)
+			return
+		}
+		if hasTOTP {
+			if !a.verifyTOTPCode(w, r) {
+				return
+			}
+			next(w, r)
+			return
+		}
+		// WebAuthn is the caller's only enrolled factor and no assertion was
+		// presented. Reachable for real: the break-glass TOTP reset
+		// (docs/operations.md) clears totp_secret_enc while passkeys may
+		// remain enrolled.
+		writeError(w, http.StatusUnauthorized, errWebAuthnRequired)
+	}
+}
+
 // verifyTOTPCode checks the X-Chuvar-TOTP-Code header against the authenticated
 // reviewer's enrolled secret, writing the appropriate error response and
-// returning false on any failure. Factored out of requireTOTP so createToken
-// (tokens.go) can apply the same check conditionally rather than as an
-// unconditional route wrapper — see that function's own doc comment for why.
+// returning false on any failure. Factored out of requireStrongFactor so
+// createToken (tokens.go) and requireExistingSecondFactor (webauthn
+// enrollment gating) can each apply the same check conditionally rather than
+// as an unconditional route wrapper — see createToken's own doc comment for why.
 func (a *API) verifyTOTPCode(w http.ResponseWriter, r *http.Request) bool {
 	// TrimSpace before the empty check, not after: a whitespace-only header
 	// (e.g. an accidental space pasted alongside the code) is non-empty as
@@ -279,6 +410,13 @@ var (
 	errUnauthorized = unauthorizedError{}
 	errTOTPRequired = totpError{"X-Chuvar-TOTP-Code header is required for this action"}
 	errTOTPInvalid  = totpError{"invalid or expired TOTP code"}
+	// errNoEnrolledFactor is requireExistingSecondFactor's refusal for a
+	// token with no second factor of its own (the bootstrap token, or one
+	// predating the reviewer_totp migration): registration is not reachable
+	// for it at all, and the fix is a properly-minted token, not a different
+	// header.
+	errNoEnrolledFactor = totpError{"this reviewer token has no second factor enrolled, so it cannot enroll a passkey; " +
+		"mint an enrolled device token (POST /api/tokens) and register the passkey from that device instead"}
 )
 
 type unauthorizedError struct{}
@@ -317,11 +455,13 @@ func (a *API) cors(next http.Handler) http.Handler {
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			// X-Chuvar-TOTP-Code: without it here, a browser's CORS preflight
-			// for any requireTOTP-gated mutation (createGrant, approve*,
+			// for any requireStrongFactor-gated mutation (createGrant, approve*,
 			// renewGrant) rejects the real request client-side before it ever
 			// reaches the server — the frontend's TOTP-gated actions would be
-			// unreachable cross-origin. Found in review.
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Chuvar-TOTP-Code")
+			// unreachable cross-origin. Found in review. X-Chuvar-WebAuthn-
+			// Assertion is the same story for the WebAuthn alternative added
+			// alongside it.
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Chuvar-TOTP-Code, "+webauthnAssertionHeader)
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

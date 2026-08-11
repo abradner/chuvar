@@ -61,13 +61,38 @@ func (s *Store) CreateReviewerToken(ctx context.Context, label, plaintext, totpS
 			return ReviewerToken{}, fmt.Errorf("store: seal totp secret: %w", err)
 		}
 	}
-	row, err := s.q.InsertReviewerToken(ctx, sqlcgen.InsertReviewerTokenParams{
+
+	// Insert and (when a factor is actually enrolled) latch in one transaction:
+	// the durable ever-enrolled signal must never be able to lag the row that
+	// justifies it. If the row committed but the latch did not, a factor reset
+	// run before the next enrollment would drop the counts to zero with no latch
+	// to keep createToken's gate shut — reopening the exact self-mint hole the
+	// latch exists to close (principle 12). A factorless bootstrap token
+	// (sealed == nil) deliberately does NOT latch: the whole point of the
+	// bootstrap carve-out is that the deployment stays ungated until the
+	// operator's first real factor lands.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ReviewerToken{}, fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op if already committed
+	qtx := s.q.WithTx(tx)
+
+	row, err := qtx.InsertReviewerToken(ctx, sqlcgen.InsertReviewerTokenParams{
 		Label:         label,
 		TokenHash:     HashToken(plaintext),
 		TotpSecretEnc: sealed,
 	})
 	if err != nil {
 		return ReviewerToken{}, fmt.Errorf("store: insert reviewer token: %w", err)
+	}
+	if sealed != nil {
+		if err := qtx.SetEnrollmentLatch(ctx); err != nil {
+			return ReviewerToken{}, fmt.Errorf("store: set enrollment latch: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ReviewerToken{}, fmt.Errorf("store: commit tx: %w", err)
 	}
 	return ReviewerToken{ID: row.ID, Label: row.Label, CreatedAt: row.CreatedAt}, nil
 }

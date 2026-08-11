@@ -132,7 +132,7 @@ describe("GrantsPage", () => {
       "agent-a",
       ["identity.basic", "projects.spritz.read"],
       "facts",
-      "123456",
+      { totpCode: "123456" },
       300,
     );
   });
@@ -201,7 +201,7 @@ describe("GrantsPage", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Renew" }));
 
-    await waitFor(() => expect(api.renewGrant).toHaveBeenCalledWith("grant-1", 1800, "654321"));
+    await waitFor(() => expect(api.renewGrant).toHaveBeenCalledWith("grant-1", 1800, { totpCode: "654321" }));
   });
 
   it("does not renew when the TTL prompt is cancelled", async () => {
@@ -266,7 +266,7 @@ describe("GrantsPage", () => {
     await waitFor(() => {
       expect(screen.queryByText("from agent-c")).not.toBeInTheDocument();
     });
-    expect(api.approveGrantRequest).toHaveBeenCalledWith("req-1", "123456");
+    expect(api.approveGrantRequest).toHaveBeenCalledWith("req-1", { totpCode: "123456" });
   });
 
   it("removes a grant request from the list after denying it", async () => {
