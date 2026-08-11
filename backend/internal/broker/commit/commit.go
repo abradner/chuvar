@@ -62,7 +62,30 @@ var treeOrParentPattern = regexp.MustCompile(`^[0-9a-f]{40}$|^[0-9a-f]{64}$`)
 // agent authorized for one committer_email must never be able to construct
 // a payload whose signed identity, as brokerd computes it, differs from
 // what every downstream git tool displays.
-var identityLinePattern = regexp.MustCompile(`^([^<>]+) <([^<>\s]*)> (\d+) ([+-]\d{4})$`)
+//
+// Both halves also exclude \x00-\x1f and \x7f (every C0 control byte plus
+// DEL, which includes \n and \r) — found in round-2 review. Go's RE2 engine
+// treats a negated class like [^<>] as matching a literal newline (only
+// "." is newline-shy by default, not a negated class), and
+// splitHeaderLines below folds any space-prefixed continuation line onto
+// the header it follows, joined with "\n". Without this exclusion, a
+// payload shaped as
+//
+//	committer Agent\n C <allowed@example.com> 1723190400 +0000
+//
+// (i.e. "committer Agent" on one physical header line, " C <allowed@...>
+// ..." as its folded continuation) parses successfully here — the name
+// group happily spans the embedded newline — and yields CommitterEmail
+// "allowed@example.com", the grant-authorized address. Real git disagrees:
+// verified against git 2.47.3, the identical bytes render with an EMPTY
+// committer name and email (`git fsck` reports `missingEmail`). Signing
+// this would mean brokerd attributes a commit to an identity every
+// downstream git tool disagrees with — exactly the attributability gap
+// principle 6 exists to close. Excluding control bytes from both capture
+// groups closes it without touching splitHeaderLines' folding itself,
+// which legitimate multi-line headers (gpgsig, gpgsig-sha256, mergetag)
+// still rely on — those headers never reach this pattern at all.
+var identityLinePattern = regexp.MustCompile(`^([^<>\x00-\x1f\x7f]+) <([^<>\s\x00-\x1f\x7f]*)> (\d+) ([+-]\d{4})$`)
 
 // ErrMalformed wraps every structural parse failure, so callers (the
 // broker's sign handler) can distinguish "this isn't a commit object at

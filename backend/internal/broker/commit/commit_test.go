@@ -310,6 +310,34 @@ func TestParse_Rejects(t *testing.T) {
 				"author Agent <agent@example.com> 1723190400 +0000",
 			),
 		},
+		{
+			// Round-2 review finding: splitHeaderLines folds ANY
+			// space-prefixed continuation line onto the header before it,
+			// including committer/author — legitimate for gpgsig/mergetag,
+			// but here it lets a header that git itself would render with an
+			// EMPTY committer name/email (verified against git 2.47.3: `git
+			// fsck` reports `missingEmail`) parse as if committer email were
+			// "allowed@example.com", the grant-authorized address. See
+			// identityLinePattern's doc comment for the exact bytes and the
+			// full explanation of why RE2's [^<>] matches the folded \n.
+			"committer header split across a folded continuation line (git would see an empty identity)",
+			build(
+				"tree "+validTree,
+				"author Agent <agent@example.com> 1723190400 +0000",
+				"committer Agent\n C <allowed@example.com> 1723190400 +0000",
+			),
+		},
+		{
+			// Same folding hazard, author side — checked for the same
+			// reason the two-bracket-pair ambiguity above is checked on
+			// both author and committer.
+			"author header split across a folded continuation line",
+			build(
+				"tree "+validTree,
+				"author Agent\n C <allowed@example.com> 1723190400 +0000",
+				"committer Agent <agent@example.com> 1723190400 +0000",
+			),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
