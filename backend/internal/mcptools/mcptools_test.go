@@ -37,7 +37,7 @@ func testSession(t *testing.T, subject string) (*mcp.ClientSession, *store.Store
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits, capability_grant_identities, capability_grant_tokens`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -127,7 +127,7 @@ func TestSubjectIsBoundNotClientSupplied(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits, capability_grant_identities, capability_grant_tokens`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 	st := store.New(pool)
@@ -275,7 +275,7 @@ func TestReadWithScopeCheck_RevokedMidEmbedIsRejected(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits, capability_grant_identities, capability_grant_tokens`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -434,7 +434,7 @@ func TestProposeWrite_StoreErrorIsMasked_ViaMCP(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, capability_grant_identities, capability_grant_tokens`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 	st := store.New(pool)
@@ -644,7 +644,7 @@ func TestReadWithScopeCheck_AuditsPerFactDepth_ViaMCP(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, capability_grant_identities, capability_grant_tokens`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -873,7 +873,7 @@ func TestProposeWrite_RateLimited(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits, capability_grant_identities, capability_grant_tokens`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 

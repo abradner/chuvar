@@ -129,6 +129,7 @@ adding a binary or moving work between them, place it on this table:
 | `cmd/apiserver` | operator | `chuvar_app` — DML, no DDL | **no** — `db.CheckSchema` only | **yes** — only process that verifies TOTP |
 | `cmd/migrate` | operator | owner — the only role with DDL | yes (that's its whole job) | no |
 | `cmd/mcpserver` | **an agent host** | `chuvar_agent` — narrow (see below) | **no** — `db.CheckSchema` only | **no** |
+| `cmd/brokerd` | operator | `chuvar_broker` — narrow (see below) | **no** — `db.CheckSchema` only | **yes** — holds a decrypted git-signing key in guarded process memory (`internal/broker/keyring`) |
 | `cmd/approver`, `cmd/pushbridge` | operator | none — `CHUVAR_API_TOKEN` only | no | no |
 
 **Exactly one binary migrates.** `cmd/migrate` holds DDL; nothing else does, including
@@ -152,8 +153,18 @@ itself every scope — but the connection still exists. Removing it entirely is 
 (mcpserver becomes an API client with an agent-class token). Until then: never widen
 `chuvar_agent`, and never add a new root-of-trust to any binary an agent launches.
 
+`chuvar_broker` (brokerd, issues #95/#79) is narrower still and touches a disjoint
+set of tables: SELECT on `grants`, `grant_scopes`, `capability_grant_identities`,
+`capability_grant_tokens`; INSERT-without-SELECT on `audit_log`, same append-only
+posture as `chuvar_agent`. No access to `facts`/`fact_scopes`/`staged_diffs` at
+all — brokerd never touches the facts path (`internal/broker`'s package doc) — nor
+to `reviewer_tokens`/`data_keys`. See
+`internal/db/migrations/20260809150000_broker_role.up.sql` and
+`docs/operations.md`'s role table for the provisioning step.
+
 New tables are granted to `chuvar_app` automatically (`ALTER DEFAULT PRIVILEGES`) and to
-`chuvar_agent` **never** — widening the agent's view is always a deliberate act.
+`chuvar_agent`/`chuvar_broker` **never** — widening either role's view is always a
+deliberate act.
 
 ### 3.7 Credentials Come From Files, Not the Environment
 Every required credential — `DATABASE_URL`, `CHUVAR_API_TOKEN`,
@@ -292,6 +303,13 @@ should trigger from it.
   bot): review fully as normal; unanswered comments on batch PRs are the workflow operating as
   designed, not feedback being ignored.
 
+- **Security-critical features can be built competitively — `.claude/skills/competition-build`.**
+  2–3 independent implementations of one brief, adversarial judges, only the survivor becomes a
+  PR, escalate a tier only when every attempt has blocking holes. Opt-in, for trust-boundary work
+  or unattended runs; it decides *what* enters the batch flow, it doesn't replace it. Whenever
+  more than one branch is in flight against the same package — competitively or not — run
+  `.claude/skills/stack-integration-check` before opening the PRs.
+
 ### Review discipline
 
 The v0 build (Jul 2026) shipped 12 commits, then got an independent, adversarial
@@ -346,6 +364,20 @@ during the build, than as a single pass at the end. Before considering a commit 
   run `.claude/skills/independent-commit-review` — one fresh-eyes subagent per
   commit, no prior context, adversarial framing. Don't review your own work and call
   it independent.
+- **Per-branch review is blind to what happens between branches.** Two branches can
+  each be correct, each be green, and still implement the same shared function in
+  opposite directions — the suites pass because each only tests the cases that behave
+  identically either way. Run `.claude/skills/stack-integration-check` on the
+  combination as soon as the candidate branches exist. Cautionary example: two
+  branches shipped opposite `scope.Covers` semantics for untargeted-grant-vs-targeted-
+  request, and a third silently deleted a validation chokepoint the branch below it
+  had introduced. Both were caught by diffing branches against each other, not by any
+  test run.
+- **Never relay a subagent's finding without checking it against git.** Read the diff,
+  grep the branch, run the command — then say whether you're reporting what you
+  verified or what you were told. Agents commit correct work and then fail at
+  reporting it; two agents contradicting each other are usually both right about
+  different artifacts.
 
 ### Go
 - Idiomatic standard-library-first Go: `net/http`'s built-in method+path routing is enough for
