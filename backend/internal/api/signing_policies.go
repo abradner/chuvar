@@ -89,20 +89,33 @@ const canonicalRepoHint = "use the canonical form host/owner/repo (e.g. github.c
 
 // requireCanonicalRepo rejects any repo string that is not already in the one
 // canonical form this table is keyed on: the bare capability-scope target
-// host/owner/repo — lowercase host, no URL scheme, no ".git" clone suffix, no
-// trailing/leading/doubled slash, no "." or ".." path segment (the 2026-08-09
-// scope-grammar decision, docs/capability-broker.md).
+// host/owner/repo — exactly three slash-separated segments, all lowercase, no
+// URL scheme, no ".git" clone suffix, no trailing/leading/doubled slash, no
+// "." or ".." path segment, no trailing DNS root dot on the host (the
+// 2026-08-09 scope-grammar decision, docs/capability-broker.md).
 //
 // This is a fail-closed control, not cosmetics. signing_policies is keyed on
 // repo as an opaque TEXT primary key, and GetSigningPolicy/UpsertSigningPolicy
-// compare it byte-for-byte. So two spellings of the same repository —
+// compare it byte-for-byte. So multiple spellings of the same repository —
 // "github.com/acme/repo", "github.com/acme/repo.git", "https://github.com/
-// acme/repo", "github.com/acme/repo/" — key four different rows. A human could
-// set `required` under one spelling while brokerd (or any later reader) derives
-// the bare form and looks it up under another: the `required` row reads as
-// absent, and if absent is treated as not-required an agent-controlled remote
-// spelling silently evades the human-set policy. That is a fail-OPEN on the
-// exact boundary this table exists to defend (CLAUDE.md principle 5).
+// acme/repo", "github.com/acme/repo/", "github.com./acme/repo" (trailing DNS
+// root dot — the same host, a different byte string), "github.com/ACME/Repo"
+// (GitHub treats owner/repo case-insensitively) — key as many different rows.
+// A human could set `required` under one spelling while brokerd (or any later
+// reader) derives the bare form and looks it up under another: the `required`
+// row reads as absent, and if absent is treated as not-required an
+// agent-controlled remote spelling silently evades the human-set policy. That
+// is a fail-OPEN on the exact boundary this table exists to defend (CLAUDE.md
+// principle 5).
+//
+// The lowercase rule folds the WHOLE repo string, not just the host: this
+// project's only forge target today is GitHub, which resolves owner/repo
+// case-insensitively (github.com/ACME/Repo and github.com/acme/repo are the
+// same repository), so a case-only difference must not key a second row. If
+// a future forge target treats path case as significant, that forge needs its
+// own rule here rather than a silent exception carved into this one — a
+// case-insensitive host and a case-sensitive one can't share a single
+// lowercase-or-reject check without one of them going wrong.
 //
 // We reject rather than silently normalize on purpose: a silent rewrite is
 // itself a way for two distinct inputs to collapse onto one key and surprise
@@ -135,8 +148,12 @@ func requireCanonicalRepo(repo string) error {
 		return fmt.Errorf("repo must not include a .git suffix: %s", canonicalRepoHint)
 	}
 	segments := strings.Split(repo, "/")
-	if len(segments) < 3 {
-		return fmt.Errorf("repo must be host/owner/repo: %s", canonicalRepoHint)
+	// Exactly 3, not "at least 3": host/owner/repo is the whole canonical
+	// shape, so a fourth segment (github.com/org/repo/extra) is a distinct,
+	// non-canonical string that must not silently key its own row alongside
+	// the 3-segment canonical one.
+	if len(segments) != 3 {
+		return fmt.Errorf("repo must be host/owner/repo (got %d segments): %s", len(segments), canonicalRepoHint)
 	}
 	for _, seg := range segments {
 		if seg == "" {
@@ -146,8 +163,16 @@ func requireCanonicalRepo(repo string) error {
 			return fmt.Errorf("repo must not contain a %q path segment: %s", seg, canonicalRepoHint)
 		}
 	}
-	if host := segments[0]; host != strings.ToLower(host) {
-		return fmt.Errorf("repo host must be lowercase: %s", canonicalRepoHint)
+	// The trailing DNS root dot ("github.com.") names the exact same host as
+	// "github.com" — resolvers treat it as an explicit fully-qualified name,
+	// not a different one — so it is rejected as a divergent spelling of the
+	// same host rather than folded away: this function rejects, it does not
+	// rewrite (see the doc comment above).
+	if host := segments[0]; strings.HasSuffix(host, ".") {
+		return fmt.Errorf("repo host must not end with a trailing '.' (it names the same host as without it): %s", canonicalRepoHint)
+	}
+	if repo != strings.ToLower(repo) {
+		return fmt.Errorf("repo must be all lowercase: %s", canonicalRepoHint)
 	}
 	return nil
 }

@@ -148,6 +148,13 @@ func TestUpsertSigningPolicy_NonCanonicalRepoRejected(t *testing.T) {
 		"github.com/abradner/chuvar.git",
 		"https://github.com/abradner/chuvar",
 		"github.com/abradner/chuvar/",
+		// Finding 1(b): case divergence in owner/repo — GitHub treats these
+		// paths case-insensitively, so this must not key a second row
+		// alongside the canonical lowercase spelling.
+		"github.com/ABRADNER/CHUVAR",
+		// Finding 2: a fourth path segment must not be accepted as a
+		// distinct, non-canonical key.
+		"github.com/abradner/chuvar/extra",
 	} {
 		t.Run(repo, func(t *testing.T) {
 			resp := doJSON(t, http.MethodPost, srv.URL+"/api/signing-policies", upsertSigningPolicyRequest{
@@ -180,6 +187,10 @@ func TestGetSigningPolicy_NonCanonicalRepoRejected(t *testing.T) {
 		"github.com/abradner/chuvar.git",
 		"https://github.com/abradner/chuvar",
 		"github.com/abradner/chuvar/",
+		// Finding 1(b): case divergence in owner/repo.
+		"github.com/ABRADNER/CHUVAR",
+		// Finding 2: a fourth path segment.
+		"github.com/abradner/chuvar/extra",
 	} {
 		t.Run(repo, func(t *testing.T) {
 			resp := doJSON(t, http.MethodGet, srv.URL+"/api/signing-policies/"+repo, nil)
@@ -306,6 +317,17 @@ func TestValidateRepo(t *testing.T) {
 		{"uppercase host", "GitHub.com/abradner/chuvar", true},
 		{"missing repo segment", "github.com/abradner", true},
 		{"bare string, no slashes", "chuvar", true},
+		// Finding 1(a): a trailing DNS root dot on the host names the same
+		// host as without it, so it must not key a distinct row.
+		{"trailing DNS root dot on host", "github.com./abradner/chuvar", true},
+		// Finding 1(b): GitHub treats owner/repo case-insensitively, and the
+		// store compares repo byte-for-byte, so any case divergence anywhere
+		// in the string (not just the host) must be rejected.
+		{"uppercase owner and repo", "github.com/ABRADNER/CHUVAR", true},
+		{"uppercase repo only", "github.com/abradner/CHUVAR", true},
+		// Finding 2: exactly host/owner/repo — a fourth segment must be
+		// rejected, not silently accepted as "at least 3".
+		{"extra path segment", "github.com/abradner/chuvar/extra", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
