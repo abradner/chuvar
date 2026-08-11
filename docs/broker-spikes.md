@@ -4,7 +4,8 @@ Two research spikes run 2026-08-09 for the Agent Capability Broker workstream
 (issues #77 and #74). Both were run **on the real target host** (Linux arm64
 single-board machine, Go 1.26) with working prototypes, not desk research — the
 conclusions below changed the `brokerd` design and are cited from
-`internal/broker/socket.go` and `internal/broker/keyring/`.
+`backend/internal/broker/socket.go` and `backend/internal/broker/keyring/` —
+both introduced by the brokerd PR (#102), not by this document.
 
 Preserved here because the applied conclusions live in code comments but the
 evidence behind them did not, and the next person to ask "why not just check
@@ -60,7 +61,7 @@ The token's handoff is the design's actual hard problem, and it must go **out of
 
 ## Spike #74 — In-memory key custody in Go
 
-All work done in `/tmp/keycustody-spike` (a disposable Go module, now deleted — repo at `/home/alexbradner/code/chuvar` was not modified). Read in full before starting: `AGENTS.md` (esp. §3.0 trust boundary, §3.5 sealed-at-rest, §6 review discipline), `backend/internal/custody/{custody,backend,custody_test}.go`, and `docs/capability-broker.md` (Custody model section + the 2026-08-01 and 2026-08-09 decision-log entries, esp. "brokerd holds decrypted key material ... in process memory for the grant duration").
+All work done in `/tmp/keycustody-spike` (a disposable Go module, now deleted — the repo working tree was not modified). Read in full before starting: `AGENTS.md` (esp. §3.0 trust boundary, §3.5 sealed-at-rest, §6 review discipline), `backend/internal/custody/{custody,backend,custody_test}.go`, and `docs/capability-broker.md` (Custody model section + the 2026-08-01 and 2026-08-09 decision-log entries, esp. "brokerd holds decrypted key material ... in process memory for the grant duration").
 
 ### Host facts (verified, not assumed)
 - `uname -a`: Linux aarch64 (Raspberry Pi 5), kernel 6.18.34+rpt-rpi-2712.
