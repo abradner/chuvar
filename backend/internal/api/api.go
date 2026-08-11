@@ -137,6 +137,14 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("GET /api/tokens", a.listTokens)
 	mux.HandleFunc("POST /api/tokens", a.createToken)
 	mux.HandleFunc("POST /api/tokens/{id}/revoke", a.revokeToken)
+	// WebAuthn (passkey) ceremonies — see webauthn.go's package-level doc
+	// comment for the two-endpoint-per-ceremony shape and why the strong-
+	// factor gate sits on *begin*, not finish.
+	mux.HandleFunc("POST /api/webauthn/register/begin", a.requireExistingSecondFactor(a.webauthnRegisterBegin))
+	mux.HandleFunc("POST /api/webauthn/register/finish", a.webauthnRegisterFinish)
+	mux.HandleFunc("POST /api/webauthn/assert/begin", a.webauthnAssertBegin)
+	mux.HandleFunc("GET /api/webauthn/credentials", a.listWebAuthnCredentials)
+	mux.HandleFunc("POST /api/webauthn/credentials/{id}/revoke", a.revokeWebAuthnCredential)
 	// {repo...} (not {repo}): a repo identifier like
 	// "github.com/abradner/chuvar" contains slashes, so this wildcard-suffix
 	// pattern is the only one of the two that can capture it whole — see
@@ -146,14 +154,6 @@ func (a *API) Routes() http.Handler {
 	// win over this wildcard regardless of which was registered first.
 	mux.HandleFunc("GET /api/signing-policies/{repo...}", a.getSigningPolicy)
 	mux.HandleFunc("POST /api/signing-policies", a.requireStrongFactor(a.upsertSigningPolicy))
-	// WebAuthn (passkey) ceremonies — see webauthn.go's package-level doc
-	// comment for the two-endpoint-per-ceremony shape and why the strong-
-	// factor gate sits on *begin*, not finish.
-	mux.HandleFunc("POST /api/webauthn/register/begin", a.requireExistingSecondFactor(a.webauthnRegisterBegin))
-	mux.HandleFunc("POST /api/webauthn/register/finish", a.webauthnRegisterFinish)
-	mux.HandleFunc("POST /api/webauthn/assert/begin", a.webauthnAssertBegin)
-	mux.HandleFunc("GET /api/webauthn/credentials", a.listWebAuthnCredentials)
-	mux.HandleFunc("POST /api/webauthn/credentials/{id}/revoke", a.revokeWebAuthnCredential)
 
 	// /api/events (events.go) is mounted outside withRequestTimeout deliberately:
 	// every other route is a quick request/response and benefits from a bounded
