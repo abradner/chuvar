@@ -27,7 +27,7 @@ func testStore(t *testing.T) *store.Store {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE reviewer_tokens, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE reviewer_tokens, webauthn_credentials, webauthn_challenges, data_keys`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 	return testSealedStore(t, pool)
@@ -131,6 +131,49 @@ func TestBootstrapReviewerToken_ReusableAfterFullRevocation(t *testing.T) {
 	}
 	if !ok || reviewer.Label != "bootstrap" {
 		t.Fatalf("AuthenticateReviewerToken() after re-bootstrap = (%q, %v), want (bootstrap, true)", reviewer.Label, ok)
+	}
+}
+
+func TestNewWebAuthn_DerivesRPIDFromOrigin(t *testing.T) {
+	os.Unsetenv("WEBAUTHN_RP_ID")
+	os.Unsetenv("WEBAUTHN_RP_DISPLAY_NAME")
+
+	wa, err := newWebAuthn("http://localhost:5173")
+	if err != nil {
+		t.Fatalf("newWebAuthn() error = %v", err)
+	}
+	if wa.Config.RPID != "localhost" {
+		t.Errorf("RPID = %q, want %q", wa.Config.RPID, "localhost")
+	}
+	if len(wa.Config.RPOrigins) != 1 || wa.Config.RPOrigins[0] != "http://localhost:5173" {
+		t.Errorf("RPOrigins = %v, want [http://localhost:5173]", wa.Config.RPOrigins)
+	}
+	if wa.Config.RPDisplayName != "Chuvar" {
+		t.Errorf("RPDisplayName = %q, want the default %q", wa.Config.RPDisplayName, "Chuvar")
+	}
+}
+
+func TestNewWebAuthn_EnvOverridesTakePriority(t *testing.T) {
+	t.Setenv("WEBAUTHN_RP_ID", "chuvar.example.com")
+	t.Setenv("WEBAUTHN_RP_DISPLAY_NAME", "Custom Deployment")
+
+	wa, err := newWebAuthn("https://app.example.com")
+	if err != nil {
+		t.Fatalf("newWebAuthn() error = %v", err)
+	}
+	if wa.Config.RPID != "chuvar.example.com" {
+		t.Errorf("RPID = %q, want the WEBAUTHN_RP_ID override %q", wa.Config.RPID, "chuvar.example.com")
+	}
+	if wa.Config.RPDisplayName != "Custom Deployment" {
+		t.Errorf("RPDisplayName = %q, want the WEBAUTHN_RP_DISPLAY_NAME override", wa.Config.RPDisplayName)
+	}
+}
+
+func TestNewWebAuthn_OriginWithNoHostIsABootError(t *testing.T) {
+	os.Unsetenv("WEBAUTHN_RP_ID")
+
+	if _, err := newWebAuthn("not-a-url-at-all"); err == nil {
+		t.Fatal("newWebAuthn() with an origin that has no host: want an error, got nil")
 	}
 }
 

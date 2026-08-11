@@ -9,6 +9,7 @@
 // quietly vanish in a redesign.
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, type CreatedReviewerToken, type ReviewerToken } from "../../api/client";
+import { promptSecondFactor } from "../secondFactor";
 
 // Re-exported so the view can type its props without importing from api/
 // itself (AGENTS.md §6: "View ... Must not: Import from api/").
@@ -121,30 +122,29 @@ export function useTokens({ onRevealChange }: UseTokensOptions = {}) {
         return false;
       }
 
-      // TOTP is only required once a device has ever been enrolled (backend's
+      // A factor is only required once one has ever been enrolled (backend's
       // createToken doc comment), and this page can't know that in advance —
-      // so unlike the Grants page's mandatory prompts, an empty code is a
-      // legitimate answer here (a genuinely fresh install).
+      // so unlike the Grants/StagedDiffs pages' mandatory promptSecondFactor
+      // calls, no factor at all is a legitimate answer here (a genuinely
+      // fresh install, or a device left with nothing to prove by the
+      // direct-database break-glass recovery in docs/operations.md).
+      // promptSecondFactor's optional mode is exactly this: same shared
+      // TOTP-or-passkey ceremony as every other gated mutation when this
+      // device does have something to prove — including a surviving passkey
+      // with no working TOTP, the break-glass scenario docs/operations.md
+      // describes — degrading to an empty factor only when it genuinely has
+      // neither.
       //
-      // Cancel and empty are therefore NOT equivalent, and prompt() distinguishes
-      // them: null means cancelled, "" means submitted-blank. Cancel aborts;
-      // blank proceeds with no code and lets the server decide whether one was
+      // Cancel and "nothing to prove" are therefore NOT equivalent: null means
+      // the operator hit Cancel and this aborts; an empty SecondFactor means
+      // proceed with no code and let the server decide whether one was
       // required. Collapsing the two would make cancelling a create still create.
-      //
-      // The wording says "never enrolled", not "first device": the backend counts
-      // ever-enrolled *including revoked* rows, so an operator who has revoked
-      // every device would otherwise read "first device" as true, leave it blank,
-      // and get a bare 401 they cannot act on.
-      // Trimmed for the paste-adds-whitespace reason as the Grants page.
-      const totpInput = window.prompt(
-        "Enter a TOTP code from an already-enrolled device (leave blank only on a new install that has never enrolled one)",
-      );
-      if (totpInput === null) return false;
-      const totpCode = totpInput.trim();
+      const factor = await promptSecondFactor("mint a new device token", { optional: true });
+      if (factor === null) return false;
 
       setCreating(true);
       try {
-        const created = await api.createToken(trimmed, totpCode || undefined);
+        const created = await api.createToken(trimmed, factor);
         setJustCreated(created);
         setRefreshKey((k) => k + 1);
         return true;

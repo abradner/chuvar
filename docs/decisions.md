@@ -27,6 +27,57 @@ they ever appear to disagree, the newer dated entry wins.
 
 ---
 
+## 2026-08-09 — WebAuthn passkeys ship as an additive second factor alongside TOTP
+
+**Reviewer authentication gains passkeys (WebAuthn, issue #70): a second
+enrollable factor accepted everywhere a TOTP code is accepted today — the
+approval-granting mutations and `createToken`'s conditional enrollment gate.
+Additive, not a replacement: TOTP keeps working unchanged, and retiring it is
+a separate, future decision this entry deliberately does not make.**
+
+**Context.** The 2026-07-30 entry below records TOTP as an interim stopgap
+"superseded when WebAuthn/passkey reviewer authentication ships." Passkeys
+now ship, but they do not supersede TOTP yet — they sit beside it. Ceremony
+rules: registration is gated by a factor the calling reviewer token has
+*already* enrolled (a valid TOTP code, or an assertion of an existing
+passkey), with **no factorless carve-out of any kind** — the bootstrap token
+and pre-`reviewer_totp` tokens can never mint themselves a passkey, because
+`createToken` enrolls TOTP on every token it mints, so every legitimate
+device already holds a factor to prove. `createToken`'s deployment-wide
+ever-enrolled gate counts both factor kinds, monotonically (revoked rows and
+revoked credentials still count). Challenges are server-side, single-use,
+short-expiry; RP ID/origin derive from the one configured CORS origin; a
+regressed sign counter is treated as a cloned-authenticator signal and
+revokes the credential in the same statement — fail closed, not a log line.
+
+**Rejected alternatives.**
+- *Replace TOTP outright.* Rejected for now: it turns a factor addition into
+  a forced migration for the existing enrolled deployment, and retirement
+  deserves its own decision once passkey coverage is proven in practice.
+- *A first-passkey carve-out (no factor needed when the caller has none).*
+  Rejected in review, twice-over: scoped per-token it never closes for the
+  structurally-factorless bootstrap token, handing whoever holds that bearer
+  token a self-service path to a credential that passes every strong-factor
+  gate — precisely the self-escalation the second factor exists to stop.
+- *A separate WebAuthn-only origin/RP configuration.* Rejected: "which origin
+  is real" must have one answer (`CORS_ALLOWED_ORIGIN`), not two that drift.
+
+**Accepted costs — stated honestly.** While TOTP remains equally sufficient,
+the factor set's phishing resistance is bounded by TOTP's, not WebAuthn's: a
+reviewer who can be phished for a code can still be phished for a code, and
+an attacker who obtains a TOTP secret at enrollment time (it is displayed
+once, as an otpauth:// URI) can still mint valid codes without hardware. The
+full property issue #70 aims at — a second factor that shell access to the
+reviewer's environment can never reproduce — therefore arrives only when
+TOTP is retired; until then passkeys raise the ceiling, not the floor. Also
+accepted: the break-glass "every enrolled device is lost" reset now has two
+things to clear (TOTP secrets *and* passkey credential rows), and the
+recovery docs carry that complexity.
+
+**Status:** standing. TOTP retirement: open, tracked against issue #70.
+
+---
+
 ## 2026-08-08 — UI feature components split into hook / view / page
 
 **Every frontend feature splits into a data hook, a presentational view, and a
@@ -299,7 +350,9 @@ revokes real devices cannot reopen it that way.
 
 **Status:** standing as an interim stopgap; superseded when WebAuthn/passkey
 reviewer authentication ships (tracked, not yet landed as of this log's
-migration date).
+migration date). *Update 2026-08-09:* passkeys shipped **additive**, not as a
+replacement — TOTP stands, and its retirement is still open; see the
+2026-08-09 entry above for what shipped and the honest gap that remains.
 
 ---
 

@@ -78,12 +78,16 @@ describe("useTokens", () => {
 
     const { result } = renderHook(() => useTokens());
 
-    // A plain (sync) act callback still flushes the setCreating(true) React
-    // runs before create's first await, even though the async function
-    // itself is still in flight — that's what lets the second call below
+    // An async act callback, not a plain sync one: create's guard now sits
+    // behind `await promptSecondFactor(...)` (the optional TOTP-or-passkey
+    // ceremony), and an async function always yields at least one microtask
+    // even along a path with no real await inside it — a sync act callback
+    // returned before setCreating(true) ran. Awaiting act lets that
+    // microtask (and the setCreating(true) state update it gates) settle
+    // before the assertion below, which is what lets the second call
     // observe creating=true through a fresh closure.
     let firstCall!: Promise<boolean>;
-    act(() => {
+    await act(async () => {
       firstCall = result.current.create("alex-phone");
     });
     expect(result.current.creating).toBe(true);

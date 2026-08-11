@@ -192,13 +192,16 @@ To proceed, re-enrolment must be a decision rather than a side effect:
 
 ---
 
-## Reviewer devices and the TOTP second factor
+## Reviewer devices and the second factor (TOTP and passkeys)
 
 Mutations that **grant or extend authority** — approving a grant request,
 creating a grant directly, approving a staged diff, renewing a grant — require
-a device-local TOTP code on top of the bearer token. A bearer token is readable
-by anything with shell access to the environment holding it; the second factor
-is the part a compromised agent session cannot produce.
+a device-local second factor on top of the bearer token: a TOTP code
+(`X-Chuvar-TOTP-Code`) or, since 2026-08-09, a WebAuthn passkey assertion
+(`X-Chuvar-WebAuthn-Assertion`); either satisfies the same server-side gate
+(see the 2026-08-09 entry in [decisions.md](decisions.md)). A bearer token is
+readable by anything with shell access to the environment holding it; the
+second factor is the part a compromised agent session cannot produce.
 
 ### Enrolling the first device
 
@@ -225,12 +228,43 @@ The response carries the token plaintext (**shown once — store it now**) and a
 `totp_enroll_uri`. Scan that into an authenticator app.
 
 From then on the enrolment gate is closed permanently: minting any further
-token requires a valid code from an already-enrolled device. The count it
-checks includes revoked rows, so revoking devices cannot reopen it.
+token requires a valid factor from an already-enrolled device (TOTP code or
+passkey assertion). The counts it checks — TOTP-enrolled tokens *and* passkey
+credentials, both including revoked rows — are monotonic, so revoking devices
+or credentials cannot reopen it. Belt and suspenders: a **durable append-only
+latch** (`enrollment_latch`) is also set the first time any factor is enrolled,
+and the gate stays closed if *either* the latch is set or the counts are
+nonzero — so even the break-glass factor reset below, which drops the counts to
+zero, cannot reopen enrollment until the latch is *separately and deliberately*
+cleared.
 
 > The Tokens page in the approval UI (PR #56) now provides this flow,
 > including the first (bootstrap) enrolment; the curl calls above document
 > the underlying API and remain valid as a UI-less fallback.
+
+### Adding a passkey
+
+Enroll from the Tokens page in the approval UI ("Passkeys"), or via the API:
+`POST /api/webauthn/register/begin` then `/finish`. Registration **always**
+requires proving a factor the calling device token has already enrolled — its
+TOTP code, or an assertion of a passkey it already holds. There is no
+factorless path: every token minted through `POST /api/tokens` gets a TOTP
+secret at mint time, so every legitimate device has a factor to prove, and
+the tokens that don't (the bootstrap token, tokens predating the
+`reviewer_totp` migration) are refused outright with a 403. That refusal is
+the point: a bearer token that could mint itself a passkey would pass every
+gate above, so "add a passkey" must never be reachable with less proof than
+the gates it unlocks.
+
+Passkey assertions are single-use and challenge-bound (`POST
+/api/webauthn/assert/begin`, five-minute expiry), validated against the RP
+ID/origin derived from `CORS_ALLOWED_ORIGIN` (`WEBAUTHN_RP_ID` overrides). A
+passkey whose signature counter regresses — the standard cloned-authenticator
+signal — is **revoked automatically in the same statement that detects it**
+and the event is audited (`webauthn_clone_suspected`); enroll a replacement
+rather than expecting it to recover. Revoking a passkey
+(`POST /api/webauthn/credentials/{id}/revoke`) is bearer-only, like device
+revocation, and like it does not un-enrol the deployment.
 
 ### Adding another device
 
@@ -261,12 +295,20 @@ see the recovery section below for why, and what it costs you.
 
 ## ⚠️ Recovery: every enrolled device is lost
 
-> **This procedure disables the second factor for the entire deployment.**
-> It is the one operation that intentionally weakens a security control, and it
-> is **not recorded in `audit_log`** — Chuvar's audit trail is written by the
-> application layer, and this bypasses it. Nothing in the system will show that
-> it happened. Treat it as a break-glass action: note it wherever you record
-> operational incidents, and re-enrol immediately.
+> **This procedure disables the second factor for the entire deployment and
+> destroys every bearer token along with it.** It is the one operation that
+> intentionally weakens a security control, and it is **not recorded in
+> `audit_log`** — Chuvar's audit trail is written by the application layer, and
+> this bypasses it. Nothing in the system will show that it happened. Treat it
+> as a break-glass action: note it wherever you record operational incidents,
+> and re-bootstrap immediately.
+>
+> Unlike earlier versions of this runbook, recovery no longer leaves existing
+> bearer tokens working: it revokes **every** reviewer token in the same
+> transaction that clears the factors, so no surviving token — yours or a
+> stolen one — can race you through the moment enrollment is reopened. You
+> re-bootstrap from `REVIEWER_BOOTSTRAP_TOKEN` afterward, exactly like a fresh
+> install.
 
 ### Try these first
 
@@ -274,9 +316,13 @@ Work down this list. Only reach the last step if the ones above genuinely don't 
 
 1. **Any other enrolled device still working?** Use it to mint a replacement
    ("Adding another device" above). No recovery needed.
-2. **Authenticator app backed up?** Most (Authy, 1Password, Google Authenticator)
-   sync or export TOTP seeds. Restoring the app restores the code.
-3. **Clock drift?** A code rejected as invalid on an otherwise-good device is
+2. **Any passkey still working?** A passkey assertion satisfies the same gates
+   a TOTP code does, including minting a replacement token — a surviving
+   passkey means no recovery is needed either.
+3. **Authenticator app backed up?** Most (Authy, 1Password, Google Authenticator)
+   sync or export TOTP seeds. Restoring the app restores the code. Synced
+   passkeys (iCloud Keychain, a password manager) restore the same way.
+4. **Clock drift?** A code rejected as invalid on an otherwise-good device is
    usually skew, not loss. Check the device's time sync before assuming the
    device is gone.
 
@@ -293,7 +339,15 @@ hardware) and would need revisiting for anything multi-tenant.
 
 ### The procedure
 
-Run it inside a transaction and **inspect before committing**:
+Recovery is **two deliberate steps, in order**: first clear every factor and
+every bearer token; then, separately and by hand, reset the durable enrollment
+latch. Step 1 alone does **not** reopen enrollment — the latch (below) keeps the
+token-mint gate closed until you take step 2. That separation is the whole
+point: clearing factors must never *by itself* reopen the gate, or a
+break-glass reset and an attacker's self-mint would be the same event.
+
+**Step 1 — clear factors and revoke every token.** Run it inside a transaction
+and **inspect before committing**:
 
 ```sh
 docker compose exec postgres psql -U chuvar -d chuvar
@@ -303,32 +357,57 @@ docker compose exec postgres psql -U chuvar -d chuvar
 BEGIN;
 
 -- 1. See what you are about to affect. Expect one row per device that has ever
---    enrolled, revoked ones included.
+--    enrolled, revoked ones included — and every passkey ever registered.
 SELECT id, label, revoked_at, (totp_secret_enc IS NOT NULL) AS enrolled
 FROM reviewer_tokens ORDER BY created_at;
+SELECT id, label, revoked_at FROM webauthn_credentials ORDER BY created_at;
 
--- 2. Clear every secret. The absence of a WHERE clause is deliberate — see below.
-UPDATE reviewer_tokens SET totp_secret_enc = NULL;
+-- 2. Delete every reviewer token. ON DELETE CASCADE takes every passkey and
+--    every pending challenge with it, so this one statement both clears the
+--    second factor AND revokes every bearer token. Deliberately all of them,
+--    with no WHERE clause: any token left alive is a token that could mint an
+--    enrolled device the instant step 2 (the latch reset) runs — including a
+--    stolen one racing you. You re-bootstrap from REVIEWER_BOOTSTRAP_TOKEN
+--    afterward, so losing your own tokens here is expected, not collateral.
+DELETE FROM reviewer_tokens;
 
--- 3. Confirm the gate is actually reopened. This MUST return 0, or the reset
---    has not worked and committing achieves nothing.
+-- 3. Confirm the factor counts are actually zero. BOTH MUST return 0, or the
+--    reset has not worked and committing achieves nothing.
 SELECT count(*) AS ever_enrolled
 FROM reviewer_tokens WHERE totp_secret_enc IS NOT NULL;
+SELECT count(*) AS ever_enrolled_passkeys FROM webauthn_credentials;
 
-COMMIT;  -- or ROLLBACK; if step 3 did not return 0
+COMMIT;  -- or ROLLBACK; if step 3 did not return 0 twice
 ```
 
-**Why no `WHERE` clause.** The gate counts every row that has *ever* carried a
-secret, revoked rows included — that is what makes it un-reopenable by an
-attacker who can revoke. So `WHERE revoked_at IS NULL` would clear only the
-active devices, leave the count nonzero, and keep the gate shut. Step 3 is there
-to catch exactly that mistake before you commit.
+Deleting rows here (rather than nulling secrets or setting `revoked_at`) is the
+one sanctioned break-glass deletion of otherwise-append-only history — and it is
+exactly as invisible to `audit_log` as the rest of this procedure, which is why
+the warning at the top of this section exists. It is safe *only* because the
+durable latch, not these mutable rows, is now what preserves the enrollment gate
+across a reset (see the `enrollment_latch` migration).
 
-Active bearer tokens keep working throughout; only the second factor is removed.
+**Step 2 — reset the durable latch, on purpose, as a separate statement.** The
+latch is set the first time any factor is ever enrolled and is **not** touched by
+step 1: until you clear it, `POST /api/tokens` stays gated even though every
+factor is gone — which is exactly what stops a bearer token from self-enrolling
+the instant the factors are cleared. Resetting it is your explicit signal that
+this is a sanctioned re-bootstrap, not that attack:
+
+```sql
+DELETE FROM enrollment_latch;
+```
+
+Do this only when you are certain, and only after step 1 has committed. It is
+never folded into the transaction above and never a byproduct of clearing
+factors — that single-statement, hand-run separation is the control.
 
 ### Immediately afterwards
 
-The deployment is now in the ungated state described in "Enrolling the first
-device" — any bearer token can mint and self-enrol. **Enrol a device now**, not
-later. `apiserver` will log the `SECURITY` warning on next start as a backstop,
-but the window is open from the moment you commit.
+Every bearer token is gone, so API access is down until you re-bootstrap. With
+no active tokens, `apiserver` mints a fresh bootstrap token from
+`REVIEWER_BOOTSTRAP_TOKEN` on next start (see "Enrolling the first device"), and
+because you cleared the latch in step 2 the deployment is back in the ungated
+bootstrap state — that first token can enrol without a factor. **Enrol a device
+now**, not later: `apiserver` logs the `SECURITY` warning on each start as a
+backstop, but the window is open from the moment you reset the latch.

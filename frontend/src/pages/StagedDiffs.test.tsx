@@ -14,6 +14,7 @@ vi.mock("../api/client", async () => {
       approveStagedDiff: vi.fn(),
       rejectStagedDiff: vi.fn(),
       getFact: vi.fn(),
+      webauthnAssertBegin: vi.fn(),
     },
   };
 });
@@ -78,7 +79,50 @@ describe("StagedDiffsPage", () => {
     // decided_by is no longer a client-supplied argument — it's derived
     // server-side from the authenticated reviewer token (see internal/api's
     // package comment).
-    expect(api.approveStagedDiff).toHaveBeenCalledWith("diff-1", "123456");
+    expect(api.approveStagedDiff).toHaveBeenCalledWith("diff-1", { totpCode: "123456" });
+  });
+
+  it("approves with a passkey assertion when the prompt is left blank and the browser supports WebAuthn", async () => {
+    vi.mocked(api.listStagedDiffs).mockResolvedValue([sampleDiff]);
+    vi.mocked(api.approveStagedDiff).mockResolvedValue(undefined);
+    vi.mocked(window.prompt).mockReturnValue("");
+    // jsdom implements neither the Credential Management nor WebAuthn APIs —
+    // stub the boundary so promptSecondFactor's real passkey branch runs.
+    Object.defineProperty(window, "PublicKeyCredential", {
+      value: function PublicKeyCredential() {},
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "credentials", {
+      value: {
+        get: vi.fn().mockResolvedValue({
+          id: "cred-1",
+          rawId: new Uint8Array([1]).buffer,
+          type: "public-key",
+          response: {
+            clientDataJSON: new Uint8Array([2]).buffer,
+            authenticatorData: new Uint8Array([3]).buffer,
+            signature: new Uint8Array([4]).buffer,
+          },
+        }),
+      },
+      writable: true,
+      configurable: true,
+    });
+    vi.mocked(api.webauthnAssertBegin).mockResolvedValue({
+      publicKey: { challenge: "AAAA" },
+    });
+
+    render(<StagedDiffsPage />);
+    await screen.findByText("user prefers flat whites");
+    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => {
+      expect(api.approveStagedDiff).toHaveBeenCalledWith("diff-1", { webauthnAssertion: expect.any(String) });
+    });
+
+    Reflect.deleteProperty(window, "PublicKeyCredential");
+    Reflect.deleteProperty(navigator, "credentials");
   });
 
   it("does not approve a diff when the TOTP prompt is cancelled", async () => {

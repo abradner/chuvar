@@ -43,6 +43,11 @@ type DataKey struct {
 	RotatedAt  *time.Time
 }
 
+type EnrollmentLatch struct {
+	ID        bool
+	LatchedAt time.Time
+}
+
 type Fact struct {
 	ID                 string
 	Content            string
@@ -129,4 +134,31 @@ type StagedDiff struct {
 	CreatedAt             time.Time
 	DecidedAt             *time.Time
 	DecidedBy             *string
+}
+
+type WebauthnChallenge struct {
+	ID              string
+	ReviewerTokenID string
+	Purpose         string
+	SessionData     []byte
+	ExpiresAt       time.Time
+	CreatedAt       time.Time
+}
+
+type WebauthnCredential struct {
+	ID              string
+	ReviewerTokenID string
+	Label           string
+	CredentialID    []byte
+	PublicKey       []byte
+	AttestationType string
+	Transports      []string
+	Aaguid          []byte
+	SignCount       int64
+	BackupEligible  bool
+	BackupState     bool
+	CreatedAt       time.Time
+	LastUsedAt      *time.Time
+	CloneWarningAt  *time.Time
+	RevokedAt       *time.Time
 }

@@ -65,6 +65,61 @@ export interface ReviewerToken {
   revoked_at?: string;
 }
 
+export interface WebAuthnCredential {
+  id: string;
+  label: string;
+  active: boolean;
+  attestation_type: string;
+  created_at: string;
+  last_used_at?: string;
+  clone_warning_at?: string;
+  revoked_at?: string;
+}
+
+// The following mirror go-webauthn's protocol.CredentialCreation /
+// protocol.CredentialAssertion JSON shapes exactly (field-for-field) — see
+// backend/internal/api/webauthn.go's package comment. Consumed only by
+// pages/tokens/webauthnCodec.ts, which converts them to/from the
+// ArrayBuffer-based navigator.credentials Web API shapes; kept here rather
+// than in that file because every other wire-format interface in this
+// codebase lives in api/client.ts, and pages/ must not import from api/ in
+// the other direction (AGENTS.md §6, "UI component standard" — View "Must
+// not: Import from api/", generalized here to the whole pages/ tree owning
+// no wire-format knowledge of its own).
+interface WebAuthnCredentialDescriptor {
+  type: "public-key";
+  id: string;
+  transports?: string[];
+}
+
+export interface CredentialCreationOptionsJSON {
+  publicKey: {
+    rp: { id: string; name: string };
+    user: { id: string; name: string; displayName: string };
+    challenge: string;
+    pubKeyCredParams: { type: "public-key"; alg: number }[];
+    timeout?: number;
+    excludeCredentials?: WebAuthnCredentialDescriptor[];
+    authenticatorSelection?: {
+      authenticatorAttachment?: string;
+      requireResidentKey?: boolean;
+      residentKey?: string;
+      userVerification?: string;
+    };
+    attestation?: string;
+  };
+}
+
+export interface CredentialRequestOptionsJSON {
+  publicKey: {
+    challenge: string;
+    timeout?: number;
+    rpId?: string;
+    allowCredentials?: WebAuthnCredentialDescriptor[];
+    userVerification?: string;
+  };
+}
+
 export interface CreatedReviewerToken extends ReviewerToken {
   // token and totp_enroll_uri are both returned exactly once, in this response
   // only — see backend/internal/api/tokens.go's createTokenResponse doc
@@ -109,12 +164,21 @@ class ApiError extends Error {
   }
 }
 
-// totpCode carries the device-local second factor (see backend/internal/api's
-// requireTOTP) for mutations that grant or extend authority — every other
-// request omits the header entirely rather than sending it empty.
+// SecondFactor carries the device-local second factor (see
+// backend/internal/api's requireStrongFactor) for mutations that grant or
+// extend authority — TOTP and WebAuthn are equally-accepted alternatives
+// (decided 2026-08-09, docs/decisions.md), never both required. Callers
+// provide exactly one; every other request omits both headers entirely
+// rather than sending them empty. Collected by pages/secondFactor.ts's
+// promptSecondFactor (or the passkey hook's own ceremonies).
+export interface SecondFactor {
+  totpCode?: string;
+  webauthnAssertion?: string;
+}
+
 async function request<T>(
   path: string,
-  init?: RequestInit & { signal?: AbortSignal; totpCode?: string },
+  init?: RequestInit & { signal?: AbortSignal; totpCode?: string; webauthnAssertion?: string },
 ): Promise<T> {
   const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
   const signal = init?.signal ? AbortSignal.any([timeoutSignal, init.signal]) : timeoutSignal;
@@ -125,6 +189,9 @@ async function request<T>(
   };
   if (init?.totpCode) {
     headers["X-Chuvar-TOTP-Code"] = init.totpCode;
+  }
+  if (init?.webauthnAssertion) {
+    headers["X-Chuvar-WebAuthn-Assertion"] = init.webauthnAssertion;
   }
 
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -158,11 +225,12 @@ export const api = {
       (p) => p.items,
     ),
 
-  // approveStagedDiff/createGrant/approveGrantRequest require totpCode — the
-  // backend's requireTOTP gate rejects these without a valid device-local
-  // second factor (see backend/internal/api/api.go's Routes doc comment).
-  approveStagedDiff: (id: string, totpCode: string) =>
-    request<unknown>(`/api/staged-diffs/${id}/approve`, { method: "POST", totpCode }),
+  // approveStagedDiff/createGrant/approveGrantRequest/renewGrant require a
+  // SecondFactor — the backend's requireStrongFactor gate rejects these
+  // without a valid device-local second factor (see
+  // backend/internal/api/api.go's Routes doc comment).
+  approveStagedDiff: (id: string, factor: SecondFactor) =>
+    request<unknown>(`/api/staged-diffs/${id}/approve`, { method: "POST", ...factor }),
 
   rejectStagedDiff: (id: string) => request<void>(`/api/staged-diffs/${id}/reject`, { method: "POST" }),
 
@@ -171,25 +239,25 @@ export const api = {
   listGrants: (subject: string, signal?: AbortSignal) =>
     request<Page<Grant>>(`/api/grants?subject=${encodeURIComponent(subject)}`, { signal }).then((p) => p.items),
 
-  createGrant: (subject: string, scopes: string[], depth: string, totpCode: string, ttlSeconds?: number) =>
+  createGrant: (subject: string, scopes: string[], depth: string, factor: SecondFactor, ttlSeconds?: number) =>
     request<Grant>("/api/grants", {
       method: "POST",
       body: JSON.stringify({ subject, scopes, depth, ttl_seconds: ttlSeconds }),
-      totpCode,
+      ...factor,
     }),
 
   revokeGrant: (id: string) => request<void>(`/api/grants/${id}/revoke`, { method: "POST" }),
 
-  // renewGrant requires totpCode (same gate as createGrant/approveGrantRequest/
-  // approveStagedDiff) and ttlSeconds — unlike createGrant's optional TTL,
-  // renewing into "no expiry" isn't allowed (backend/internal/store's
-  // RenewGrant doc comment: it would defeat the TTL-bounded security property
-  // renewal exists to preserve).
-  renewGrant: (id: string, ttlSeconds: number, totpCode: string) =>
+  // renewGrant requires a SecondFactor (same gate as createGrant/
+  // approveGrantRequest/approveStagedDiff) and ttlSeconds — unlike
+  // createGrant's optional TTL, renewing into "no expiry" isn't allowed
+  // (backend/internal/store's RenewGrant doc comment: it would defeat the
+  // TTL-bounded security property renewal exists to preserve).
+  renewGrant: (id: string, ttlSeconds: number, factor: SecondFactor) =>
     request<Grant>(`/api/grants/${id}/renew`, {
       method: "POST",
       body: JSON.stringify({ ttl_seconds: ttlSeconds }),
-      totpCode,
+      ...factor,
     }),
 
   getFact: (id: string, signal?: AbortSignal) => request<Fact>(`/api/facts/${id}`, { signal }),
@@ -197,8 +265,8 @@ export const api = {
   listGrantRequests: (status = "pending", signal?: AbortSignal) =>
     request<GrantRequest[]>(`/api/grant-requests?status=${encodeURIComponent(status)}`, { signal }),
 
-  approveGrantRequest: (id: string, totpCode: string) =>
-    request<Grant>(`/api/grant-requests/${id}/approve`, { method: "POST", totpCode }),
+  approveGrantRequest: (id: string, factor: SecondFactor) =>
+    request<Grant>(`/api/grant-requests/${id}/approve`, { method: "POST", ...factor }),
 
   denyGrantRequest: (id: string) => request<void>(`/api/grant-requests/${id}/deny`, { method: "POST" }),
 
@@ -211,16 +279,44 @@ export const api = {
   // backend ever wraps it, this must change with it.
   listTokens: (signal?: AbortSignal) => request<ReviewerToken[]>("/api/tokens", { signal }),
 
-  // createToken's TOTP requirement is conditional server-side (backend's
-  // createToken doc comment): required once any device has ever been
-  // enrolled, not required for the very first (bootstrap) enrollment. totpCode
-  // is therefore optional here rather than mandatory like createGrant/
-  // approveGrantRequest/renewGrant — the caller passes what it has and the
-  // server decides whether it was needed.
-  createToken: (label: string, totpCode?: string) =>
-    request<CreatedReviewerToken>("/api/tokens", { method: "POST", body: JSON.stringify({ label }), totpCode }),
+  // createToken's SecondFactor requirement is conditional server-side
+  // (backend's createToken doc comment): required once any device has ever
+  // enrolled a factor of either kind, not for the very first (bootstrap)
+  // enrollment or after the direct-database break-glass recovery in
+  // docs/operations.md restores that same state. factor is therefore an
+  // empty object rather than mandatory like createGrant/approveGrantRequest/
+  // renewGrant's SecondFactor argument — pages/secondFactor.ts's
+  // promptSecondFactor(action, { optional: true }) is what produces that
+  // empty object when there is nothing to prove; the caller passes whatever
+  // it collected and the server decides whether it was needed. Same either-
+  // factor shape as every other gated mutation (TOTP or a WebAuthn
+  // assertion), so a reviewer whose only surviving factor is a passkey can
+  // still mint a replacement token — see the 2026-08-09 decision in
+  // docs/decisions.md.
+  createToken: (label: string, factor: SecondFactor) =>
+    request<CreatedReviewerToken>("/api/tokens", { method: "POST", body: JSON.stringify({ label }), ...factor }),
 
   revokeToken: (id: string) => request<void>(`/api/tokens/${id}/revoke`, { method: "POST" }),
+
+  // webauthnRegisterBegin always requires a factor the calling reviewer
+  // token has already enrolled (requireExistingSecondFactor — see
+  // backend/internal/api/webauthn.go's package comment): a TOTP code, or an
+  // assertion of an existing passkey. Which one is the caller's choice, so
+  // it takes the same SecondFactor shape as every other gated mutation.
+  webauthnRegisterBegin: (factor: SecondFactor) =>
+    request<CredentialCreationOptionsJSON>("/api/webauthn/register/begin", { method: "POST", ...factor }),
+
+  // body is whatever webauthnCodec.encodeCreationResponse produced — no
+  // factor header here (webauthnRegisterFinish is deliberately not re-gated;
+  // see its own doc comment).
+  webauthnRegisterFinish: (body: unknown) =>
+    request<WebAuthnCredential>("/api/webauthn/register/finish", { method: "POST", body: JSON.stringify(body) }),
+
+  webauthnAssertBegin: () => request<CredentialRequestOptionsJSON>("/api/webauthn/assert/begin", { method: "POST" }),
+
+  listWebAuthnCredentials: (signal?: AbortSignal) => request<WebAuthnCredential[]>("/api/webauthn/credentials", { signal }),
+
+  revokeWebAuthnCredential: (id: string) => request<void>(`/api/webauthn/credentials/${id}/revoke`, { method: "POST" }),
 };
 
 export { ApiError };
