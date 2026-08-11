@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
 	"strings"
 	"unicode"
 
@@ -262,4 +263,85 @@ func (a *API) getSigningPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, toSigningPolicyView(p))
+}
+
+// signingPoliciesPathPrefix is the path prefix rejectUncleanSigningPolicyPath
+// guards — every route this file registers (api.go) lives under it.
+const signingPoliciesPathPrefix = "/api/signing-policies"
+
+// rejectUncleanSigningPolicyPath closes finding 3 of the round-2 review: this
+// package's getSigningPolicy doc comment (above) and requireCanonicalRepo's
+// doc comment both promise that a non-canonical repo spelling — including one
+// built from doubled slashes or "."/".." path segments — gets a clean 400
+// naming the canonical form, on both the write and the read path. That
+// promise does not hold for the GET route as registered: net/http's
+// ServeMux.findHandler cleans the request path (net/http/server.go's
+// cleanPath — path.Clean plus trailing-slash preservation) and, when cleaning
+// changes it, returns its OWN redirect handler (307, empirically confirmed
+// against this handler, not the 301 an "old-style" redirect might suggest)
+// BEFORE dispatch ever reaches a registered pattern. getSigningPolicy (and
+// therefore validateRepo/requireCanonicalRepo) never runs for a request like
+// "/api/signing-policies/github.com//abradner/chuvar" or one containing a
+// "/./" or "/../" segment: the caller gets redirected to the CLEANED path
+// instead, and a redirect-following client silently receives whatever policy
+// is stored under that different key — not the 400 the doc comments claim,
+// and not even the caller's own requested key. Per CLAUDE.md principle 8, a
+// security comment describing a check the code doesn't reach is a bug, and
+// per principle 5 a client that doesn't follow the redirect must not read a
+// wrong-key 200/404 as "no policy" either.
+//
+// This runs upstream of both ServeMux layers Routes() builds (the redirect
+// is issued by whichever mux's own findHandler sees the request first — for
+// "/api/signing-policies/..." that's the outer "top" mux, since path
+// cleaning happens before top even decides whether to dispatch into its "/"
+// pattern — so the guard has to wrap Routes()'s handler chain from outside,
+// not sit inside a mux.HandleFunc registration) and rejects, with a 400
+// naming the canonical form, any request under /api/signing-policies whose
+// path net/http would otherwise silently clean and redirect. That makes the
+// reject-not-rewrite promise actually reachable over HTTP for the inputs that
+// matter, instead of true only of validateRepo called directly — see the HTTP
+// round-trip tests in signing_policies_test.go (run with redirects NOT
+// followed, so they observe what a non-redirect-following client — e.g. a
+// signing shim's HTTP client configured to treat any 3xx as a failure —
+// actually gets).
+//
+// Scoped to the /api/signing-policies prefix only: every other route's
+// existing (undocumented, pre-existing) susceptibility to the same mux
+// cleaning behavior is unchanged and out of scope for this fix.
+func rejectUncleanSigningPolicyPath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		escaped := r.URL.EscapedPath()
+		if r.Method != http.MethodConnect &&
+			(escaped == signingPoliciesPathPrefix || strings.HasPrefix(escaped, signingPoliciesPathPrefix+"/")) {
+			if cleaned := cleanHTTPPath(escaped); cleaned != escaped {
+				writeError(w, http.StatusBadRequest, fmt.Errorf(
+					"repo path must not contain doubled slashes or '.'/'..' segments (net/http would otherwise silently redirect this request to %q instead of rejecting it): %s",
+					cleaned, canonicalRepoHint))
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// cleanHTTPPath reimplements net/http's own unexported cleanPath
+// (net/http/server.go), including its trailing-slash-preservation quirk, so
+// rejectUncleanSigningPolicyPath's "would ServeMux redirect this" check
+// matches net/http's actual decision exactly — no more, no less — rather than
+// approximating it with a bare path.Clean call (which drops a meaningful
+// trailing slash cleanPath puts back, and would then over-reject the
+// legitimate "github.com/abradner/chuvar/" trailing-slash case
+// requireCanonicalRepo already handles on its own).
+func cleanHTTPPath(p string) string {
+	if p == "" {
+		return "/"
+	}
+	if p[0] != '/' {
+		p = "/" + p
+	}
+	np := path.Clean(p)
+	if p[len(p)-1] == '/' && np != "/" {
+		np += "/"
+	}
+	return np
 }

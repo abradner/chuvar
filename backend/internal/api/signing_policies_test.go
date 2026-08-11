@@ -201,6 +201,63 @@ func TestGetSigningPolicy_NonCanonicalRepoRejected(t *testing.T) {
 	}
 }
 
+// TestGetSigningPolicy_MuxCleanedPathRejected is finding 3's HTTP round-trip
+// closure. net/http.ServeMux cleans a request path containing doubled
+// slashes or "."/".." segments and issues its own redirect BEFORE any
+// registered handler runs — so TestValidateRepo's direct-call coverage of
+// those same spellings (the "doubled slash"/"dot segment"/"dot-dot traversal
+// segment" cases) never proves anything about what a real HTTP client
+// receives. This test drives the request through a.Routes() with a client
+// that does NOT follow redirects (http.ErrUseLastResponse) — the posture a
+// signing shim should reasonably take, since following the redirect here
+// would mean silently reading whatever policy is stored under a different,
+// mux-rewritten key than the one the caller asked for — and asserts the
+// reject-not-rewrite promise actually holds: a clean 400, not net/http's own
+// redirect.
+//
+// A canonical policy is seeded first so a regression that silently followed
+// the mux's cleaning internally (rather than rejecting before it) would show
+// up as a 200 under the wrong key, the sharper failure mode finding 3 warns
+// about, not merely a 404.
+func TestGetSigningPolicy_MuxCleanedPathRejected(t *testing.T) {
+	srv, _ := testServer(t)
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	doJSON(t, http.MethodPost, srv.URL+"/api/signing-policies", upsertSigningPolicyRequest{
+		Repo:   "github.com/abradner/chuvar",
+		Policy: "required",
+	})
+
+	for _, path := range []string{
+		"/api/signing-policies/github.com//abradner/chuvar",
+		"/api/signing-policies/github.com/./abradner/chuvar",
+		"/api/signing-policies/github.com/abradner/../chuvar",
+	} {
+		t.Run(path, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+			if err != nil {
+				t.Fatalf("building request: %v", err)
+			}
+			req.Header.Set("Authorization", "Bearer "+testAuthToken)
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("request error: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusTemporaryRedirect || resp.StatusCode == http.StatusMovedPermanently {
+				t.Fatalf("GET %s: status = %d (net/http's own mux-cleaning redirect), want a clean 400 — the reject-not-rewrite promise must be reachable over HTTP, not merely true of validateRepo called directly", path, resp.StatusCode)
+			}
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("GET %s: status = %d, want 400", path, resp.StatusCode)
+			}
+		})
+	}
+}
+
 func TestUpsertSigningPolicy_OversizedRepoRejected(t *testing.T) {
 	srv, _ := testServer(t)
 
