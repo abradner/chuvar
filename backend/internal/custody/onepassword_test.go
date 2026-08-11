@@ -218,6 +218,50 @@ func TestOnePasswordBackendSanitizesSubprocessEnv(t *testing.T) {
 	require.Contains(t, got, "PATH=", "op subprocess is missing PATH from the allow-list")
 }
 
+// TestOnePasswordBackendWipesStdoutOnFailureAfterPartialOutput exercises the
+// bug this package's Unseal fix addresses: `op` writes the base64 key to
+// stdout and only then exits nonzero (the real-world trigger is a context
+// cancelled after output has begun; a stub script exiting 1 after printing
+// is the deterministic stand-in). Before the fix, the `defer clear(b64)` was
+// only installed after a successful cmd.Run(), so this exact case returned
+// an error while leaving the key sitting in stdout's buffer.
+//
+// unsealDebugStdout gives the test a handle on the same backing array
+// Unseal's defer clears — the array itself, not a copy — so once Unseal
+// returns, reading through that same handle shows whatever Unseal's defer
+// left behind. That is a real, in-process assertion that this specific
+// call's captured output is zero by the time Unseal returns on the failure
+// path, which is exactly the property the bug violated.
+//
+// What this does NOT prove: that no other copy of the key ever existed
+// anywhere in the process — os/exec's internal stdout-pipe plumbing, or an
+// earlier, now-abandoned backing array from a bytes.Buffer growth
+// reallocation mid-write, are both outside what `defer clear(b64)` (or this
+// test) can reach. Nor does it use OS-level memory inspection; it only
+// confirms the one backing array Unseal itself controls.
+func TestOnePasswordBackendWipesStdoutOnFailureAfterPartialOutput(t *testing.T) {
+	raw, err := GenerateKey()
+	require.NoError(t, err)
+	validB64 := base64.StdEncoding.EncodeToString(raw)
+
+	var captured []byte
+	unsealDebugStdout = func(b64 []byte) { captured = b64 }
+	t.Cleanup(func() { unsealDebugStdout = nil })
+
+	// Prints the valid key, then fails — standing in for "op wrote output,
+	// then the context was cancelled / op errored before exiting 0".
+	cli := writeStubOp(t, fmt.Sprintf("printf %%s %q\nexit 1\n", validB64))
+	b := &OnePasswordBackend{Reference: "op://Private/chuvar-master-key/password", CLIPath: cli}
+
+	_, err = b.Unseal(context.Background())
+	require.Error(t, err, "op exited nonzero; Unseal must report failure")
+
+	require.NotEmpty(t, captured, "hook never fired — stdout was never captured, test set up wrong")
+	for i, c := range captured {
+		require.Zerof(t, c, "stdout buffer byte %d was not wiped on the failure path", i)
+	}
+}
+
 func TestOnePasswordBackendRejectsEmptyReference(t *testing.T) {
 	b := &OnePasswordBackend{CLIPath: writeStubOp(t, "printf 'unused'\n")}
 	_, err := b.Unseal(context.Background())
