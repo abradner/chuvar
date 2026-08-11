@@ -323,3 +323,19 @@ func TestShippedBackendsReportUnsealed(t *testing.T) {
 		})
 	}
 }
+
+// OnePasswordBackend and AgeBackend (configured with an in-memory,
+// interactively-sourced Passphrase — see TestAgeBackendSealedReflectsPassphraseDelivery
+// for the PassphrasePath case, which must NOT report sealed) are the case
+// the comment above anticipated growing: both genuinely seal the master key
+// at rest, so both must report Sealed() == true.
+func TestSealedBackendsReportSealed(t *testing.T) {
+	for _, b := range []Backend{
+		&OnePasswordBackend{},
+		&AgeBackend{Passphrase: "sourced from a human-present prompt at boot"},
+	} {
+		t.Run(b.Name(), func(t *testing.T) {
+			require.True(t, b.Sealed(), "backend seals the key at rest but reports otherwise")
+		})
+	}
+}
