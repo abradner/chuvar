@@ -410,6 +410,60 @@ func TestProposeWrite_SummaryDepthGuessDoesNotConfirmContent_ViaMCP(t *testing.T
 	}
 }
 
+// TestProposeWrite_DisclosureDepthUsesCandidateScopesNotProposalScopes_ViaMCP
+// is the end-to-end counterpart of
+// store.TestProposeDiff_DisclosureDepthUsesCandidateScopesNotProposalScopes:
+// the same bypass attempt, exercised at the actual propose_write MCP surface.
+// agent-guesser holds a full-depth grant on "billing.invoices" and only a
+// summary-depth grant on "identity.medical", where the real fact lives. It
+// tags its exact-content guess with "billing.invoices" — the full-depth
+// scope it holds, not the one the matched fact is actually under — and must
+// still get the redacted disclosure, not the pre-#83 confirm-by-verdict
+// oracle.
+func TestProposeWrite_DisclosureDepthUsesCandidateScopesNotProposalScopes_ViaMCP(t *testing.T) {
+	session, st := testSession(t, "agent-guesser")
+	ctx := context.Background()
+
+	const (
+		fullScope    = "billing.invoices" // agent-guesser holds this at "full"
+		summaryScope = "identity.medical" // agent-guesser holds this at "summary"; the real fact lives here
+	)
+
+	content := "user's blood type is AB-"
+	vec, err := embed.Stub{}.Embed(ctx, content)
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	seed, _, err := st.ProposeDiff(ctx, "some-other-agent", content, []string{summaryScope}, vec, nil, nil)
+	if err != nil {
+		t.Fatalf("ProposeDiff() (seed) error = %v", err)
+	}
+	if _, err := st.CommitDiff(ctx, seed.ID, "human-reviewer", vec, "a stub summary"); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	if _, err := st.CreateGrant(ctx, "agent-guesser", []string{fullScope}, "memory", "full", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() (full) error = %v", err)
+	}
+	if _, err := st.CreateGrant(ctx, "agent-guesser", []string{summaryScope}, "memory", "summary", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() (summary) error = %v", err)
+	}
+
+	// Tag the guess with fullScope, not summaryScope (where the match
+	// actually lives), attempting to launder the redaction decision through
+	// the proposal's own scope tag rather than the candidate's.
+	out := callTool[proposeWriteOutput](t, session, "propose_write", proposeWriteArgs{
+		Content:        content,
+		ProposedScopes: []string{fullScope},
+	})
+	if out.DedupeVerdict != "needs_review" {
+		t.Fatalf("propose_write dedupe_verdict for an exact guess tagged with an unrelated full-depth scope = %q, want %q", out.DedupeVerdict, "needs_review")
+	}
+	if out.CandidateFactID != nil {
+		t.Fatalf("propose_write leaked candidate_fact_id %s via a proposal tagged with an unrelated full-depth scope", *out.CandidateFactID)
+	}
+}
+
 // toolErrorText extracts the text of a tool-error result, the same value an
 // MCP client actually sees, so tests can assert on what's shown to the calling
 // agent rather than on internal error types.

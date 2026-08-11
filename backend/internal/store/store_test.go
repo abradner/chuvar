@@ -1571,6 +1571,85 @@ func TestProposeDiff_FactsAndFullDepthDisclosureMatchesStoredVerdict(t *testing.
 	}
 }
 
+// TestProposeDiff_DisclosureDepthUsesCandidateScopesNotProposalScopes is the
+// regression test for the single most important bypass of issue #83's fix:
+// disclosureForProposer must compute effective depth over the MATCHED
+// CANDIDATE FACT's own scopes, never over the scopes the proposer chose to
+// tag its own guess with. Those are two different, attacker-controlled-vs-not
+// things that happen to both be named "scopes" nearby in the code, which is
+// exactly the kind of mixup a future refactor could make silently.
+//
+// The attack this guards against: hold a full-depth grant on scope X and only
+// a summary-depth grant on scope Y. A real fact lives in scope Y. Propose a
+// guess of that fact's content but tag the PROPOSAL itself with scope X (the
+// one held at full depth) instead of Y. If depth were ever computed from the
+// proposal's own scopes instead of the candidate's, X's full depth would win
+// and the redaction in disclosureForProposer would never trigger — the
+// pre-#83 oracle (true verdict + candidate fact ID) would be back, despite
+// the proposer never having more than summary-depth visibility into the fact
+// that actually matched.
+//
+// X ("billing.invoices") and Y ("identity.medical") are chosen so neither
+// covers the other under scope.Covers' ancestor-match rule (different top-
+// level segments) — see scope.go's opCovers. A fixture using e.g.
+// "projects"/"projects.alpha" would accidentally test nothing, since the
+// broader scope would legitimately cover the narrower one.
+func TestProposeDiff_DisclosureDepthUsesCandidateScopesNotProposalScopes(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	const (
+		fullScope    = "billing.invoices" // attacker holds this at "full"
+		summaryScope = "identity.medical" // attacker holds this at "summary"; the real fact lives here
+	)
+
+	vec := unitVector(50)
+	content := "user's blood type is AB-"
+	seed, _, err := s.ProposeDiff(ctx, "agent-a", content, []string{summaryScope}, vec, nil, fullDepth([]string{summaryScope}))
+	if err != nil {
+		t.Fatalf("ProposeDiff() (seed) error = %v", err)
+	}
+	fact, err := s.CommitDiff(ctx, seed.ID, "human-reviewer", vec, "a stub summary")
+	if err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	attackerGrants := []GrantedScope{
+		{Scope: fullScope, Depth: "full"},
+		{Scope: summaryScope, Depth: "summary"},
+	}
+
+	// The attacker's guess matches the seeded fact's exact content, but the
+	// PROPOSAL is tagged with fullScope, not summaryScope — the scope the
+	// matched fact actually lives under, and the only one the attacker holds
+	// merely a summary-depth grant on.
+	guess, disclosure, err := s.ProposeDiff(ctx, "agent-guesser", content, []string{fullScope}, vec, nil, attackerGrants)
+	if err != nil {
+		t.Fatalf("ProposeDiff() (guess) error = %v", err)
+	}
+
+	// The stored (reviewer-facing) verdict must still be the TRUE one — dedupe
+	// correctness against a fact the proposer can't fully read must not
+	// regress just because disclosure is redacted.
+	if guess.DedupeVerdict == nil || *guess.DedupeVerdict != DedupeDuplicate {
+		t.Fatalf("stored (reviewer-facing) verdict = %v, want duplicate", guess.DedupeVerdict)
+	}
+	if guess.DedupeCandidateFactID == nil || *guess.DedupeCandidateFactID != fact.ID {
+		t.Fatalf("stored (reviewer-facing) candidate ID = %v, want %s", guess.DedupeCandidateFactID, fact.ID)
+	}
+
+	// The proposer-facing disclosure must be redacted despite the proposal
+	// being tagged with fullScope: the candidate fact's own scope
+	// (summaryScope) is what must govern the redaction decision, not the tag
+	// the proposer chose to put on its own guess.
+	if disclosure.Verdict != DedupeNeedsReview {
+		t.Fatalf("disclosure verdict = %q, want %q (tagging the proposal with a full-depth scope must not launder the candidate's own summary-depth scope)", disclosure.Verdict, DedupeNeedsReview)
+	}
+	if disclosure.CandidateFactID != nil {
+		t.Fatalf("disclosure leaked candidate fact ID %s via a proposal tagged with an unrelated full-depth scope", *disclosure.CandidateFactID)
+	}
+}
+
 func TestProposeDiff_TargetFactOutsideProposerGrantsRejected(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
