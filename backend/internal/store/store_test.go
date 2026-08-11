@@ -49,7 +49,7 @@ func testStore(t *testing.T) (*Store, *pgxpool.Pool) {
 	// (internal/broker does, on its own), so they're always empty when
 	// this runs; listed for the TRUNCATE, not because any test here
 	// exercises them.
-	_, err = pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys, propose_write_rate_limits, capability_grant_identities, capability_grant_tokens`)
+	_, err = pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, grant_requests, data_keys, propose_write_rate_limits, capability_grant_identities, capability_grant_tokens, signing_policies`)
 	if err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
