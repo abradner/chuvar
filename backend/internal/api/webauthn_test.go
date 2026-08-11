@@ -41,7 +41,7 @@ func webauthnTestServer(t *testing.T) (*httptest.Server, *store.Store, *pgxpool.
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys, capability_grant_identities, capability_grant_tokens, signing_policies`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -631,7 +631,7 @@ func webauthnBootstrapTestServer(t *testing.T) (*httptest.Server, *store.Store, 
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys, capability_grant_identities, capability_grant_tokens, signing_policies`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
