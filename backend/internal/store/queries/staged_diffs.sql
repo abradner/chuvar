@@ -15,7 +15,16 @@ SELECT EXISTS (
 -- embedding_1/embedding_2 are the same repeated-named-param workaround used
 -- elsewhere in this migration (see facts.sql's SearchFacts) — bound to the
 -- identical value at the call site.
-SELECT f.id, f.content, f.embedding <=> @embedding_1::vector AS distance
+--
+-- scopes is the candidate's own fact_scopes tags, same array_agg subquery
+-- shape as GetFact/SearchFacts (facts.sql) — the caller (store.
+-- findDedupeCandidate) needs them to run effectiveDepth over the match, the
+-- same disclosure-projection rule facts.go's SearchFacts already applies on
+-- the read path. Without this, ProposeDiff's dedupe response can only be
+-- scope-filtered, not depth-filtered, against a candidate it isn't allowed to
+-- fully read — see store.disclosureForProposer's doc comment (issue #83).
+SELECT f.id, f.content, f.embedding <=> @embedding_1::vector AS distance,
+       (SELECT array_agg(fs.scope) FROM fact_scopes fs WHERE fs.fact_id = f.id)::text[] AS scopes
 FROM facts f
 WHERE f.invalid_at IS NULL AND f.embedding IS NOT NULL
   AND EXISTS (SELECT 1 FROM fact_scopes fs WHERE fs.fact_id = f.id)

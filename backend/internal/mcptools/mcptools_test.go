@@ -368,6 +368,48 @@ func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 	}
 }
 
+// TestProposeWrite_SummaryDepthGuessDoesNotConfirmContent_ViaMCP is the
+// end-to-end regression test for issue #83, exercised at the actual surface
+// the named adversary calls: an agent holding only a summary-depth grant
+// calls propose_write with an exact-content guess for a fact it can only see
+// summarized, and must not get a "duplicate" verdict or the fact's ID back —
+// that combination is exactly what would let it confirm the guess was right.
+func TestProposeWrite_SummaryDepthGuessDoesNotConfirmContent_ViaMCP(t *testing.T) {
+	session, st := testSession(t, "agent-guesser")
+	ctx := context.Background()
+
+	// Seed a fact under a scope agent-guesser will only ever hold at summary
+	// depth, proposed/committed by an unrelated subject — standing in for a
+	// fact that already existed before this agent ever touched the system.
+	content := "user's employer is Acme Corp"
+	vec, err := embed.Stub{}.Embed(ctx, content)
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	seed, _, err := st.ProposeDiff(ctx, "some-other-agent", content, []string{"identity.employer"}, vec, nil, nil)
+	if err != nil {
+		t.Fatalf("ProposeDiff() (seed) error = %v", err)
+	}
+	if _, err := st.CommitDiff(ctx, seed.ID, "human-reviewer", vec, "a stub employer summary"); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	if _, err := st.CreateGrant(ctx, "agent-guesser", []string{"identity.employer"}, "memory", "summary", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	out := callTool[proposeWriteOutput](t, session, "propose_write", proposeWriteArgs{
+		Content:        content,
+		ProposedScopes: []string{"identity.employer"},
+	})
+	if out.DedupeVerdict != "needs_review" {
+		t.Fatalf("propose_write dedupe_verdict for an exact guess at summary depth = %q, want %q (a \"duplicate\" verdict would confirm the guess)", out.DedupeVerdict, "needs_review")
+	}
+	if out.CandidateFactID != nil {
+		t.Fatalf("propose_write leaked candidate_fact_id %s to a summary-depth guesser", *out.CandidateFactID)
+	}
+}
+
 // toolErrorText extracts the text of a tool-error result, the same value an
 // MCP client actually sees, so tests can assert on what's shown to the calling
 // agent rather than on internal error types.

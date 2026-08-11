@@ -541,13 +541,13 @@ func TestProposeDiff_RejectsTargetedFactScope(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
-	_, err := s.ProposeDiff(ctx, "agent-a", "some fact content", []string{"git.sign:github.com/abradner/chuvar"}, unitVector(0), nil, nil)
+	_, _, err := s.ProposeDiff(ctx, "agent-a", "some fact content", []string{"git.sign:github.com/abradner/chuvar"}, unitVector(0), nil, nil)
 	if err == nil {
 		t.Fatal("ProposeDiff() with a targeted fact scope: want error, got nil (a targeted fact scope is matched target-blind by the visibility SQL)")
 	}
 
 	// An ordinary untargeted fact scope must still propose cleanly.
-	if _, err := s.ProposeDiff(ctx, "agent-a", "some fact content", []string{"preferences.coffee"}, unitVector(1), nil, nil); err != nil {
+	if _, _, err := s.ProposeDiff(ctx, "agent-a", "some fact content", []string{"preferences.coffee"}, unitVector(1), nil, nil); err != nil {
 		t.Fatalf("ProposeDiff() with an ordinary untargeted scope: error = %v, want nil", err)
 	}
 }
@@ -557,7 +557,7 @@ func TestStagedDiffs_ProposeCommitAndSupersede(t *testing.T) {
 	ctx := context.Background()
 
 	vecA := unitVector(0)
-	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a flat white", []string{"preferences.coffee"}, vecA, nil, []string{"preferences.coffee"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a flat white", []string{"preferences.coffee"}, vecA, nil, fullDepth([]string{"preferences.coffee"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -582,7 +582,7 @@ func TestStagedDiffs_ProposeCommitAndSupersede(t *testing.T) {
 	}
 
 	// Propose an update that supersedes the fact.
-	d2, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a long black", []string{"preferences.coffee"}, unitVector(1), &fact.ID, []string{"preferences.coffee"})
+	d2, _, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a long black", []string{"preferences.coffee"}, unitVector(1), &fact.ID, fullDepth([]string{"preferences.coffee"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() (supersede) error = %v", err)
 	}
@@ -617,7 +617,7 @@ func TestCommitDiff_ConcurrentSupersessionIsSerialized(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(7)
-	original, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Alex", []string{"identity.basic"}, vec, nil, []string{"identity.basic"})
+	original, _, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Alex", []string{"identity.basic"}, vec, nil, fullDepth([]string{"identity.basic"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -627,11 +627,11 @@ func TestCommitDiff_ConcurrentSupersessionIsSerialized(t *testing.T) {
 	}
 
 	// Two diffs race to supersede the same fact.
-	diffA, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Alexander", []string{"identity.basic"}, unitVector(8), &targetFact.ID, []string{"identity.basic"})
+	diffA, _, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Alexander", []string{"identity.basic"}, unitVector(8), &targetFact.ID, fullDepth([]string{"identity.basic"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() (A) error = %v", err)
 	}
-	diffB, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Al", []string{"identity.basic"}, unitVector(9), &targetFact.ID, []string{"identity.basic"})
+	diffB, _, err := s.ProposeDiff(ctx, "agent-a", "user's preferred name is Al", []string{"identity.basic"}, unitVector(9), &targetFact.ID, fullDepth([]string{"identity.basic"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() (B) error = %v", err)
 	}
@@ -685,8 +685,8 @@ func TestSearchFacts_ScopeWithUnderscoreDoesNotWildcardMatch(t *testing.T) {
 	// leaking through. (The near-miss scope must itself be a valid scope now that
 	// ProposeDiff validates fact scopes; a digit in place of the underscore keeps
 	// the adversarial intent while staying lowercase-alphanumeric.)
-	d, err := s.ProposeDiff(ctx, "agent-a", "a fact scoped to an unrelated underscore-adjacent scope",
-		[]string{"projects1alpha.secret"}, vec, nil, []string{"projects1alpha.secret"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "a fact scoped to an unrelated underscore-adjacent scope",
+		[]string{"projects1alpha.secret"}, vec, nil, fullDepth([]string{"projects1alpha.secret"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -752,8 +752,8 @@ func TestGrantedScopesToSearchFacts_MultiGrantPipelineWithRevocation(t *testing.
 	// than hand-building the granted-scope slice like the other intersection test
 	// does — this is closer to what mcptools.read_with_scope_check actually does.
 	vec := unitVector(12)
-	d, err := s.ProposeDiff(ctx, "agent-a", "a fact needing two different grants worth of scope",
-		[]string{"identity.basic", "projects.spritz.read"}, vec, nil, []string{"identity.basic", "projects.spritz.read"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "a fact needing two different grants worth of scope",
+		[]string{"identity.basic", "projects.spritz.read"}, vec, nil, fullDepth([]string{"identity.basic", "projects.spritz.read"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -805,7 +805,7 @@ func TestStagedDiffs_Get(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(6)
-	d, err := s.ProposeDiff(ctx, "agent-a", "user's timezone is Australia/Melbourne", []string{"identity.basic"}, vec, nil, []string{"identity.basic"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "user's timezone is Australia/Melbourne", []string{"identity.basic"}, vec, nil, fullDepth([]string{"identity.basic"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -843,7 +843,7 @@ func TestStagedDiffs_ListPage_WalksEveryRowExactlyOnce(t *testing.T) {
 	const total = 5
 	ids := make([]string, 0, total+1)
 	for i := 0; i < total; i++ {
-		d, err := s.ProposeDiff(ctx, "agent-a", fmt.Sprintf("fact number %d", i), []string{"identity.basic"}, vec, nil, nil)
+		d, _, err := s.ProposeDiff(ctx, "agent-a", fmt.Sprintf("fact number %d", i), []string{"identity.basic"}, vec, nil, nil)
 		if err != nil {
 			t.Fatalf("ProposeDiff() error = %v", err)
 		}
@@ -869,7 +869,7 @@ func TestStagedDiffs_ListPage_WalksEveryRowExactlyOnce(t *testing.T) {
 		// first page was captured — it must not retroactively appear in a page
 		// already returned, and must not be skipped once the walk reaches it.
 		if page == 0 && !insertedMidWalk {
-			nd, err := s.ProposeDiff(ctx, "agent-a", "fact proposed mid-walk", []string{"identity.basic"}, vec, nil, nil)
+			nd, _, err := s.ProposeDiff(ctx, "agent-a", "fact proposed mid-walk", []string{"identity.basic"}, vec, nil, nil)
 			if err != nil {
 				t.Fatalf("ProposeDiff() (mid-walk) error = %v", err)
 			}
@@ -973,7 +973,7 @@ func TestStagedDiffs_DedupeExactDuplicate(t *testing.T) {
 	content := "user was born in Melbourne"
 	vec := unitVector(2)
 
-	d1, err := s.ProposeDiff(ctx, "agent-a", content, []string{"identity.basic"}, vec, nil, []string{"identity.basic"})
+	d1, _, err := s.ProposeDiff(ctx, "agent-a", content, []string{"identity.basic"}, vec, nil, fullDepth([]string{"identity.basic"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -981,7 +981,7 @@ func TestStagedDiffs_DedupeExactDuplicate(t *testing.T) {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
-	d2, err := s.ProposeDiff(ctx, "agent-a", content, []string{"identity.basic"}, vec, nil, []string{"identity.basic"})
+	d2, _, err := s.ProposeDiff(ctx, "agent-a", content, []string{"identity.basic"}, vec, nil, fullDepth([]string{"identity.basic"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() (duplicate) error = %v", err)
 	}
@@ -1000,7 +1000,7 @@ func TestStagedDiffs_DedupeNearMatchFlaggedAsContradiction(t *testing.T) {
 	base := unitVector(3)
 	near := nudge(base, 0.01) // small perturbation: close in cosine distance, different text
 
-	d1, err := s.ProposeDiff(ctx, "agent-a", "user works as a software engineer", []string{"identity.professional"}, base, nil, []string{"identity.professional"})
+	d1, _, err := s.ProposeDiff(ctx, "agent-a", "user works as a software engineer", []string{"identity.professional"}, base, nil, fullDepth([]string{"identity.professional"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1008,7 +1008,7 @@ func TestStagedDiffs_DedupeNearMatchFlaggedAsContradiction(t *testing.T) {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
-	d2, err := s.ProposeDiff(ctx, "agent-a", "user works as a senior engineer", []string{"identity.professional"}, near, nil, []string{"identity.professional"})
+	d2, _, err := s.ProposeDiff(ctx, "agent-a", "user works as a senior engineer", []string{"identity.professional"}, near, nil, fullDepth([]string{"identity.professional"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() (near match) error = %v", err)
 	}
@@ -1022,7 +1022,7 @@ func TestSearchFacts_ScopeIntersectionRequiresAllTags(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(4)
-	d, err := s.ProposeDiff(ctx, "agent-a", "planning a wedding in March with partner", []string{"relationships.partner", "finances.budget"}, vec, nil, []string{"relationships.partner", "finances.budget"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "planning a wedding in March with partner", []string{"relationships.partner", "finances.budget"}, vec, nil, fullDepth([]string{"relationships.partner", "finances.budget"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1063,7 +1063,7 @@ func TestSearchFacts_EmptyQueryEmbeddingFallsBackToKeywordOnly(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(6)
-	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite hiking trail is Overland Track", []string{"preferences.hiking"}, vec, nil, []string{"preferences.hiking"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "user's favorite hiking trail is Overland Track", []string{"preferences.hiking"}, vec, nil, fullDepth([]string{"preferences.hiking"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1108,7 +1108,7 @@ func TestSearchFacts_SummaryDepthRedactsContent(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(30)
-	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a flat white", []string{"preferences.coffee"}, vec, nil, []string{"preferences.coffee"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a flat white", []string{"preferences.coffee"}, vec, nil, fullDepth([]string{"preferences.coffee"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1145,7 +1145,7 @@ func TestSearchFacts_SummaryDepthWithNoSummaryFailsClosed(t *testing.T) {
 	// must never fall back to Content; that would silently un-enforce the
 	// redaction this depth exists to apply.
 	vec := unitVector(31)
-	d, err := s.ProposeDiff(ctx, "agent-a", "user's least favorite vegetable is celery", []string{"preferences.food"}, vec, nil, []string{"preferences.food"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "user's least favorite vegetable is celery", []string{"preferences.food"}, vec, nil, fullDepth([]string{"preferences.food"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1175,7 +1175,7 @@ func TestSearchFacts_FactsAndFullDepthReturnContent(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(32)
-	d, err := s.ProposeDiff(ctx, "agent-a", "user's timezone is Australia/Melbourne", []string{"identity.timezone"}, vec, nil, []string{"identity.timezone"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "user's timezone is Australia/Melbourne", []string{"identity.timezone"}, vec, nil, fullDepth([]string{"identity.timezone"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1214,7 +1214,7 @@ func TestSearchFacts_FullDepthAddsProvenance_FactsDepthDoesNot(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(35)
-	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite editor is neovim", []string{"preferences.tools"}, vec, nil, []string{"preferences.tools"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "user's favorite editor is neovim", []string{"preferences.tools"}, vec, nil, fullDepth([]string{"preferences.tools"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1274,8 +1274,8 @@ func TestSearchFacts_EffectiveDepthIntersectsAcrossFactTags(t *testing.T) {
 	// permissive per-tag result governs (intersection), so "summary" must
 	// win overall even though the other tag alone was granted at "full".
 	vec := unitVector(33)
-	d, err := s.ProposeDiff(ctx, "agent-a", "planning a wedding in March with partner",
-		[]string{"relationships.partner", "finances.budget"}, vec, nil, []string{"relationships.partner", "finances.budget"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "planning a wedding in March with partner",
+		[]string{"relationships.partner", "finances.budget"}, vec, nil, fullDepth([]string{"relationships.partner", "finances.budget"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1314,7 +1314,7 @@ func TestSearchFacts_EffectiveDepthUnionsAcrossGrantsForOneTag(t *testing.T) {
 	// by a narrower grant existing alongside it — see effectiveDepth's doc
 	// comment.
 	vec := unitVector(34)
-	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a flat white", []string{"preferences.coffee"}, vec, nil, []string{"preferences.coffee"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "user's favorite coffee is a flat white", []string{"preferences.coffee"}, vec, nil, fullDepth([]string{"preferences.coffee"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1375,7 +1375,7 @@ func TestGetFact(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(26)
-	d, err := s.ProposeDiff(ctx, "agent-a", "user's favorite season is autumn", []string{"preferences.season"}, vec, nil, []string{"preferences.season"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "user's favorite season is autumn", []string{"preferences.season"}, vec, nil, fullDepth([]string{"preferences.season"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1424,7 +1424,7 @@ func TestProposeDiff_DedupeCandidateSearchScopedToProposerGrants(t *testing.T) {
 	// A fact committed under a scope the second proposer has no grant for.
 	vec := unitVector(20)
 	content := "user's medical condition is confidential"
-	d, err := s.ProposeDiff(ctx, "agent-a", content, []string{"identity.medical"}, vec, nil, []string{"identity.medical"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", content, []string{"identity.medical"}, vec, nil, fullDepth([]string{"identity.medical"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1437,7 +1437,7 @@ func TestProposeDiff_DedupeCandidateSearchScopedToProposerGrants(t *testing.T) {
 	// back as "duplicate" with the first fact's ID attached — telling an
 	// ungranted caller that a fact with this exact content exists, and handing it
 	// a fact ID it could then try to use as a supersession target. Found in review.
-	d2, err := s.ProposeDiff(ctx, "agent-b", content, []string{"preferences.coffee"}, vec, nil, []string{"preferences.coffee"})
+	d2, _, err := s.ProposeDiff(ctx, "agent-b", content, []string{"preferences.coffee"}, vec, nil, fullDepth([]string{"preferences.coffee"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() (ungranted proposer) error = %v", err)
 	}
@@ -1449,12 +1449,134 @@ func TestProposeDiff_DedupeCandidateSearchScopedToProposerGrants(t *testing.T) {
 	}
 }
 
+// TestProposeDiff_SummaryDepthDedupeDisclosureIsRedacted is the regression
+// test for issue #83: a proposer whose effective depth over a matched
+// candidate is "summary" must not be able to use the dedupe verdict/candidate
+// ID as a guess-and-confirm oracle over that fact's exact content — while the
+// dedupe COMPARISON itself must still see the full-fidelity content (dedupe
+// correctness must not regress just because disclosure is redacted; that
+// trade was explicitly rejected for this fix).
+//
+// Three proposals against the same seeded fact, same summary-depth grant:
+//   - an exact-content guess,
+//   - a near-but-not-identical guess (would be "contradiction" at full depth),
+//   - an unrelated guess (genuinely "novel").
+//
+// The first two must be INDISTINGUISHABLE to the proposer (both
+// DedupeNeedsReview, no ID) — that collapse is what closes the oracle: if
+// exact and near guesses produced different disclosures, an adversary could
+// still binary-search toward the exact string one character at a time. The
+// third must stay "novel", proving the redaction doesn't just return one
+// constant value regardless of match quality.
+func TestProposeDiff_SummaryDepthDedupeDisclosureIsRedacted(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	vec := unitVector(40)
+	content := "user's blood type is O+"
+	seed, _, err := s.ProposeDiff(ctx, "agent-a", content, []string{"identity.medical"}, vec, nil, fullDepth([]string{"identity.medical"}))
+	if err != nil {
+		t.Fatalf("ProposeDiff() (seed) error = %v", err)
+	}
+	fact, err := s.CommitDiff(ctx, seed.ID, "human-reviewer", vec, "a stub summary")
+	if err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	summaryOnly := []GrantedScope{{Scope: "identity.medical", Depth: "summary"}}
+
+	// Exact guess.
+	exact, exactDisclosure, err := s.ProposeDiff(ctx, "agent-guesser", content, []string{"identity.medical"}, vec, nil, summaryOnly)
+	if err != nil {
+		t.Fatalf("ProposeDiff() (exact guess) error = %v", err)
+	}
+	// The STORED diff (what the human reviewer sees via internal/api) must keep
+	// the true, unredacted verdict and ID — this is what proves dedupe
+	// correctness against a fact the proposer can't fully read did not regress.
+	if exact.DedupeVerdict == nil || *exact.DedupeVerdict != DedupeDuplicate {
+		t.Fatalf("stored (reviewer-facing) verdict for exact guess = %v, want duplicate", exact.DedupeVerdict)
+	}
+	if exact.DedupeCandidateFactID == nil || *exact.DedupeCandidateFactID != fact.ID {
+		t.Fatalf("stored (reviewer-facing) candidate ID = %v, want %s", exact.DedupeCandidateFactID, fact.ID)
+	}
+	// The PROPOSER-facing disclosure must NOT confirm the exact match.
+	if exactDisclosure.Verdict != DedupeNeedsReview {
+		t.Fatalf("disclosure verdict for exact guess at summary depth = %q, want %q (must not confirm exact content)", exactDisclosure.Verdict, DedupeNeedsReview)
+	}
+	if exactDisclosure.CandidateFactID != nil {
+		t.Fatalf("disclosure leaked candidate fact ID %s to a summary-depth proposer", *exactDisclosure.CandidateFactID)
+	}
+
+	// Near (but not identical) guess — true verdict is "contradiction".
+	near := nudge(vec, 0.01)
+	nearGuess, nearDisclosure, err := s.ProposeDiff(ctx, "agent-guesser", "user's blood type is maybe O+ or O-", []string{"identity.medical"}, near, nil, summaryOnly)
+	if err != nil {
+		t.Fatalf("ProposeDiff() (near guess) error = %v", err)
+	}
+	if nearGuess.DedupeVerdict == nil || *nearGuess.DedupeVerdict != DedupeContradiction {
+		t.Fatalf("stored (reviewer-facing) verdict for near guess = %v, want contradiction", nearGuess.DedupeVerdict)
+	}
+	if nearDisclosure.Verdict != DedupeNeedsReview || nearDisclosure.CandidateFactID != nil {
+		t.Fatalf("disclosure for near guess = %+v, want {needs_review, nil} (must be indistinguishable from the exact-match disclosure above)", nearDisclosure)
+	}
+
+	// Unrelated guess — must still come back "novel": the redaction narrows
+	// what's disclosed about a MATCH, it must not blur every outcome together.
+	_, wrongDisclosure, err := s.ProposeDiff(ctx, "agent-guesser", "user prefers window seats", []string{"identity.medical"}, unitVector(41), nil, summaryOnly)
+	if err != nil {
+		t.Fatalf("ProposeDiff() (unrelated guess) error = %v", err)
+	}
+	if wrongDisclosure.Verdict != DedupeNovel || wrongDisclosure.CandidateFactID != nil {
+		t.Fatalf("disclosure for an unrelated guess = %+v, want {novel, nil}", wrongDisclosure)
+	}
+}
+
+// TestProposeDiff_FactsAndFullDepthDisclosureMatchesStoredVerdict is the
+// honest-agent-experience counterpart to the summary-depth test above: a
+// proposer whose effective depth over the matched candidate is "facts" or
+// "full" already has full read access to that fact's exact content via
+// SearchFacts (facts.go's effectiveDepth only redacts Content at "summary" —
+// see SearchFacts' own doc comment), so ProposeDiff must NOT redact the
+// disclosure for it — the true verdict and candidate ID cross a boundary the
+// read path already opened, not a new one. Depth-gating this too would be
+// pure honest-caller degradation (losing the real self-correction value
+// CLAUDE.md principle 11 calls out) with no matching security benefit.
+func TestProposeDiff_FactsAndFullDepthDisclosureMatchesStoredVerdict(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	for i, depth := range []string{"facts", "full"} {
+		vec := unitVector(42 + i)
+		content := fmt.Sprintf("user's favorite number is %d", 42+i)
+		seed, _, err := s.ProposeDiff(ctx, "agent-a", content, []string{"preferences.number"}, vec, nil, fullDepth([]string{"preferences.number"}))
+		if err != nil {
+			t.Fatalf("ProposeDiff() (seed, depth=%s) error = %v", depth, err)
+		}
+		fact, err := s.CommitDiff(ctx, seed.ID, "human-reviewer", vec, "a stub summary")
+		if err != nil {
+			t.Fatalf("CommitDiff() (depth=%s) error = %v", depth, err)
+		}
+
+		granted := []GrantedScope{{Scope: "preferences.number", Depth: depth}}
+		_, disclosure, err := s.ProposeDiff(ctx, "agent-guesser", content, []string{"preferences.number"}, vec, nil, granted)
+		if err != nil {
+			t.Fatalf("ProposeDiff() (guess, depth=%s) error = %v", depth, err)
+		}
+		if disclosure.Verdict != DedupeDuplicate {
+			t.Errorf("disclosure verdict at depth %q = %q, want %q (this depth already exposes full content via SearchFacts)", depth, disclosure.Verdict, DedupeDuplicate)
+		}
+		if disclosure.CandidateFactID == nil || *disclosure.CandidateFactID != fact.ID {
+			t.Errorf("disclosure candidate ID at depth %q = %v, want %s", depth, disclosure.CandidateFactID, fact.ID)
+		}
+	}
+}
+
 func TestProposeDiff_TargetFactOutsideProposerGrantsRejected(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
 
 	vec := unitVector(21)
-	d, err := s.ProposeDiff(ctx, "agent-a", "a fact agent-b has no grant for", []string{"identity.medical"}, vec, nil, []string{"identity.medical"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "a fact agent-b has no grant for", []string{"identity.medical"}, vec, nil, fullDepth([]string{"identity.medical"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1469,8 +1591,8 @@ func TestProposeDiff_TargetFactOutsideProposerGrantsRejected(t *testing.T) {
 	// rejected before ever staging: an approval UI that doesn't show the
 	// replacement target (a separate, real gap of its own) would otherwise let a
 	// human unknowingly approve superseding a fact they never meant to touch.
-	_, err = s.ProposeDiff(ctx, "agent-b", "innocuous-looking replacement content",
-		[]string{"preferences.coffee"}, unitVector(22), &fact.ID, []string{"preferences.coffee"})
+	_, _, err = s.ProposeDiff(ctx, "agent-b", "innocuous-looking replacement content",
+		[]string{"preferences.coffee"}, unitVector(22), &fact.ID, fullDepth([]string{"preferences.coffee"}))
 	if err == nil {
 		t.Fatal("ProposeDiff() targeting a fact outside the proposer's grants: want error, got nil")
 	}
@@ -1486,11 +1608,11 @@ func TestCommitDiff_RejectsIfIdenticalContentCommittedSinceStaging(t *testing.T)
 	// Both proposals are staged while neither has committed yet, so both
 	// legitimately see "novel" at stage time — the dedupe verdict computed once
 	// at staging can't catch this. Only a re-check at commit time can.
-	d1, err := s.ProposeDiff(ctx, "agent-a", content, []string{"preferences.seating"}, vec, nil, []string{"preferences.seating"})
+	d1, _, err := s.ProposeDiff(ctx, "agent-a", content, []string{"preferences.seating"}, vec, nil, fullDepth([]string{"preferences.seating"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() (d1) error = %v", err)
 	}
-	d2, err := s.ProposeDiff(ctx, "agent-a", content, []string{"preferences.seating"}, vec, nil, []string{"preferences.seating"})
+	d2, _, err := s.ProposeDiff(ctx, "agent-a", content, []string{"preferences.seating"}, vec, nil, fullDepth([]string{"preferences.seating"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() (d2) error = %v", err)
 	}
@@ -1514,7 +1636,7 @@ func TestCommitDiff_LogsAuditEventAtomically(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(24)
-	d, err := s.ProposeDiff(ctx, "agent-a", "user's preferred airline is Qantas", []string{"preferences.travel"}, vec, nil, []string{"preferences.travel"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "user's preferred airline is Qantas", []string{"preferences.travel"}, vec, nil, fullDepth([]string{"preferences.travel"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1561,7 +1683,7 @@ func TestRejectDiff_LogsAuditEventAtomically(t *testing.T) {
 	ctx := context.Background()
 
 	vec := unitVector(25)
-	d, err := s.ProposeDiff(ctx, "agent-a", "a proposal that will be rejected", []string{"identity.basic"}, vec, nil, []string{"identity.basic"})
+	d, _, err := s.ProposeDiff(ctx, "agent-a", "a proposal that will be rejected", []string{"identity.basic"}, vec, nil, fullDepth([]string{"identity.basic"}))
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
