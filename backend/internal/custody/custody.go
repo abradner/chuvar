@@ -12,7 +12,8 @@
 // Threat model: this package defends the at-rest case — an attacker who reads
 // `pgdata` bytes, a stolen backup, or a process holding DB credentials but not
 // the master key. See CLAUDE.md principles 3 and 9, and the Agent Capability
-// Broker decision log (2026-08-01) in Notion for the full statement.
+// Broker decision log (2026-08-01 entries) in docs/capability-broker.md for
+// the full statement.
 //
 // What this package does NOT do, stated plainly because an aspirational
 // security claim is a bug (CLAUDE.md principle 8): key material here lives on
