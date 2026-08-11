@@ -32,6 +32,7 @@ type Querier interface {
 	GetFact(ctx context.Context, id string) (GetFactRow, error)
 	GetGrantRequest(ctx context.Context, id string) (GrantRequest, error)
 	GetReviewerTOTPSecret(ctx context.Context, id string) ([]byte, error)
+	GetSigningPolicy(ctx context.Context, repo string) (SigningPolicy, error)
 	GetStagedDiff(ctx context.Context, id string) (StagedDiff, error)
 	// depth IS NOT NULL is implied by kind = 'memory' (the grants_kind_depth_pairing
 	// CHECK constraint), restated here rather than relied on so this query's own
@@ -178,6 +179,13 @@ type Querier interface {
 	SearchFacts(ctx context.Context, arg SearchFactsParams) ([]SearchFactsRow, error)
 	SupersedeFact(ctx context.Context, arg SupersedeFactParams) error
 	TouchReviewerToken(ctx context.Context, id string) error
+	// One row per repo: a second upsert for the same repo replaces the previous
+	// policy and set_by rather than erroring, matching how a reviewer actually
+	// changes their mind about a policy (set again, not "unset then set"). The
+	// audit trail for who changed it and when lives in audit_log, written by
+	// store.UpsertSigningPolicy in the same transaction — this row only ever
+	// reflects the current value.
+	UpsertSigningPolicy(ctx context.Context, arg UpsertSigningPolicyParams) (SigningPolicy, error)
 }
 
 var _ Querier = (*Queries)(nil)

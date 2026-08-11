@@ -124,6 +124,15 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("GET /api/tokens", a.listTokens)
 	mux.HandleFunc("POST /api/tokens", a.createToken)
 	mux.HandleFunc("POST /api/tokens/{id}/revoke", a.revokeToken)
+	// {repo...} (not {repo}): a repo identifier like
+	// "github.com/abradner/chuvar" contains slashes, so this wildcard-suffix
+	// pattern is the only one of the two that can capture it whole — see
+	// getSigningPolicy's doc comment. Registration order is irrelevant here:
+	// Go 1.22+ ServeMux resolves overlapping patterns by specificity, not by
+	// the order they were added, so a more specific fixed-segment route would
+	// win over this wildcard regardless of which was registered first.
+	mux.HandleFunc("GET /api/signing-policies/{repo...}", a.getSigningPolicy)
+	mux.HandleFunc("POST /api/signing-policies", a.requireTOTP(a.upsertSigningPolicy))
 
 	// /api/events (events.go) is mounted outside withRequestTimeout deliberately:
 	// every other route is a quick request/response and benefits from a bounded
