@@ -221,6 +221,69 @@ func TestServe_WaitsForInFlightHandlersBeforeReturning(t *testing.T) {
 	}
 }
 
+// TestHandleConn_HandlerContextHasConnectionDeadline is the regression test
+// for round-2 review's finding: conn.SetDeadline only bounds the socket
+// I/O, not the ctx handed to the Handler (and, in the real broker, threaded
+// into pool.Exec for the audit-log write). A stalled DB could previously
+// hold a handler goroutine open indefinitely, well past the advertised 10s
+// connDeadline. This asserts the derived-context wiring directly — that the
+// context handleConn passes to Handler carries a deadline, and that the
+// deadline is connDeadline out from this connection's own accept time —
+// rather than sleeping past the full window, which would make the test
+// slow and only prove the same thing indirectly.
+func TestHandleConn_HandlerContextHasConnectionDeadline(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "brokerd.sock")
+	ln, err := Listen(socketPath)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	var gotDeadline time.Time
+	var hasDeadline bool
+	handlerCalled := make(chan struct{})
+	handler := func(ctx context.Context, req Request) Result {
+		gotDeadline, hasDeadline = ctx.Deadline()
+		close(handlerCalled)
+		return Result{Code: OK}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Serve(ctx, ln, handler)
+
+	before := time.Now()
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	req, _ := json.Marshal(Request{Op: "preflight", Token: "x", Scope: "git.sign"})
+	if _, err := conn.Write(append(req, '\n')); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	select {
+	case <-handlerCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler was never invoked")
+	}
+	after := time.Now()
+
+	if !hasDeadline {
+		t.Fatal("handler's context has no deadline — the daemon-lifetime ctx was passed through " +
+			"unmodified, so a stalled audit write (e.g. an unreachable DB) can hold this goroutine " +
+			"open indefinitely")
+	}
+	// The deadline must fall within [before+connDeadline, after+connDeadline]:
+	// derived from *this connection's* own accept time via connDeadline —
+	// the same window conn.SetDeadline itself uses — not some unrelated or
+	// daemon-lifetime window.
+	if gotDeadline.Before(before.Add(connDeadline)) || gotDeadline.After(after.Add(connDeadline)) {
+		t.Errorf("handler context deadline = %v, want within [%v, %v]",
+			gotDeadline, before.Add(connDeadline), after.Add(connDeadline))
+	}
+}
+
 // TestPeerUIDMatches_SameUserAccepted is the positive case for the #77
 // spike's uid gate: a same-uid connection (every test in this package, and
 // every real chuvar deployment per the spike's host facts) is accepted.

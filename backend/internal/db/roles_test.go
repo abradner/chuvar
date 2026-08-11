@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"net/url"
 	"testing"
@@ -407,7 +408,16 @@ func seedCapabilityGrant(t *testing.T, admin *pgxpool.Pool) string {
 	require.NoError(t, err)
 	_, err = admin.Exec(ctx, `INSERT INTO capability_grant_identities (grant_id, committer_email) VALUES ($1, 'agent@example.com')`, id)
 	require.NoError(t, err)
-	_, err = admin.Exec(ctx, `INSERT INTO capability_grant_tokens (grant_id, token_hash) VALUES ($1, decode('aa', 'hex'))`, id)
+	// A fresh random hash per call, not a fixed literal: this file has no
+	// TRUNCATE between tests, and 20260811100000_capability_token_hash_unique
+	// made capability_grant_tokens.token_hash genuinely UNIQUE — more than
+	// one test in this file calls seedCapabilityGrant, so a shared literal
+	// would collide across them for reasons that have nothing to do with
+	// what each test is actually checking.
+	hash := make([]byte, 32)
+	_, err = rand.Read(hash)
+	require.NoError(t, err)
+	_, err = admin.Exec(ctx, `INSERT INTO capability_grant_tokens (grant_id, token_hash) VALUES ($1, $2)`, id, hash)
 	require.NoError(t, err)
 	return id
 }

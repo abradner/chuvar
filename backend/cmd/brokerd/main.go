@@ -113,31 +113,53 @@ func run() error {
 // see internal/broker/keyring's package doc, "Scope, honestly stated", for
 // exactly what this does and does not claim about per-grant custody.
 //
-// Deliberately its own env vars (CHUVAR_BROKER_SIGNING_KEY_FILE /
-// CHUVAR_BROKER_SIGNING_KEY_CREATE), not shared with apiserver's
-// CHUVAR_CUSTODY_KEY_FILE / CHUVAR_CUSTODY_CREATE — same reasoning as
-// apiserver's CORS_ALLOWED_ORIGIN comment: specific to this binary. Sharing
-// the vault master key file with the signing key would also be a category
-// error: they wrap different things (the master key wraps a DEK for
-// sealed *columns*; this key signs *commits*), and "one mechanism, not two"
-// (the 2026-08-01 decision this reuses) means one *kind* of custody backend
-// (human-present unlock, pluggable storage), not one *key* for every
-// purpose.
+// Deliberately its own env vars, all under the CHUVAR_BROKER_SIGNING_KEY_
+// prefix (see custody.BackendFromEnv) — not shared with apiserver's
+// CHUVAR_CUSTODY_KEY_FILE / CHUVAR_CUSTODY_CREATE / CHUVAR_CUSTODY_CREATE,
+// same reasoning as apiserver's CORS_ALLOWED_ORIGIN comment: specific to
+// this binary. Sharing the vault master key file with the signing key
+// would also be a category error: they wrap different things (the master
+// key wraps a DEK for sealed *columns*; this key signs *commits*), and
+// "one mechanism, not two" (the 2026-08-01 decision this reuses) means one
+// *kind* of custody backend (human-present unlock, pluggable storage), not
+// one *key* for every purpose.
+//
+// Round-2 review (BLOCKER): before this, loadSigningKey hardcoded
+// custody.FileBackend — plaintext, 0600 — as brokerd's ONLY option. On this
+// deployment every agent runs as the operator's own OS user, so any agent
+// could read that file directly and mint arbitrary git signatures itself,
+// bypassing the grant token, scope check, commit parsing, rate limit, and
+// audit trail entirely: the broker's whole purpose, defeated by ambient
+// filesystem access (CLAUDE.md principle 3). custody.BackendFromEnv is the
+// fix: it fails closed if no backend is configured at all, and refuses an
+// unsealed one (FileBackend always; AgeBackend when configured with a
+// co-located passphrase file) unless CHUVAR_BROKER_ALLOW_UNSEALED_KEY=1 is
+// set explicitly — the same door-wedged-open posture custody.FileBackend
+// itself documents, now opt-in rather than the only door that exists.
+//
+// apiserver's own master-key loading (openSealedStore, cmd/apiserver/
+// main.go) still hardcodes FileBackend — that is a separately tracked,
+// deliberately disclosed gap (issue #85 / ticket E7), not touched here.
+// It could adopt custody.BackendFromEnv("CHUVAR_CUSTODY", ...) the same
+// way, later, as its own two-way door; doing so is not part of this fix.
 func loadSigningKey(ctx context.Context) (*keyring.SigningKey, error) {
-	backend := &custody.FileBackend{
-		Path:        os.Getenv("CHUVAR_BROKER_SIGNING_KEY_FILE"),
-		AllowCreate: os.Getenv("CHUVAR_BROKER_SIGNING_KEY_CREATE") == "1",
+	defaultPath, err := defaultSigningKeyPath()
+	if err != nil {
+		return nil, fmt.Errorf("brokerd: %w", err)
 	}
-	// custody.FileBackend.Path empty means DefaultKeyPath, which is
-	// ~/.local/state/chuvar/master.key — the wrong file for this binary.
-	// Point it at a sibling path instead when the operator hasn't set one
-	// explicitly.
-	if backend.Path == "" {
-		p, err := defaultSigningKeyPath()
-		if err != nil {
-			return nil, fmt.Errorf("brokerd: %w", err)
-		}
-		backend.Path = p
+
+	backend, err := custody.BackendFromEnv(
+		"CHUVAR_BROKER_SIGNING_KEY",
+		"CHUVAR_BROKER_ALLOW_UNSEALED_KEY",
+		"any process running as this user — including an agent, since every agent on this "+
+			"deployment shares the operator's own OS user per AGENTS.md §3.0's threat model — "+
+			"could read the seed directly and forge arbitrary git commit signatures, bypassing the "+
+			"grant token, scope check, commit parsing, rate limit, and audit trail entirely: "+
+			"exactly what this broker exists to prevent",
+		defaultPath,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("brokerd: selecting signing-key custody backend: %w", err)
 	}
 
 	raw, err := backend.Unseal(ctx)

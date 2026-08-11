@@ -192,6 +192,133 @@ To proceed, re-enrolment must be a decision rather than a side effect:
 
 ---
 
+## brokerd's signing key
+
+`brokerd` (the Agent Capability Broker, issues #95/#79) holds one decrypted
+ed25519 git-signing seed in guarded process memory for its whole lifetime —
+see `internal/broker/keyring`'s package doc. Whoever can read that seed can
+forge an arbitrary git commit signature directly, with no grant token, no
+scope check, no commit-payload parsing, no rate limit, and no audit entry —
+the broker's entire purpose, bypassed in one file read. This is a sharper
+adversary than the master key section above: that key only unlocks TOTP
+secrets at rest; this one unlocks unbounded signing authority. Round-2
+review flagged that `brokerd` unconditionally used the plaintext file
+backend with no way to choose anything else — see `internal/custody`'s
+`BackendFromEnv` (`internal/custody/select.go`) and its use in
+`cmd/brokerd/main.go`'s `loadSigningKey` for the fix this section documents.
+
+### Choosing a backend — required, no default
+
+`CHUVAR_BROKER_SIGNING_KEY_BACKEND` selects the custody backend and **must**
+be set to one of `file`, `age`, or `1password`. There is no default: an
+unconfigured `brokerd` refuses to boot rather than silently falling back to
+the plaintext file backend, per CLAUDE.md principle 5 ("missing config ⇒ no
+boot"). The refusal names the variable to set.
+
+| Backend | `Sealed()` | What it actually protects against |
+|---|---|---|
+| `file` | **false**, always | Nothing at rest. The seed sits base64-encoded in a `0600` file; any process running as the operator's OS user — including any agent, since every agent on this deployment shares that user (AGENTS.md §3.0) — reads it and forges signatures directly. Development and low-value PoC use only. |
+| `age`, with `..._PASSPHRASE_FILE` set | **false** | The same same-OS-user adversary as `file`: the passphrase sits in a second `0600` file the same reader can already open, with no human interaction. Ciphertext-at-rest against a narrower adversary (a stolen backup, a `pgdata` scrape) only. |
+| `age`, prompted interactively | **true** | The passphrase is read once from the controlling terminal (no echo, via `golang.org/x/term`) and never touches disk or an environment variable. Genuinely denies the same-OS-user filesystem reader. Requires a real terminal at boot — refuses cleanly (not a hang) under a non-interactive launcher (systemd, CI) with no passphrase file configured. |
+| `1password` | **true**, always | The seed lives in a 1Password vault, encrypted under the account's own Secret Key and password, independent of this codebase. `Unseal` also refuses outright if `OP_SERVICE_ACCOUNT_TOKEN` or an `OP_SESSION_*` variable is present in the environment — either would let `op read` succeed with zero human interaction, defeating the point. See `OnePasswordBackend`'s doc comment (`internal/custody/onepassword.go`) for full setup. |
+
+None of these protect against a process that can read `brokerd`'s own
+memory once the seed is unsealed — that is the runtime residual
+`internal/custody`'s package doc states plainly, not a gap this selector
+closes.
+
+### Per-backend configuration
+
+All variables are namespaced under `CHUVAR_BROKER_SIGNING_KEY_` — deliberately
+distinct from apiserver's `CHUVAR_CUSTODY_*` (see below).
+
+| Setting | Applies to | Value |
+|---|---|---|
+| `CHUVAR_BROKER_SIGNING_KEY_BACKEND` | all | `file` \| `age` \| `1password` — required |
+| `CHUVAR_BROKER_SIGNING_KEY_FILE` | `file`, `age` | Key file path (`file`) or age-ciphertext path (`age`). Both default to `$XDG_STATE_HOME/chuvar/broker-signing.key`, else `~/.local/state/chuvar/broker-signing.key`, when unset — the filename doesn't change with the backend, only its contents (raw base64 for `file`, age ciphertext for `age`), so set this explicitly if that's confusing for your deployment. |
+| `CHUVAR_BROKER_SIGNING_KEY_CREATE` | `file`, `age` | `1` mints a fresh key/ciphertext on first run if none exists. Opt-in on purpose: a silently-minted replacement cannot decrypt anything sealed under a previous key, so a missing key must fail loudly, not regenerate. |
+| `CHUVAR_BROKER_SIGNING_KEY_PASSPHRASE_FILE` | `age` | Path to a file holding the decryption passphrase. **Not sealed** (see table above) — set this only when the narrower guarantee, plus restart-without-a-human, is the accepted trade. Omit it to be prompted interactively instead. |
+| `CHUVAR_BROKER_SIGNING_KEY_1PASSWORD_REFERENCE` | `1password` | An `op://` secret reference, e.g. `op://Private/chuvar-broker-signing-key/password`. The referenced field must hold base64-encoded key material, same encoding `file` uses. |
+| `CHUVAR_BROKER_ALLOW_UNSEALED_KEY` | all | `1` is the explicit development escape hatch: without it, `brokerd` refuses to boot with any backend that reports `Sealed() == false`. With it, `brokerd` boots but logs a loud warning naming the same forging-and-bypass consequence documented above, on every start. |
+
+### First start (development, plaintext)
+
+```sh
+cd backend && \
+CHUVAR_BROKER_SIGNING_KEY_BACKEND=file \
+CHUVAR_BROKER_SIGNING_KEY_CREATE=1 \
+CHUVAR_BROKER_ALLOW_UNSEALED_KEY=1 \
+go run ./cmd/brokerd
+```
+
+### First start (sealed, age with an interactive passphrase)
+
+```sh
+cd backend && \
+CHUVAR_BROKER_SIGNING_KEY_BACKEND=age \
+CHUVAR_BROKER_SIGNING_KEY_FILE=~/.local/state/chuvar/broker-signing.age \
+CHUVAR_BROKER_SIGNING_KEY_CREATE=1 \
+go run ./cmd/brokerd
+```
+
+`brokerd` prompts for the passphrase on the controlling terminal once, with
+echo disabled (there is no second, confirmation prompt — a typo here means
+discovering it on the next restart, not at entry time). Back that passphrase
+up somewhere outside this machine, alongside the ciphertext file — losing
+either loses every signature this key could ever have produced.
+
+### apiserver's master key is a separate, still-open gap
+
+`apiserver`'s own master-key loading (`openSealedStore`,
+`cmd/apiserver/main.go`) still hardcodes the plaintext `file` backend
+unconditionally — this section, and `BackendFromEnv`, do not change that.
+It is issue #85 / ticket E7, tracked and disclosed separately (see "The
+master key" above); `apiserver` could adopt `BackendFromEnv("CHUVAR_CUSTODY",
+...)` the same way later, as its own two-way door.
+
+### Duplicate capability token hashes
+
+Migration `20260811100000_capability_token_hash_unique` makes
+`capability_grant_tokens.token_hash` genuinely `UNIQUE`. If two rows already
+share a hash, it **refuses to apply** and names the colliding grant ids
+rather than resolving the collision itself.
+
+That refusal is deliberate. A shared token hash means one credential derives
+more than one grant, so which scope, committer identity and audit
+attribution that credential carries is already ambiguous — and the migration
+cannot know which grant you intended. Picking a winner automatically would
+relocate the ambiguity into the migration; revoking the losers would be a
+migration exercising authority on your behalf (principle 4); deleting their
+token rows would erase the evidence of what was actually provisioned
+(principle 12). So it stops and hands the decision back to you, the same way
+`20260802000000_seal_totp_secret` refuses to drop enrolled TOTP secrets.
+
+To resolve, for each colliding hash decide which grant was intended, then:
+
+```sql
+-- Inspect what collided.
+SELECT t.grant_id, t.token_hash, t.created_at, g.subject, g.revoked_at
+FROM capability_grant_tokens t
+JOIN grants g ON g.id = t.grant_id
+WHERE t.token_hash IN (
+    SELECT token_hash FROM capability_grant_tokens
+    GROUP BY token_hash HAVING count(*) > 1
+)
+ORDER BY t.token_hash, t.created_at;
+
+-- Revoke each grant you did not intend (revocation only reduces authority,
+-- and the grant row survives as history), then drop its token row so the
+-- credential stops deriving it.
+UPDATE grants SET revoked_at = now() WHERE id = '<unintended-grant-id>';
+DELETE FROM capability_grant_tokens WHERE grant_id = '<unintended-grant-id>';
+```
+
+Re-run the migration once one row remains per hash. Note this state is only
+reachable while direct SQL is the provisioning path — issue #96 replaces it
+with a real creation surface that mints a distinct token per grant.
+
+---
+
 ## Reviewer devices and the second factor (TOTP and passkeys)
 
 Mutations that **grant or extend authority** — approving a grant request,
