@@ -230,7 +230,7 @@ func TestWebAuthnRegister_WebAuthnOnlyTokenUsesAssertion(t *testing.T) {
 	}
 	first := newVirtualAuthenticator(t, "cred-first", false)
 	if _, err := st.CreateWebAuthnCredential(ctx, tok.ID, "first-key",
-		first.credentialID, first.coseKeyBytes(t), "none", nil, nil, 0, false, false); err != nil {
+		first.credentialID, first.coseKeyBytes(t), "none", nil, nil, 0, false, false, "test-actor"); err != nil {
 		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
 	}
 
@@ -667,7 +667,7 @@ func TestCreateToken_WebAuthnOnlyEnrollmentClosesGate(t *testing.T) {
 	}
 	va := newVirtualAuthenticator(t, "cred-gate", false)
 	if _, err := st.CreateWebAuthnCredential(ctx, tok.ID, "surviving-key",
-		va.credentialID, va.coseKeyBytes(t), "none", nil, nil, 0, false, false); err != nil {
+		va.credentialID, va.coseKeyBytes(t), "none", nil, nil, 0, false, false, "test-actor"); err != nil {
 		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
 	}
 

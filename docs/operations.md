@@ -385,7 +385,19 @@ one sanctioned break-glass deletion of otherwise-append-only history — and it 
 exactly as invisible to `audit_log` as the rest of this procedure, which is why
 the warning at the top of this section exists. It is safe *only* because the
 durable latch, not these mutable rows, is now what preserves the enrollment gate
-across a reset (see the `enrollment_latch` migration).
+across a reset (see the `enrollment_latch` migration) — **and only on a
+deployment that has actually applied both `20260810000000_enrollment_latch`
+and `20260811110000_enrollment_latch_backfill`.** The first migration only
+creates the table; on its own it does not set the latch for a factor that was
+enrolled before either migration ran, so a deployment that upgraded straight
+to `20260810000000` and never applied the backfill would have an unset latch
+despite genuine prior enrollment — and Step 1 above would, by itself, fully
+reopen `POST /api/tokens` instead of leaving Step 2 as the only thing standing
+between recovery and re-exposure. `go run ./cmd/migrate` applies every pending
+migration in order, so any deployment migrated after both landed is covered
+automatically; this is only a trap for a deployment frozen between the two.
+Confirm before relying on this claim: `SELECT version FROM schema_migrations`
+should read `20260811110000` or later.
 
 **Step 2 — reset the durable latch, on purpose, as a separate statement.** The
 latch is set the first time any factor is ever enrolled and is **not** touched by

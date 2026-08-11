@@ -66,7 +66,7 @@ func run() error {
 	if err := bootstrapReviewerToken(ctx, st); err != nil {
 		return err
 	}
-	if err := warnIfNoEnrolledDevice(ctx, st); err != nil {
+	if _, err := warnIfNoEnrolledDevice(ctx, st); err != nil {
 		return err
 	}
 
@@ -248,41 +248,68 @@ func bootstrapReviewerToken(ctx context.Context, st *store.Store) error {
 	return nil
 }
 
-// warnIfNoEnrolledDevice logs a prominent warning when no second factor of
-// either kind — a TOTP secret or a WebAuthn credential — has ever been
-// enrolled, because that is the one state in which POST /api/tokens accepts
-// a bearer token alone (see internal/api's createToken, which checks the
-// same two counts): with nothing to prove possession against, the enrollment
-// gate cannot be closed without making the system unbootstrappable. Both
-// counts, matching the gate exactly — a warning keyed on a narrower signal
-// than the gate it warns about would keep firing after the gate had closed
-// (or worse, go quiet while it stood open).
+// warnIfNoEnrolledDevice logs a prominent warning when POST /api/tokens
+// currently accepts a bearer token alone — i.e. when createToken's actual
+// gate (internal/api/tokens.go: "latched || everEnrolledTOTP+everEnrolledWebAuthn
+// > 0") would let it through unguarded. That gate ORs three signals together,
+// so this warning must consult all three to stay true, not just the two live
+// counts: with nothing to prove possession against, the enrollment gate
+// cannot be closed without making the system unbootstrappable, but the
+// durable latch (EnrollmentLatchSet) can hold the gate shut even when both
+// counts have just been reset to zero.
 //
-// This is not just the fresh-install case. Every deployment that predates the
-// reviewer_totp migration lands here too: it adds the secret column as a
-// nullable column with no backfill, so existing tokens are all unenrolled, and
-// nothing forces the operator to notice. Until they mint one enrolled device,
-// anything holding a bearer token can mint another and enroll it — exactly the
-// escalation the gate exists to stop. There is no UI for this yet; it is a
-// deliberate operator action (see README.md's "Enrolling the first device").
+// Checking only the counts (as an earlier version of this function did) was
+// itself a principle-8 violation once the documented break-glass recovery
+// (docs/operations.md) existed: Step 1 of that procedure deliberately clears
+// every factor row while leaving the latch set, precisely so the gate stays
+// closed across the reset — but a counts-only warning would fire right after
+// Step 1, claiming "POST /api/tokens currently accepts a bearer token alone"
+// when createToken would in fact still refuse it (latched == true), AND tell
+// the operator to "enrol one now" via a call that cannot succeed without a
+// factor to prove — Step 2 (resetting the latch) hasn't happened yet, deliberately.
+// A security warning that's both false and gives an instruction that cannot
+// be carried out is worse than silence: it teaches the operator to distrust
+// (or worse, "fix" by resetting the latch early) the one warning meant to
+// catch the real gap.
+//
+// This is not just the fresh-install / break-glass case. Every deployment
+// that predates the reviewer_totp migration lands here too: it adds the
+// secret column as a nullable column with no backfill, so existing tokens are
+// all unenrolled, and nothing forces the operator to notice. Until they mint
+// one enrolled device, anything holding a bearer token can mint another and
+// enroll it — exactly the escalation the gate exists to stop. There is no UI
+// for this yet; it is a deliberate operator action (see README.md's
+// "Enrolling the first device").
 //
 // A warning rather than a hard failure: refusing to start would break every
 // existing deployment on upgrade, turning a security gap into an outage.
-func warnIfNoEnrolledDevice(ctx context.Context, st *store.Store) error {
+//
+// Returns whether it warned, purely so tests can assert the actual branch
+// taken instead of only "did this return an error" — every path here returns
+// a nil error regardless (see above), so an error-only check would exercise
+// none of this function's real conditional logic (AGENTS.md §6, "every
+// conditional branch that encodes real logic gets a test that exercises
+// it"). Not consumed by run(); callers that only care about a real failure
+// (a broken DB connection) can keep discarding it.
+func warnIfNoEnrolledDevice(ctx context.Context, st *store.Store) (warned bool, err error) {
 	totpCount, err := st.CountEverEnrolledReviewerTokens(ctx)
 	if err != nil {
-		return fmt.Errorf("apiserver: checking for enrolled reviewer tokens: %w", err)
+		return false, fmt.Errorf("apiserver: checking for enrolled reviewer tokens: %w", err)
 	}
 	webauthnCount, err := st.CountEverEnrolledWebAuthnCredentials(ctx)
 	if err != nil {
-		return fmt.Errorf("apiserver: checking for enrolled webauthn credentials: %w", err)
+		return false, fmt.Errorf("apiserver: checking for enrolled webauthn credentials: %w", err)
 	}
-	if totpCount+webauthnCount > 0 {
-		return nil
+	latched, err := st.EnrollmentLatchSet(ctx)
+	if err != nil {
+		return false, fmt.Errorf("apiserver: checking the durable enrollment latch: %w", err)
+	}
+	if latched || totpCount+webauthnCount > 0 {
+		return false, nil
 	}
 	slog.Warn("apiserver: SECURITY — no reviewer device has enrolled a second factor (TOTP or passkey), " +
 		"so POST /api/tokens currently accepts a bearer token alone and anything holding " +
 		"that token can mint and enroll its own device. Enrol one now: POST /api/tokens " +
 		"and scan the returned otpauth:// URI. See README.md.")
-	return nil
+	return true, nil
 }

@@ -43,7 +43,7 @@ func TestWebAuthnCredential_CreateListActiveRoundtrip(t *testing.T) {
 	reviewer := seedReviewer(t, s, "device-a")
 
 	cred, err := s.CreateWebAuthnCredential(ctx, reviewer, "yubikey",
-		[]byte("cred-id-1"), []byte("pubkey-1"), "none", []string{"usb", "nfc"}, []byte("aaguid-1"), 0, true, false)
+		[]byte("cred-id-1"), []byte("pubkey-1"), "none", []string{"usb", "nfc"}, []byte("aaguid-1"), 0, true, false, "test-actor")
 	if err != nil {
 		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
 	}
@@ -85,10 +85,10 @@ func TestWebAuthnCredential_ListScopedPerReviewer(t *testing.T) {
 	a := seedReviewer(t, s, "device-a")
 	b := seedReviewer(t, s, "device-b")
 
-	if _, err := s.CreateWebAuthnCredential(ctx, a, "a-key", []byte("cred-a"), []byte("pub-a"), "none", nil, nil, 0, false, false); err != nil {
+	if _, err := s.CreateWebAuthnCredential(ctx, a, "a-key", []byte("cred-a"), []byte("pub-a"), "none", nil, nil, 0, false, false, "test-actor"); err != nil {
 		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
 	}
-	if _, err := s.CreateWebAuthnCredential(ctx, b, "b-key", []byte("cred-b"), []byte("pub-b"), "none", nil, nil, 0, false, false); err != nil {
+	if _, err := s.CreateWebAuthnCredential(ctx, b, "b-key", []byte("cred-b"), []byte("pub-b"), "none", nil, nil, 0, false, false, "test-actor"); err != nil {
 		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
 	}
 
@@ -106,10 +106,10 @@ func TestWebAuthnCredential_DuplicateCredentialIDRejected(t *testing.T) {
 	ctx := context.Background()
 	reviewer := seedReviewer(t, s, "device-a")
 
-	if _, err := s.CreateWebAuthnCredential(ctx, reviewer, "first", []byte("dup-id"), []byte("pub"), "none", nil, nil, 0, false, false); err != nil {
+	if _, err := s.CreateWebAuthnCredential(ctx, reviewer, "first", []byte("dup-id"), []byte("pub"), "none", nil, nil, 0, false, false, "test-actor"); err != nil {
 		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
 	}
-	_, err := s.CreateWebAuthnCredential(ctx, reviewer, "second", []byte("dup-id"), []byte("pub2"), "none", nil, nil, 0, false, false)
+	_, err := s.CreateWebAuthnCredential(ctx, reviewer, "second", []byte("dup-id"), []byte("pub2"), "none", nil, nil, 0, false, false, "test-actor")
 	if err == nil {
 		t.Fatal("CreateWebAuthnCredential() with a duplicate credential_id succeeded, want ErrWebAuthnCredentialAlreadyRegistered")
 	}
@@ -143,7 +143,7 @@ func TestWebAuthnCredential_RejectsEmptyIdentifiers(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := s.CreateWebAuthnCredential(ctx, tc.reviewerID, "key",
-				tc.credentialID, tc.publicKey, "none", nil, nil, 0, false, false)
+				tc.credentialID, tc.publicKey, "none", nil, nil, 0, false, false, "test-actor")
 			if err == nil {
 				t.Fatalf("CreateWebAuthnCredential(%s) succeeded, want a validation error", tc.name)
 			}
@@ -163,14 +163,14 @@ func TestWebAuthnCredential_RevokedCredentialIDIsReusable(t *testing.T) {
 	ctx := context.Background()
 	reviewer := seedReviewer(t, s, "device-a")
 
-	first, err := s.CreateWebAuthnCredential(ctx, reviewer, "first", []byte("reusable-id"), []byte("pub"), "none", nil, nil, 0, false, false)
+	first, err := s.CreateWebAuthnCredential(ctx, reviewer, "first", []byte("reusable-id"), []byte("pub"), "none", nil, nil, 0, false, false, "test-actor")
 	if err != nil {
 		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
 	}
 	if err := s.RevokeWebAuthnCredential(ctx, first.ID, reviewer); err != nil {
 		t.Fatalf("RevokeWebAuthnCredential() error = %v", err)
 	}
-	if _, err := s.CreateWebAuthnCredential(ctx, reviewer, "second", []byte("reusable-id"), []byte("pub2"), "none", nil, nil, 0, false, false); err != nil {
+	if _, err := s.CreateWebAuthnCredential(ctx, reviewer, "second", []byte("reusable-id"), []byte("pub2"), "none", nil, nil, 0, false, false, "test-actor"); err != nil {
 		t.Fatalf("CreateWebAuthnCredential() after revoking the prior owner of this credential_id: error = %v, want success", err)
 	}
 }
@@ -181,7 +181,7 @@ func TestWebAuthnCredential_RevokeScopedToOwner(t *testing.T) {
 	a := seedReviewer(t, s, "device-a")
 	b := seedReviewer(t, s, "device-b")
 
-	cred, err := s.CreateWebAuthnCredential(ctx, a, "a-key", []byte("cred-a"), []byte("pub-a"), "none", nil, nil, 0, false, false)
+	cred, err := s.CreateWebAuthnCredential(ctx, a, "a-key", []byte("cred-a"), []byte("pub-a"), "none", nil, nil, 0, false, false, "test-actor")
 	if err != nil {
 		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
 	}
@@ -205,7 +205,7 @@ func TestWebAuthnCredential_UpdateCounter(t *testing.T) {
 	ctx := context.Background()
 	reviewer := seedReviewer(t, s, "device-a")
 
-	cred, err := s.CreateWebAuthnCredential(ctx, reviewer, "key", []byte("cred"), []byte("pub"), "none", nil, nil, 5, false, false)
+	cred, err := s.CreateWebAuthnCredential(ctx, reviewer, "key", []byte("cred"), []byte("pub"), "none", nil, nil, 5, false, false, "test-actor")
 	if err != nil {
 		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
 	}
@@ -234,7 +234,7 @@ func TestWebAuthnCredential_FlagCloneWarningFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	reviewer := seedReviewer(t, s, "device-a")
 
-	cred, err := s.CreateWebAuthnCredential(ctx, reviewer, "key", []byte("cred"), []byte("pub"), "none", nil, nil, 5, false, false)
+	cred, err := s.CreateWebAuthnCredential(ctx, reviewer, "key", []byte("cred"), []byte("pub"), "none", nil, nil, 5, false, false, "test-actor")
 	if err != nil {
 		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
 	}
@@ -262,6 +262,127 @@ func TestWebAuthnCredential_FlagCloneWarningFailsClosed(t *testing.T) {
 	}
 	if len(active) != 0 {
 		t.Fatalf("ActiveWebAuthnCredentialsForReviewer() after a clone warning = %d, want 0 (revoked)", len(active))
+	}
+}
+
+// TestCreateWebAuthnCredential_LogsAuditEventAtomically is the passkey-
+// enrollment analogue of TestRenewGrant_LogsAuditEventAtomically (store_test.go):
+// enrolling a credential must leave behind exactly one webauthn_credential_enrolled
+// audit row for the enrolling actor, proving the audit write actually happens
+// inside CreateWebAuthnCredential's own transaction (found in review: it used
+// to be a separate, non-atomic pool-level Store.LogAudit call made by the
+// caller after this method had already committed).
+func TestCreateWebAuthnCredential_LogsAuditEventAtomically(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+	reviewer := seedReviewer(t, s, "device-a")
+
+	if _, err := s.CreateWebAuthnCredential(ctx, reviewer, "yubikey",
+		[]byte("cred-atomic"), []byte("pub-atomic"), "none", nil, nil, 0, false, false, "human-reviewer"); err != nil {
+		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_log WHERE event_type = 'webauthn_credential_enrolled' AND subject = 'human-reviewer'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("querying audit_log: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("audit_log rows for webauthn_credential_enrolled = %d, want 1", count)
+	}
+}
+
+// TestCreateWebAuthnCredential_EmptyActorRejected guards the new actor
+// parameter the same way CreateGrant/RevokeGrant guard theirs — an empty
+// actor would either fail the audit_log NOT NULL constraint as an opaque
+// driver error or (if some future change made subject nullable) silently
+// record an unattributable enrollment, neither of which principle 6
+// ("actor identity derives from the authenticated credential") tolerates.
+func TestCreateWebAuthnCredential_EmptyActorRejected(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+	reviewer := seedReviewer(t, s, "device-a")
+
+	if _, err := s.CreateWebAuthnCredential(ctx, reviewer, "yubikey",
+		[]byte("cred-noactor"), []byte("pub-noactor"), "none", nil, nil, 0, false, false, ""); err == nil {
+		t.Fatal("CreateWebAuthnCredential() with an empty actor succeeded, want an error")
+	}
+}
+
+// TestRecordWebAuthnAssertionUse_LogsAuditEventAtomically is
+// RecordWebAuthnAssertionUse's own atomicity proof, same shape as
+// TestCreateWebAuthnCredential_LogsAuditEventAtomically: the sign-counter
+// mutation and its webauthn_assertion_used audit row must both be present
+// after one call, not left to two independent round trips a caller could
+// observe half-completed.
+func TestRecordWebAuthnAssertionUse_LogsAuditEventAtomically(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+	reviewer := seedReviewer(t, s, "device-a")
+
+	cred, err := s.CreateWebAuthnCredential(ctx, reviewer, "key", []byte("cred-assert"), []byte("pub-assert"), "none", nil, nil, 5, false, false, "test-actor")
+	if err != nil {
+		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
+	}
+
+	if err := s.RecordWebAuthnAssertionUse(ctx, cred.ID, 6, "human-reviewer", []byte(`{"credential_id":"stand-in"}`)); err != nil {
+		t.Fatalf("RecordWebAuthnAssertionUse() error = %v", err)
+	}
+
+	all, err := s.ListWebAuthnCredentialsForReviewer(ctx, reviewer)
+	if err != nil {
+		t.Fatalf("ListWebAuthnCredentialsForReviewer() error = %v", err)
+	}
+	if len(all) != 1 || all[0].SignCount != 6 {
+		t.Fatalf("SignCount after RecordWebAuthnAssertionUse() = %d, want 6", all[0].SignCount)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_log WHERE event_type = 'webauthn_assertion_used' AND subject = 'human-reviewer'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("querying audit_log: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("audit_log rows for webauthn_assertion_used = %d, want 1", count)
+	}
+}
+
+// TestFlagWebAuthnCredentialCloneWarningAudited_LogsAuditEventAtomically is
+// FlagWebAuthnCredentialCloneWarningAudited's atomicity proof: the fail-closed
+// revoke+flag mutation and its webauthn_clone_suspected audit row must both
+// land together.
+func TestFlagWebAuthnCredentialCloneWarningAudited_LogsAuditEventAtomically(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+	reviewer := seedReviewer(t, s, "device-a")
+
+	cred, err := s.CreateWebAuthnCredential(ctx, reviewer, "key", []byte("cred-clone"), []byte("pub-clone"), "none", nil, nil, 5, false, false, "test-actor")
+	if err != nil {
+		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
+	}
+
+	if err := s.FlagWebAuthnCredentialCloneWarningAudited(ctx, cred.ID, "human-reviewer", []byte(`{"credential_id":"stand-in"}`)); err != nil {
+		t.Fatalf("FlagWebAuthnCredentialCloneWarningAudited() error = %v", err)
+	}
+
+	all, err := s.ListWebAuthnCredentialsForReviewer(ctx, reviewer)
+	if err != nil {
+		t.Fatalf("ListWebAuthnCredentialsForReviewer() error = %v", err)
+	}
+	if len(all) != 1 || all[0].RevokedAt == nil || all[0].CloneWarningAt == nil {
+		t.Fatalf("FlagWebAuthnCredentialCloneWarningAudited() did not revoke+flag: %+v", all)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_log WHERE event_type = 'webauthn_clone_suspected' AND subject = 'human-reviewer'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("querying audit_log: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("audit_log rows for webauthn_clone_suspected = %d, want 1", count)
 	}
 }
 
@@ -389,7 +510,7 @@ func TestCreateWebAuthnCredential_EmptyLabelRejected(t *testing.T) {
 	ctx := context.Background()
 	reviewer := seedReviewer(t, s, "device-a")
 
-	if _, err := s.CreateWebAuthnCredential(ctx, reviewer, "", []byte("cred"), []byte("pub"), "none", nil, nil, 0, false, false); err == nil {
+	if _, err := s.CreateWebAuthnCredential(ctx, reviewer, "", []byte("cred"), []byte("pub"), "none", nil, nil, 0, false, false, "test-actor"); err == nil {
 		t.Fatal("CreateWebAuthnCredential() with an empty label succeeded, want an error")
 	}
 }
@@ -409,7 +530,7 @@ func TestCountEverEnrolledWebAuthnCredentials_MonotonicUnderRevocation(t *testin
 	}
 
 	cred, err := s.CreateWebAuthnCredential(ctx, reviewer, "yubikey",
-		[]byte("cred-count"), []byte("pub"), "none", nil, nil, 0, false, false)
+		[]byte("cred-count"), []byte("pub"), "none", nil, nil, 0, false, false, "test-actor")
 	if err != nil {
 		t.Fatalf("CreateWebAuthnCredential() error = %v", err)
 	}

@@ -261,21 +261,22 @@ func (a *API) webauthnRegisterFinish(w http.ResponseWriter, r *http.Request) {
 		transports[i] = string(t)
 	}
 
+	// actor (reviewer.Label) makes the enrollment audit row atomic with the
+	// credential insert and the latch set — all three commit or roll back as
+	// one transaction inside CreateWebAuthnCredential now, closing the P1
+	// finding that a LogAudit failure after this call used to leave a live,
+	// unaudited passkey with the endpoint returning 500 (a retry could then
+	// only 409 on the unique credential_id constraint). See that method's doc
+	// comment.
 	stored, err := a.Store.CreateWebAuthnCredential(r.Context(), reviewer.ID, label,
 		cred.ID, cred.PublicKey, cred.AttestationType, transports, cred.Authenticator.AAGUID,
-		cred.Authenticator.SignCount, cred.Flags.BackupEligible, cred.Flags.BackupState)
+		cred.Authenticator.SignCount, cred.Flags.BackupEligible, cred.Flags.BackupState, reviewer.Label)
 	if err != nil {
 		if errors.Is(err, store.ErrWebAuthnCredentialAlreadyRegistered) {
 			writeError(w, http.StatusConflict, err)
 			return
 		}
 		writeStoreError(w, http.StatusInternalServerError, "webauthnRegisterFinish", "could not save credential", err)
-		return
-	}
-
-	if err := a.Store.LogAudit(r.Context(), "webauthn_credential_enrolled", reviewer.Label, nil, nil, nil, nil, nil,
-		mustAuditJSON(map[string]string{"credential_id": base64.RawURLEncoding.EncodeToString(stored.CredentialID), "label": label})); err != nil {
-		writeStoreError(w, http.StatusInternalServerError, "webauthnRegisterFinish", "could not record audit event", err)
 		return
 	}
 
@@ -392,27 +393,34 @@ func (a *API) verifyWebAuthnAssertionHeader(w http.ResponseWriter, r *http.Reque
 
 	action := r.Method + " " + r.URL.Path
 
+	// Both branches below pair a real state mutation (revoke+flag on a clone
+	// signal; the sign counter otherwise) with the audit event describing it,
+	// via the atomic Store methods (RecordWebAuthnAssertionUse,
+	// FlagWebAuthnCredentialCloneWarningAudited) rather than a mutation call
+	// followed by a separate pool-level Store.LogAudit. Found in the same
+	// review pass as CreateWebAuthnCredential's atomicity fix: a sign-counter
+	// update or a clone-triggered revocation is exactly the kind of mutation
+	// audit.go's doc comment says belongs inside its own transaction (this
+	// package's mutations are supposed to log atomically; LogAudit-via-pool is
+	// documented as being for read-path events with no mutation to fail
+	// together with — a counter update and a fail-closed revocation are both
+	// real mutations, not that). Left as two mutations rather than one because
+	// they're mutually exclusive outcomes of the same assertion (a clone
+	// signal short-circuits before any counter update happens at all), each
+	// with a different audit event type describing what actually happened.
 	if cred.Authenticator.CloneWarning {
-		if err := a.Store.FlagWebAuthnCredentialCloneWarning(r.Context(), stored.ID); err != nil {
+		detail := mustAuditJSON(map[string]string{"credential_id": base64.RawURLEncoding.EncodeToString(stored.CredentialID), "action": action})
+		if err := a.Store.FlagWebAuthnCredentialCloneWarningAudited(r.Context(), stored.ID, reviewer.Label, detail); err != nil {
 			writeStoreError(w, http.StatusInternalServerError, "verifyWebAuthnAssertionHeader", "could not record clone warning", err)
-			return false
-		}
-		if err := a.Store.LogAudit(r.Context(), "webauthn_clone_suspected", reviewer.Label, nil, nil, nil, nil, nil,
-			mustAuditJSON(map[string]string{"credential_id": base64.RawURLEncoding.EncodeToString(stored.CredentialID), "action": action})); err != nil {
-			writeStoreError(w, http.StatusInternalServerError, "verifyWebAuthnAssertionHeader", "could not record audit event", err)
 			return false
 		}
 		writeError(w, http.StatusUnauthorized, errWebAuthnClone)
 		return false
 	}
 
-	if err := a.Store.UpdateWebAuthnCredentialCounter(r.Context(), stored.ID, cred.Authenticator.SignCount); err != nil {
+	detail := mustAuditJSON(map[string]string{"credential_id": base64.RawURLEncoding.EncodeToString(stored.CredentialID), "action": action})
+	if err := a.Store.RecordWebAuthnAssertionUse(r.Context(), stored.ID, cred.Authenticator.SignCount, reviewer.Label, detail); err != nil {
 		writeStoreError(w, http.StatusInternalServerError, "verifyWebAuthnAssertionHeader", "could not update credential counter", err)
-		return false
-	}
-	if err := a.Store.LogAudit(r.Context(), "webauthn_assertion_used", reviewer.Label, nil, nil, nil, nil, nil,
-		mustAuditJSON(map[string]string{"credential_id": base64.RawURLEncoding.EncodeToString(stored.CredentialID), "action": action})); err != nil {
-		writeStoreError(w, http.StatusInternalServerError, "verifyWebAuthnAssertionHeader", "could not record audit event", err)
 		return false
 	}
 
