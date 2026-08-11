@@ -36,8 +36,8 @@ These are not negotiable and every subagent prompt must restate them:
 
 - **No subagent pushes. Ever.** Attempts commit to local branches only.
 - **No subagent touches `main`.**
-- **The shared dev Postgres on port 54322 is off limits.** Agents spin up their
-  own disposable container and tear it down. Never set `DATABASE_URL` to 54322.
+- **This repo’s Postgres uses port 54322** (AGENTS.md §4.5). For agent runs, prefer a disposable Postgres container to avoid interfering with other local stacks; do not assume 54322 is available.
+  Set `DATABASE_URL` to your disposable container, not to 54322.
 - **Only the survivor is pushed.** Losing attempts stay local; do not open a PR
   "for comparison".
 - **Merging needs the operator's explicit go-ahead**, per batch, even in auto

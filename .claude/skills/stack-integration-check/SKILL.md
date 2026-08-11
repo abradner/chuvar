@@ -48,7 +48,7 @@ confirm the PR diff no longer contains the lower branch's package.
 For each stacked branch:
 
 ```bash
-git diff <lower-branch>..<upper-branch> -- <shared-paths>
+git diff <lower-branch> <upper-branch> -- <shared-paths>
 ```
 
 Read the `-` lines. **Every deletion needs a reason.** A deleted validation call,
