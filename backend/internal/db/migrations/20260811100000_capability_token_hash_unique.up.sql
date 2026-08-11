@@ -46,47 +46,37 @@
 -- by guessing which grant was the "real" one — that is exactly the
 -- ambiguity the bug lets happen, and silently picking a winner would just
 -- relocate the ambiguity into the migration itself rather than remove it.
--- Instead: every grant sharing a duplicated hash is force-revoked
--- (grants.revoked_at = now(), only if not already set — never un-revoked,
--- matching "history is append-only": revocation is monotonic everywhere
--- else in this schema), and every capability_grant_tokens row but the
--- earliest-created one per duplicate hash is deleted so the new constraint
--- can be added. Deleting the redundant token rows (not the grants rows,
--- which survive with revoked_at now set) follows the same resolution
--- 20260726030000_reviewer_tokens_partial_unique.down.sql's own comment
--- names for reviewer_tokens: "delete the stale revoked rows." A raised
--- WARNING names the affected grant ids so an operator applying this
--- against real data sees exactly what happened, loudly, rather than
--- discovering it later as grants that mysteriously stopped signing.
+-- So it refuses, naming the colliding grants, and stops.
+--
+-- It deliberately does NOT auto-resolve by revoking the grants and deleting
+-- the surplus token rows. Revoking a grant is an exercise of authority, and
+-- "humans approve; agents request" (principle 4) does not carve out an
+-- exception for schema migrations; deleting the surplus rows would erase the
+-- evidence of what the ambiguous provisioning actually was, against "history
+-- is append-only — the past is evidence" (principle 12). Refusing loudly and
+-- making the operator resolve it deliberately is also the established
+-- precedent in this schema: 20260802000000_seal_totp_secret.up.sql refuses
+-- rather than drop enrolled TOTP secrets, and both role migrations refuse
+-- rather than adopt a pre-existing role. Fail closed, loudly (principle 5).
 DO $$
 DECLARE
-    dup RECORD;
-    affected_grants uuid[];
+    colliding uuid[];
 BEGIN
-    FOR dup IN
+    SELECT array_agg(DISTINCT grant_id)
+    INTO colliding
+    FROM capability_grant_tokens
+    WHERE token_hash IN (
         SELECT token_hash
         FROM capability_grant_tokens
         GROUP BY token_hash
         HAVING count(*) > 1
-    LOOP
-        SELECT array_agg(grant_id ORDER BY created_at, grant_id)
-        INTO affected_grants
-        FROM capability_grant_tokens
-        WHERE token_hash = dup.token_hash;
+    );
 
-        RAISE WARNING 'capability_token_hash_unique: grants % share a token_hash — revoking all of '
-            'them (cannot safely determine which was the intended holder) and keeping only the '
-            'earliest-created token row so the new UNIQUE constraint can be added', affected_grants;
-
-        UPDATE grants
-        SET revoked_at = now()
-        WHERE id = ANY (affected_grants)
-          AND revoked_at IS NULL;
-
-        DELETE FROM capability_grant_tokens
-        WHERE token_hash = dup.token_hash
-          AND grant_id <> affected_grants[1];
-    END LOOP;
+    IF colliding IS NOT NULL THEN
+        RAISE EXCEPTION
+            'refusing to add the UNIQUE token-hash index: capability grants % share a token hash, so one credential currently derives more than one grant and its scope, committer identity and audit attribution are already ambiguous. Resolving this automatically would mean revoking grants and deleting token rows — an authority decision and an erasure of evidence, neither of which belongs in a migration (principles 4 and 12). Revoke the grants you did not intend and delete their token rows deliberately, then re-run. See docs/operations.md, "Duplicate capability token hashes".',
+            colliding;
+    END IF;
 END $$;
 
 DROP INDEX IF EXISTS capability_grant_tokens_hash_idx;

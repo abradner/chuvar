@@ -276,6 +276,47 @@ It is issue #85 / ticket E7, tracked and disclosed separately (see "The
 master key" above); `apiserver` could adopt `BackendFromEnv("CHUVAR_CUSTODY",
 ...)` the same way later, as its own two-way door.
 
+### Duplicate capability token hashes
+
+Migration `20260811100000_capability_token_hash_unique` makes
+`capability_grant_tokens.token_hash` genuinely `UNIQUE`. If two rows already
+share a hash, it **refuses to apply** and names the colliding grant ids
+rather than resolving the collision itself.
+
+That refusal is deliberate. A shared token hash means one credential derives
+more than one grant, so which scope, committer identity and audit
+attribution that credential carries is already ambiguous — and the migration
+cannot know which grant you intended. Picking a winner automatically would
+relocate the ambiguity into the migration; revoking the losers would be a
+migration exercising authority on your behalf (principle 4); deleting their
+token rows would erase the evidence of what was actually provisioned
+(principle 12). So it stops and hands the decision back to you, the same way
+`20260802000000_seal_totp_secret` refuses to drop enrolled TOTP secrets.
+
+To resolve, for each colliding hash decide which grant was intended, then:
+
+```sql
+-- Inspect what collided.
+SELECT t.grant_id, t.token_hash, t.created_at, g.subject, g.revoked_at
+FROM capability_grant_tokens t
+JOIN grants g ON g.id = t.grant_id
+WHERE t.token_hash IN (
+    SELECT token_hash FROM capability_grant_tokens
+    GROUP BY token_hash HAVING count(*) > 1
+)
+ORDER BY t.token_hash, t.created_at;
+
+-- Revoke each grant you did not intend (revocation only reduces authority,
+-- and the grant row survives as history), then drop its token row so the
+-- credential stops deriving it.
+UPDATE grants SET revoked_at = now() WHERE id = '<unintended-grant-id>';
+DELETE FROM capability_grant_tokens WHERE grant_id = '<unintended-grant-id>';
+```
+
+Re-run the migration once one row remains per hash. Note this state is only
+reachable while direct SQL is the provisioning path — issue #96 replaces it
+with a real creation surface that mints a distinct token per grant.
+
 ---
 
 ## Reviewer devices and the second factor (TOTP and passkeys)
