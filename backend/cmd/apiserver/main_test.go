@@ -27,28 +27,106 @@ func testStore(t *testing.T) *store.Store {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE reviewer_tokens, webauthn_credentials, webauthn_challenges, data_keys`); err != nil {
+	// enrollment_latch is included alongside the factor tables: several tests
+	// in this file (TestWarnIfNoEnrolledDevice_*) depend on its exact state,
+	// and the latch is never truncated automatically by the schema (it's
+	// meant to survive a factor reset — see the enrollment_latch migration),
+	// so a prior test's enrollment would otherwise leak into this one via a
+	// row TRUNCATE never used to touch.
+	if _, err := pool.Exec(ctx, `TRUNCATE reviewer_tokens, webauthn_credentials, webauthn_challenges, data_keys, enrollment_latch`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 	return testSealedStore(t, pool)
+}
+
+// clearAllFactors runs the documented break-glass recovery's factor-clearing
+// step (docs/operations.md) directly against a scratch connection: null every
+// TOTP secret and delete every passkey — the same technique
+// store/enrollment_latch_test.go's clearAllFactors uses, reimplemented here
+// since testStore (above) only returns the *store.Store, not its pool.
+func clearAllFactors(t *testing.T, ctx context.Context) {
+	t.Helper()
+	pool, err := db.Open(ctx, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("db.Open() error = %v", err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `UPDATE reviewer_tokens SET totp_secret_enc = NULL`); err != nil {
+		t.Fatalf("clearing totp secrets: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM webauthn_credentials`); err != nil {
+		t.Fatalf("deleting webauthn credentials: %v", err)
+	}
 }
 
 func TestWarnIfNoEnrolledDevice_SucceedsInBothStates(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
 
-	// Zero enrolled: warns (logged, not asserted here) but must not fail boot —
-	// refusing to start would break every pre-TOTP-migration deployment on
-	// upgrade, turning a security gap into an outage.
-	if err := warnIfNoEnrolledDevice(ctx, st); err != nil {
+	// Zero enrolled, latch unset: this is the one state createToken actually
+	// accepts a bearer token alone in, so the warning must fire. Never fails
+	// boot either way — refusing to start would break every pre-TOTP-migration
+	// deployment on upgrade, turning a security gap into an outage.
+	warned, err := warnIfNoEnrolledDevice(ctx, st)
+	if err != nil {
 		t.Fatalf("warnIfNoEnrolledDevice() with no enrolled device: error = %v, want nil (warn, don't fail boot)", err)
+	}
+	if !warned {
+		t.Error("warnIfNoEnrolledDevice() with no enrolled device and no latch = false, want true (this is exactly the state createToken accepts a bearer token alone in)")
 	}
 
 	if _, err := st.CreateReviewerToken(ctx, "device-a", "plaintext-a", "JBSWY3DPEHPK3PXP"); err != nil {
 		t.Fatalf("CreateReviewerToken() error = %v", err)
 	}
-	if err := warnIfNoEnrolledDevice(ctx, st); err != nil {
+	warned, err = warnIfNoEnrolledDevice(ctx, st)
+	if err != nil {
 		t.Fatalf("warnIfNoEnrolledDevice() with an enrolled device: error = %v, want nil", err)
+	}
+	if warned {
+		t.Error("warnIfNoEnrolledDevice() with an enrolled device (nonzero count) = true, want false")
+	}
+}
+
+// TestWarnIfNoEnrolledDevice_ConsultsTheDurableLatch is the P2 regression
+// test: an earlier version of this function checked only the two live
+// ever-enrolled counts, never the durable latch createToken's real gate also
+// ORs in. That made the warning both factually wrong and actively misleading
+// in exactly the state the documented break-glass recovery leaves behind
+// after its Step 1 (docs/operations.md): every factor row cleared (both
+// counts zero) but the latch deliberately still set, pending the operator's
+// separate Step 2. In that state createToken still refuses a factorless
+// bearer token — the count-only warning would nonetheless have logged
+// "POST /api/tokens currently accepts a bearer token alone" (false) and told
+// the operator to "enrol one now" via a call that cannot succeed without a
+// factor to prove (also false, since Step 2 hasn't run).
+func TestWarnIfNoEnrolledDevice_ConsultsTheDurableLatch(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+
+	// Enroll a device (sets the latch), then simulate break-glass recovery's
+	// Step 1 only — clear the factor rows directly, the same technique
+	// store/enrollment_latch_test.go's clearAllFactors uses, and deliberately
+	// do NOT reset the latch (that's the separate, hand-run Step 2).
+	if _, err := st.CreateReviewerToken(ctx, "device-a", "plaintext-a", "JBSWY3DPEHPK3PXP"); err != nil {
+		t.Fatalf("CreateReviewerToken() error = %v", err)
+	}
+	clearAllFactors(t, ctx)
+
+	latched, err := st.EnrollmentLatchSet(ctx)
+	if err != nil {
+		t.Fatalf("EnrollmentLatchSet() error = %v", err)
+	}
+	if !latched {
+		t.Fatal("latch should still be set after clearing factor rows alone (Step 1 without Step 2)")
+	}
+
+	warned, err := warnIfNoEnrolledDevice(ctx, st)
+	if err != nil {
+		t.Fatalf("warnIfNoEnrolledDevice() error = %v", err)
+	}
+	if warned {
+		t.Error("warnIfNoEnrolledDevice() with both counts zero but the latch still set = true, want false " +
+			"(createToken still refuses a factorless bearer token here — warning would be both false and misleading)")
 	}
 }
 
