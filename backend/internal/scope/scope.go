@@ -1,8 +1,24 @@
-// Package scope implements the hierarchical, dotted scope model that grants and
-// facts are checked against — e.g. "identity.basic", "projects.spritz.read". The
-// taxonomy itself (which scopes exist, how granular they should be) is an open
-// product question (AGENTS.md §3.4); this package only encodes the matching rules,
-// not any specific vocabulary.
+// Package scope implements the hierarchical, dotted scope model that grants,
+// facts, and (per the capability broker workstream) capabilities are checked
+// against — e.g. "identity.basic", "projects.spritz.read", or, with a target,
+// "git.sign:github.com/abradner/chuvar". The taxonomy itself (which scopes
+// exist, how granular they should be) is an open product question (AGENTS.md
+// §3.4); this package only encodes the matching rules, not any specific
+// vocabulary.
+//
+// Grammar (decided 2026-08-09, docs/capability-broker.md decision log,
+// "Scope grammar: dotted operation, optional colon-delimited target"):
+//
+//	scope := operation [ ":" target ]
+//
+// split on the FIRST colon — a target may itself contain further colons
+// syntactically (Covers does not reject them), though this package's own
+// target charset does not allow one (see targetPattern). The operation part
+// keeps the pre-existing dotted-segment grammar and ancestor-match semantics,
+// completely unchanged: a scope with no colon ("memory scope") parses as an
+// operation with no target and is bit-for-bit identical, in every function in
+// this file, to how it behaved before targets existed — see
+// TestScope_Covers/TestValidate for the regression tests that pin this down.
 package scope
 
 import (
@@ -11,21 +27,119 @@ import (
 	"strings"
 )
 
-// Scope is a dot-delimited hierarchical access scope.
+// Scope is a dot-delimited hierarchical access scope, optionally with a
+// colon-delimited target (see package doc).
 type Scope string
 
 var segmentPattern = regexp.MustCompile(`^[a-z0-9_]+$`)
 
-// MaxLength bounds how long a single scope string can be. No real taxonomy needs
-// anywhere near this many characters — it exists to stop a pathological input from
-// becoming a cheap CPU-amplification lever downstream, where every granted scope
-// gets turned into a LIKE pattern evaluated against every fact_scopes row on every
+// targetPattern bounds the target's charset. Deliberately more conservative
+// than it needs to be for any single known use case, because a target is
+// free text that ends up compared, logged, and potentially interpolated into
+// paths/URLs by whatever the operation class is (git remotes, hostnames,
+// filesystem paths) — this package is the one chokepoint all of those share,
+// so it's the right place to keep the surface small rather than trusting
+// every downstream consumer to re-validate:
+//   - No `*`/`?` (glob semantics). The decision log is explicit that globs
+//     are aspirational vocabulary, not committed grammar, "until a real need
+//     names one" — allowing them in the charset would make that an accident
+//     of validation rather than a deliberate future decision.
+//   - No `:`. Colon is the operation/target delimiter; a target charset that
+//     allowed embedded colons would make "split on the first colon" a lossy
+//     description of the actual grammar for any consumer that re-parses a
+//     stored scope string instead of holding onto the already-split value.
+//   - No whitespace or shell metacharacters (`;`, `|`, `$`, backticks, etc.)
+//     for the same reason a target isn't allowed to carry glob syntax: this
+//     is the boundary, not the eventual consumer, and the eventual consumer
+//     is unknown.
+//   - No `~` (shell/library-specific home-directory expansion — not part of
+//     this grammar; the fs.write:~/code/worktrees/** example in the decision
+//     doc is explicitly aspirational, not committed).
+//   - No `..` path segment. The charset alone allows `.` and `/`, which
+//     together spell directory traversal ("../../../etc/passwd") even though
+//     Covers only ever does exact-string comparison today and grants no
+//     unintended access by itself. This package is the one chokepoint every
+//     downstream target consumer shares (see above), including the future
+//     fs.write:~/code/worktrees/** operation class the decision log names —
+//     the day a consumer treats a target as a filesystem path prefix instead
+//     of an opaque string, a validated `..` becomes a real escape, and this
+//     is the only place that can still catch it. Checked separately from
+//     targetPattern (see hasTraversalSegment) because it's a structural rule
+//     about path segments, not a charset rule.
+//
+// What it does allow: letters (both cases — unlike operation segments,
+// targets are expected to hold hostnames and repo paths like
+// "github.com/abradner/chuvar", which are conventionally mixed- or
+// lower-case but not restricted to lower-case by any spec this package
+// should be enforcing), digits, `.`, `-`, `_`, and `/` — enough to express
+// the decided example without inventing grammar the decision didn't commit
+// to.
+var targetPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
+// hasTraversalSegment reports whether target contains a literal ".." path
+// segment — i.e. target itself is "..", or ".." appears between two "/"
+// (or at either end). This is a structural check, not a charset one: "/"
+// and "." are both individually allowed (repo paths and hostnames need
+// them), but the segment ".." specifically is directory-traversal syntax
+// and has no legitimate meaning for any target this package currently
+// documents (hostnames, repo paths) — see targetPattern's doc comment.
+func hasTraversalSegment(target string) bool {
+	for _, seg := range strings.Split(target, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// MaxLength bounds how long a single scope string can be — operation, the
+// colon, and target together, since they share one TEXT column and no
+// separate target bound exists (or is needed: bounding the whole string
+// bounds the target transitively). No real taxonomy needs anywhere near this
+// many characters — it exists to stop a pathological input from becoming a
+// cheap CPU-amplification lever downstream, where every granted scope gets
+// turned into a LIKE pattern evaluated against every fact_scopes row on every
 // read (the store package, added later in this series).
 const MaxLength = 256
 
-// Validate checks that s is well-formed: non-empty, bounded length, dot-delimited,
-// lowercase alphanumeric/underscore segments. It does not check the segments
-// against any known taxonomy — there isn't a fixed one (yet).
+// split parses s into its operation and (optional) target on the FIRST
+// colon, per the package-level grammar. It does no validation — Covers calls
+// this directly on already-granted/requested values without re-checking
+// Validate, matching this package's pre-existing design (Covers has never
+// validated its inputs; callers validate at the boundary — see
+// read_with_scope_check.go).
+func split(s Scope) (op string, target string, hasTarget bool) {
+	str := string(s)
+	idx := strings.IndexByte(str, ':')
+	if idx == -1 {
+		return str, "", false
+	}
+	return str[:idx], str[idx+1:], true
+}
+
+// Operation returns the dotted-operation part of s, stripping any
+// colon-delimited target. For a scope with no target, Operation returns s
+// unchanged. Exported for callers that pin a request to exactly one
+// operation before ever consulting Covers — e.g. a capability broker binary
+// that implements a single operation class (git.sign) and must refuse every
+// other one, including a syntactically-covered descendant like
+// "git.sign.extra": authorizing purely on Covers would let a grant row
+// seeded with an unrelated operation's scope exercise an operation its
+// human never named it for.
+func (s Scope) Operation() Scope {
+	op, _, _ := split(s)
+	return Scope(op)
+}
+
+// Validate checks that s is well-formed. The operation part (everything
+// before the first colon, or the whole string if there is no colon) must be
+// non-empty, dot-delimited, lowercase alphanumeric/underscore segments —
+// exactly the pre-existing rule, unchanged. If a colon is present, the
+// target (everything after the first colon) must additionally be non-empty,
+// match the conservative charset in targetPattern, and contain no ".." path
+// segment (see hasTraversalSegment). The whole string, including any
+// target, is bounded by MaxLength. Validate does not check segments or
+// targets against any known taxonomy — there isn't a fixed one (yet).
 func Validate(s Scope) error {
 	if s == "" {
 		return fmt.Errorf("scope: empty scope is not valid")
@@ -36,24 +150,149 @@ func Validate(s Scope) error {
 		// where the bound exists to avoid unbounded work on bad input.
 		return fmt.Errorf("scope: exceeds max length %d (got %d characters)", MaxLength, len(s))
 	}
-	segments := strings.Split(string(s), ".")
+	op, target, hasTarget := split(s)
+	segments := strings.Split(op, ".")
 	for _, seg := range segments {
 		if !segmentPattern.MatchString(seg) {
 			return fmt.Errorf("scope: invalid segment %q in %q (segments must be lowercase alphanumeric/underscore)", seg, s)
 		}
 	}
+	if hasTarget {
+		if target == "" {
+			return fmt.Errorf("scope: empty target in %q (omit the colon for an untargeted scope)", s)
+		}
+		if !targetPattern.MatchString(target) {
+			return fmt.Errorf("scope: invalid target %q in %q (targets must be letters/digits/./-/_ or /)", target, s)
+		}
+		if hasTraversalSegment(target) {
+			return fmt.Errorf("scope: target %q in %q contains a %q path segment (directory traversal is not a valid target)", target, s, "..")
+		}
+	}
 	return nil
 }
 
-// Covers reports whether the granted scope g authorizes the requested scope r —
-// either an exact match, or g is an ancestor of r in the dotted hierarchy. Granting
-// "projects.spritz" authorizes "projects.spritz.read" and "projects.spritz.write",
-// but not "projects.spritzy" (segment-boundary match, not a raw string prefix).
-func (g Scope) Covers(r Scope) bool {
+// ValidateCapability checks that s is well-formed (via Validate) AND, in
+// addition, that s carries a target. This is the require-target rule
+// decided 2026-08-09 (docs/capability-broker.md decision log, "Capability
+// scope Covers is fail-closed on target; untargeted capability scopes are
+// rejected at grant creation"): Covers is fail-closed on target presence —
+// an untargeted grant does not cover a targeted request, and a targeted
+// grant does not cover an untargeted one — so an untargeted *capability*
+// scope would be a grant that structurally can never authorize the
+// targeted request a real capability operation (git.sign:<repo>, and every
+// operation class named in the design doc) actually makes. Rather than
+// pick a meaning for that dead-or-ambiguous state after the fact (fail
+// open and let it mean "any target," which is exactly the over-scoped
+// grant this workstream exists to prevent — see the decision log entry),
+// this function makes the state unrepresentable at the one place a
+// capability grant's scopes are accepted: one chokepoint per property.
+//
+// Validate itself does NOT enforce this: Validate is also the grammar
+// check for memory scopes, which legitimately have no target (and must
+// keep behaving exactly as they do today — see TestScope_Covers and
+// TestValidate). The require-target rule is specific to capability-kind
+// scopes, which only the caller can identify — this package has no
+// "kind" of its own — so every caller that accepts or persists a
+// capability-kind grant's scopes must call ValidateCapability instead of
+// (or in addition to) Validate. That includes the future capability-grant
+// creation surface (currently gated, issue #96) and the write chokepoints
+// that exist today: store.CreateGrant, store.RequestGrant and
+// store.ApproveGrantRequest (via validateScopesForKind), plus brokerd's
+// grant-cache load path — the one place a capability grant is turned into
+// live signing authority. That last one is what actually defends against a
+// grant row inserted straight into the database (a fixture, or an
+// operator's psql) with a bare untargeted scope: brokerd refuses to cache
+// it, so it can never authorize a signature, even though the ordinary
+// listing reads (store.ListGrants and friends) surface rows as-stored
+// without re-validating — those are display/renewal-expiry paths, not
+// authorization paths (GrantedScopes, the memory read authorizer, filters
+// kind='memory' and never sees a capability row at all). Enforcement lives
+// at the write-and-authorize chokepoints, not on every read; the listing
+// reads are legible, not load-bearing.
+func ValidateCapability(s Scope) error {
+	if err := Validate(s); err != nil {
+		return err
+	}
+	if _, _, hasTarget := split(s); !hasTarget {
+		return fmt.Errorf("scope: capability scope %q must specify a target (a bare operation with no %q-delimited target is not a valid capability scope, decided 2026-08-09 — see docs/capability-broker.md)", s, ":")
+	}
+	return nil
+}
+
+// ValidateMemory checks that s is well-formed (via Validate) AND, in
+// addition, that s carries NO target — the exact dual of ValidateCapability.
+// It is the enforcement point for an invariant this package's SQL consumers
+// silently depend on: memory-fact visibility is filtered in Postgres by
+// scopePrefixes (internal/store/facts.go), which turns each granted scope
+// into a `<scope>.%` LIKE pattern. That predicate treats the WHOLE scope
+// string as an opaque dotted path — it has no notion of the ":" target
+// delimiter this workstream added. So a targeted scope reaching a memory
+// grant or a memory fact would be matched by the SQL as if the target were
+// just more dotted segments: a grant for "git.sign:repo" would make
+// scopePrefixes emit "git.sign:repo.%", which LIKE-matches a fact scoped
+// "git.sign:repo.child" — precisely the cross-target read that Covers'
+// fail-closed target rule forbids in Go, leaking back in through the SQL
+// path that never learned about targets.
+//
+// Rather than teach every LIKE query target-aware Covers semantics (a second
+// copy of the matching rule, in SQL, that would drift from this one — the
+// exact anti-pattern principle 7 warns against), we keep the invariant the
+// SQL already assumes and make it true at the boundary: memory scopes are
+// untargeted, so the SQL path only ever sees the untargeted scopes its
+// prefix logic was written for. Targeted scopes belong exclusively to
+// capability grants, which are never fed to scopePrefixes (they run through
+// brokerd's exact-match Covers, not the memory LIKE path).
+//
+// Existing memory scopes ("identity.basic", "projects.spritz.read", …) carry
+// no colon and pass unchanged; this only rejects the newly-representable
+// targeted form for the one kind that must not carry it. Callers that accept
+// or persist a memory-kind scope (a memory grant's scopes, a proposed fact's
+// scopes) must call ValidateMemory rather than bare Validate.
+func ValidateMemory(s Scope) error {
+	if err := Validate(s); err != nil {
+		return err
+	}
+	if _, _, hasTarget := split(s); hasTarget {
+		return fmt.Errorf("scope: memory scope %q must not specify a %q-delimited target (targets belong to capability scopes only; a targeted memory scope would be matched target-blind by the fact-visibility SQL — see ValidateMemory)", s, ":")
+	}
+	return nil
+}
+
+// opCovers is the pre-existing (unchanged) ancestor-match rule, applied to
+// the operation part of a scope: either an exact match, or g is an ancestor
+// of r in the dotted hierarchy. Granting "projects.spritz" authorizes
+// "projects.spritz.read" and "projects.spritz.write", but not
+// "projects.spritzy" (segment-boundary match, not a raw string prefix).
+func opCovers(g, r string) bool {
 	if g == r {
 		return true
 	}
-	return strings.HasPrefix(string(r), string(g)+".")
+	return strings.HasPrefix(r, g+".")
+}
+
+// Covers reports whether the granted scope g authorizes the requested scope
+// r. The operation part uses the ancestor-match rule above, unchanged. The
+// target part is fail-closed and exact-match-only, decided 2026-08-09
+// (docs/capability-broker.md): whether g has a target must match whether r
+// has a target — an untargeted grant does NOT cover a targeted request (no
+// silent all-targets grant), and symmetrically a targeted grant does not
+// cover an untargeted request (there is no target on the request to compare
+// against "the identical target"). When both are targeted, the targets must
+// be byte-for-byte identical; no prefix, glob, or case-insensitive matching.
+// When neither has a target — i.e. both are memory scopes — this reduces
+// exactly to the pre-existing opCovers check with no target logic in the
+// path at all, which is what keeps memory-scope behavior bit-for-bit
+// unaffected by this function's target-awareness.
+func (g Scope) Covers(r Scope) bool {
+	gOp, gTarget, gHasTarget := split(g)
+	rOp, rTarget, rHasTarget := split(r)
+	if gHasTarget != rHasTarget {
+		return false
+	}
+	if gHasTarget && gTarget != rTarget {
+		return false
+	}
+	return opCovers(gOp, rOp)
 }
 
 // AnyCovers reports whether any scope in granted covers r.

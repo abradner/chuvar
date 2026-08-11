@@ -87,7 +87,7 @@ func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys, signing_policies, capability_grant_identities, capability_grant_tokens`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -122,7 +122,7 @@ func testServerWithBootstrapToken(t *testing.T) (*httptest.Server, string) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys, signing_policies, capability_grant_identities, capability_grant_tokens`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 
@@ -1052,7 +1052,7 @@ func TestWithRequestTimeout_CancelsSlowHandlerContext(t *testing.T) {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys, signing_policies, capability_grant_identities, capability_grant_tokens`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
 

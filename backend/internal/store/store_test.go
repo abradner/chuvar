@@ -40,7 +40,7 @@ func testStore(t *testing.T) (*Store, *pgxpool.Pool) {
 
 	// Isolate each test: truncate everything before it runs rather than after, so a
 	// failed run leaves data behind to inspect.
-	_, err = pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys, propose_write_rate_limits`)
+	_, err = pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch, grant_requests, data_keys, propose_write_rate_limits, signing_policies, capability_grant_identities, capability_grant_tokens`)
 	if err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
@@ -457,6 +457,92 @@ func TestCreateGrant_CapabilityKindWithNoDepthSucceeds(t *testing.T) {
 	}
 }
 
+// TestCreateGrant_CapabilityKindRequiresTargetedScope is the require-target
+// rule decided 2026-08-09 (docs/capability-broker.md): a capability-kind
+// grant with an untargeted scope must be refused at creation, not silently
+// accepted as a grant that (per Covers' fail-closed target semantics) could
+// never authorize a targeted request anyway.
+func TestCreateGrant_CapabilityKindRequiresTargetedScope(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"git.sign"}, "capability", "", nil, "human-reviewer"); err == nil {
+		t.Fatal("CreateGrant() with kind=capability and an untargeted scope: want error, got nil (fail-closed: an untargeted capability scope is rejected at creation)")
+	}
+
+	// No partial grant left behind by the rejected call.
+	grants, err := s.ListGrants(ctx, "agent-a")
+	if err != nil {
+		t.Fatalf("ListGrants() error = %v", err)
+	}
+	if len(grants) != 0 {
+		t.Fatalf("ListGrants() after a rejected CreateGrant() = %+v, want none", grants)
+	}
+}
+
+// TestCreateGrant_MemoryKindUntargetedScopeStillSucceeds pins the "memory
+// scopes are unaffected" half of the same decision: an ordinary memory-kind
+// scope (which never carries a target) must keep working exactly as before,
+// even though it's syntactically "untargeted" in the same sense a rejected
+// capability scope is.
+func TestCreateGrant_MemoryKindUntargetedScopeStillSucceeds(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	g, err := s.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "human-reviewer")
+	if err != nil {
+		t.Fatalf("CreateGrant() with kind=memory and an untargeted (ordinary) scope: error = %v, want nil", err)
+	}
+	if g.Kind != GrantKindMemory {
+		t.Errorf("Kind = %q, want %q", g.Kind, GrantKindMemory)
+	}
+}
+
+// TestCreateGrant_MemoryKindRejectsTargetedScope is the dual of the
+// capability require-target rule, found in review of #99: a memory-kind grant
+// must refuse a *targeted* scope, because the memory read authorizer's LIKE
+// queries (GrantedScopes -> scopePrefixes) match scopes target-blind, so a
+// grant for "git.sign:repo" would authorize reads of a fact scoped
+// "git.sign:repo.child" as if the target were more dotted segments — the
+// cross-target read Covers forbids, leaking back in through SQL.
+func TestCreateGrant_MemoryKindRejectsTargetedScope(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateGrant(ctx, "agent-a", []string{"git.sign:github.com/abradner/chuvar"}, "memory", "facts", nil, "human-reviewer"); err == nil {
+		t.Fatal("CreateGrant() with kind=memory and a targeted scope: want error, got nil (a targeted scope reaching the target-blind fact-visibility SQL is a cross-target read)")
+	}
+
+	grants, err := s.ListGrants(ctx, "agent-a")
+	if err != nil {
+		t.Fatalf("ListGrants() error = %v", err)
+	}
+	if len(grants) != 0 {
+		t.Fatalf("ListGrants() after a rejected CreateGrant() = %+v, want none", grants)
+	}
+}
+
+// TestProposeDiff_RejectsTargetedFactScope closes the concrete exploit Codex
+// described on #99: a fact created with a targeted scope ("git.sign:repo.child")
+// is later readable through a memory grant for the ancestor ("git.sign:repo")
+// because scopePrefixes turns that grant into a "git.sign:repo.%" LIKE pattern
+// that matches the child target-blind. Rejecting the targeted scope at the fact
+// write path keeps the SQL from ever seeing a target.
+func TestProposeDiff_RejectsTargetedFactScope(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	_, err := s.ProposeDiff(ctx, "agent-a", "some fact content", []string{"git.sign:github.com/abradner/chuvar"}, unitVector(0), nil, nil)
+	if err == nil {
+		t.Fatal("ProposeDiff() with a targeted fact scope: want error, got nil (a targeted fact scope is matched target-blind by the visibility SQL)")
+	}
+
+	// An ordinary untargeted fact scope must still propose cleanly.
+	if _, err := s.ProposeDiff(ctx, "agent-a", "some fact content", []string{"preferences.coffee"}, unitVector(1), nil, nil); err != nil {
+		t.Fatalf("ProposeDiff() with an ordinary untargeted scope: error = %v, want nil", err)
+	}
+}
+
 func TestStagedDiffs_ProposeCommitAndSupersede(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
@@ -585,10 +671,13 @@ func TestSearchFacts_ScopeWithUnderscoreDoesNotWildcardMatch(t *testing.T) {
 	// Postgres LIKE treats an unescaped `_` as "match any one character." Without
 	// escaping the granted scope before building the LIKE pattern, a grant on
 	// "projects_alpha" would produce the pattern "projects_alpha.%", which would
-	// ALSO match a fact scoped to "projectsXalpha.secret" for any character X in
-	// that position — an unrelated, never-granted scope leaking through.
+	// ALSO match a fact scoped to "projects1alpha.secret" — the digit standing in
+	// for the `_`'s single-char wildcard — an unrelated, never-granted scope
+	// leaking through. (The near-miss scope must itself be a valid scope now that
+	// ProposeDiff validates fact scopes; a digit in place of the underscore keeps
+	// the adversarial intent while staying lowercase-alphanumeric.)
 	d, err := s.ProposeDiff(ctx, "agent-a", "a fact scoped to an unrelated underscore-adjacent scope",
-		[]string{"projectsXalpha.secret"}, vec, nil, []string{"projectsXalpha.secret"})
+		[]string{"projects1alpha.secret"}, vec, nil, []string{"projects1alpha.secret"})
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -601,7 +690,7 @@ func TestSearchFacts_ScopeWithUnderscoreDoesNotWildcardMatch(t *testing.T) {
 		t.Fatalf("SearchFacts() error = %v", err)
 	}
 	if len(results) != 0 {
-		t.Fatalf(`SearchFacts() granted "projects_alpha" leaked a fact scoped to "projectsXalpha.secret": %+v`, results)
+		t.Fatalf(`SearchFacts() granted "projects_alpha" leaked a fact scoped to "projects1alpha.secret": %+v`, results)
 	}
 }
 

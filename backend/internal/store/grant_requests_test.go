@@ -82,6 +82,67 @@ func TestGrantRequests_ApproveCapabilityKindCarriesNoDepth(t *testing.T) {
 	}
 }
 
+// TestRequestGrant_CapabilityKindRequiresTargetedScope is RequestGrant's
+// half of the require-target rule decided 2026-08-09
+// (docs/capability-broker.md): a capability-kind request with an untargeted
+// scope is refused up front, rather than staged and only rejected —
+// confusingly, for a human reviewer who didn't write the request — at
+// approval time.
+func TestRequestGrant_CapabilityKindRequiresTargetedScope(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := s.RequestGrant(ctx, "agent-a", []string{"git.sign"}, "capability", "", nil, ""); err == nil {
+		t.Fatal("RequestGrant() with kind=capability and an untargeted scope: want error, got nil")
+	}
+}
+
+// TestApproveGrantRequest_RejectsUntargetedCapabilityScopeInsertedDirectly
+// proves the defense-in-depth half of the same decision: grant_requests has
+// no DB-level format constraint on requested_scopes (plain TEXT[]), so
+// RequestGrant's own validation is bypassable by any path that inserts a
+// row directly — a fixture, an operator's psql, a future bulk-import
+// surface. ApproveGrantRequest must still refuse to turn that row into a
+// live grant, loudly, rather than approve it into a capability grant that
+// (per Covers' fail-closed target semantics) could never cover anything.
+func TestApproveGrantRequest_RejectsUntargetedCapabilityScopeInsertedDirectly(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+
+	var id string
+	err := pool.QueryRow(ctx, `
+		INSERT INTO grant_requests (subject, requested_scopes, kind, depth, status)
+		VALUES ($1, $2, 'capability', NULL, 'pending')
+		RETURNING id
+	`, "agent-a", []string{"git.sign"}).Scan(&id)
+	if err != nil {
+		t.Fatalf("inserting grant_requests fixture directly: %v", err)
+	}
+
+	if _, err := s.ApproveGrantRequest(ctx, id, "human-reviewer"); err == nil {
+		t.Fatal("ApproveGrantRequest() on a directly-inserted request with an untargeted capability scope: want error, got nil")
+	}
+
+	// No partial grant left behind by the rejected approval.
+	grants, err := s.ListGrants(ctx, "agent-a")
+	if err != nil {
+		t.Fatalf("ListGrants() error = %v", err)
+	}
+	if len(grants) != 0 {
+		t.Fatalf("ListGrants() after a rejected approval = %+v, want none", grants)
+	}
+
+	// The request itself is left exactly as found — still pending, not
+	// silently marked approved or denied by the failed attempt.
+	got, err := s.GetGrantRequest(ctx, id)
+	if err != nil {
+		t.Fatalf("GetGrantRequest() error = %v", err)
+	}
+	if got.Status != GrantRequestPending {
+		t.Errorf("Status after a rejected approval attempt = %q, want %q (unchanged)", got.Status, GrantRequestPending)
+	}
+}
+
 func TestGrantRequests_Deny(t *testing.T) {
 	s, _ := testStore(t)
 	ctx := context.Background()
