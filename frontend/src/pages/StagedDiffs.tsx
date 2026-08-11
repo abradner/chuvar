@@ -6,6 +6,10 @@ const VERDICT_LABEL: Record<string, string> = {
   novel: "Novel",
   duplicate: "Duplicate",
   contradiction: "⚠ Contradiction — review carefully",
+  // The proposer only holds summary-depth access to the nearest match, so the
+  // backend withheld whether this is an exact duplicate or a paraphrase (and
+  // the candidate fact ID) — see client.ts's StagedDiff.dedupe_verdict doc.
+  needs_review: "⚠ Needs review — proposer has limited visibility into a possible match",
 };
 
 type TargetFactState = { status: "loading" } | { status: "loaded"; fact: Fact } | { status: "error"; message: string };

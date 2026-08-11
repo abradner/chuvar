@@ -60,6 +60,20 @@ func scopePrefixes(grantedScopes []string) []string {
 	return prefixes
 }
 
+// grantedScopeStrings extracts the flat scope strings from granted, discarding
+// depth — for the LIKE-prefix visibility helpers (scopePrefixes,
+// factVisibleToScopes) that only ever needed scope coverage, never depth.
+// findDedupeCandidate needs both: flat scopes for its SQL visibility filter,
+// and the full GrantedScope slice (with depth) for effectiveDepth once a
+// candidate is found — see that function's doc comment.
+func grantedScopeStrings(granted []GrantedScope) []string {
+	out := make([]string, len(granted))
+	for i, g := range granted {
+		out[i] = g.Scope
+	}
+	return out
+}
+
 // rrfK is the standard Reciprocal Rank Fusion smoothing constant (Cormack et al.'s
 // original RRF paper uses 60; it's not sensitive to small changes, no need to make
 // it configurable yet).

@@ -24,14 +24,19 @@ const dedupeCosineThreshold = 0.15
 // active facts before returning. It never writes to `facts` directly — see
 // AGENTS.md §3.1; only CommitDiff does that, and only for an approved diff.
 //
-// proposerGrantedScopes is the proposing subject's current granted scopes — used
-// two ways:
+// proposerGrantedScopes is the proposing subject's current granted (scope, depth)
+// pairs — used three ways:
 //   - The dedupe candidate search only considers facts covered by these scopes
 //     (see findDedupeCandidate). Without this, an ungranted agent could propose
 //     guessed sensitive content and distinguish "duplicate"/"contradiction" from
 //     "novel" via the returned verdict, then reuse the leaked candidate fact ID as
 //     targetFactID — a confidentiality leak through a side channel that isn't the
 //     read path at all. Found in review.
+//   - Independently of scope coverage, findDedupeCandidate also depth-gates what
+//     it discloses about a candidate it did find: a proposer holding only
+//     summary depth on the candidate's scopes gets a coarser DedupeReview verdict
+//     and no candidate ID, never the precise duplicate/contradiction split — see
+//     that function's doc comment (issue #83).
 //   - If targetFactID is set, it must be covered by these scopes too: a proposer
 //     can only target a fact they can already read. Without this, an agent could
 //     supply an arbitrary fact UUID (guessed, brute-forced, or leaked exactly as
@@ -39,7 +44,7 @@ const dedupeCosineThreshold = 0.15
 //     the target's current content (internal/api's getFact / the frontend) — a
 //     human reviewer would at least see the replacement, but this check stops the
 //     proposal from ever being staged in the first place. Also found in review.
-func (s *Store) ProposeDiff(ctx context.Context, subject, content string, scopes []string, embedding []float32, targetFactID *string, proposerGrantedScopes []string) (StagedDiff, error) {
+func (s *Store) ProposeDiff(ctx context.Context, subject, content string, scopes []string, embedding []float32, targetFactID *string, proposerGrantedScopes []GrantedScope) (StagedDiff, error) {
 	if content == "" {
 		return StagedDiff{}, fmt.Errorf("store: diff content must not be empty")
 	}
@@ -57,8 +62,10 @@ func (s *Store) ProposeDiff(ctx context.Context, subject, content string, scopes
 		return StagedDiff{}, err
 	}
 
+	flatGrantedScopes := grantedScopeStrings(proposerGrantedScopes)
+
 	if targetFactID != nil {
-		visible, err := s.factVisibleToScopes(ctx, *targetFactID, proposerGrantedScopes)
+		visible, err := s.factVisibleToScopes(ctx, *targetFactID, flatGrantedScopes)
 		if err != nil {
 			return StagedDiff{}, err
 		}
@@ -134,22 +141,47 @@ func (s *Store) factVisibleToScopes(ctx context.Context, id string, grantedScope
 // reports novel — that's a degraded mode, not a silent failure, since the caller
 // chose not to provide one.
 //
-// KNOWN GAP: scope-filtered but NOT depth-filtered, unlike SearchFacts (facts.go).
-// grantedScopes arrives from GrantedScopes, which discards depth entirely, so a
-// caller holding only a summary-depth grant still gets a full-fidelity "duplicate"
-// verdict plus the matching fact's ID when it guesses that fact's exact content —
-// a guess-and-confirm oracle over content SearchFacts would have redacted to a
-// summary. Verified reproducible: exact guess returns duplicate + candidate ID,
-// wrong guess returns novel. Predates depth enforcement (the depth column was
-// inert when this was written) and is not fixed here because the useful fix is a
-// design question, not a filter: dedupe legitimately needs to compare against
-// facts the proposer cannot read, so narrowing the search to full-depth-granted
-// facts would silently degrade dedupe into letting duplicates through. Tracked as
-// its own ticket rather than guessed at: Notion, "Known gap: propose_write's
-// dedupe verdict is a content-confirmation oracle that bypasses grant depth"
-// (project: Enforcement Boundary & Known Gaps). Notion is this project's
-// issue tracker — GitHub issues are not used.
-func (s *Store) findDedupeCandidate(ctx context.Context, content string, embedding []float32, grantedScopes []string) (DedupeVerdict, string, error) {
+// Scope-filtered AND depth-filtered, matching SearchFacts' (facts.go) content
+// disclosure rule — this closes issue #83. The candidate search itself is still
+// unrestricted by depth: it must compare against every fact the proposer's
+// SCOPES cover, including ones only readable at summary depth, or genuine
+// duplicates/contradictions against those facts would silently go undetected
+// (a correctness regression, not an acceptable trade for the confidentiality
+// fix — see the issue's own framing). What changes is what gets DISCLOSED about
+// the match found: once a candidate is found, its effective depth for this
+// proposer (effectiveDepth, over the candidate's own scope tags) gates the
+// verdict precision, exactly as it already gates Content vs Summary in
+// SearchFacts.
+//
+//   - depth "facts" or "full": the proposer can already read this candidate's
+//     exact content via SearchFacts, so there is nothing new to leak by also
+//     disclosing the precise verdict here — duplicate/contradiction + the
+//     candidate's fact ID are returned unchanged from the pre-fix behavior.
+//   - depth "summary" (or, defensively, any other/invalid value — effectiveDepth
+//     itself fails closed to "summary"): both the exact/near distinction and the
+//     candidate ID are withheld. The verdict collapses to DedupeReview, which is
+//     still a real, actionable signal ("something you can't fully see may
+//     already cover this, expect human review") without confirming that a
+//     guessed string was a byte-for-byte match — the guess-and-confirm oracle
+//     issue #83 describes. Verified reproducible before this fix: an exact
+//     content guess returned duplicate + the real fact ID; a wrong guess
+//     returned novel. See store_test.go's TestProposeDiff_Dedupe* for the
+//     regression coverage (both the redaction and that genuine duplicates are
+//     still flagged, not silently let through as novel).
+//
+// RESIDUAL GAP, named rather than left implicit (CLAUDE.md principle 8): a
+// summary-depth holder who proposes many candidate guesses can still learn
+// "novel" (no match anywhere near this content, in embedding space, within my
+// scopes) vs "needs_review" (something close exists) — a coarse, topic-level
+// signal, not a content-confirmation one. This is inherent to comparing a new
+// proposal against facts outside the proposer's read depth at all, which the
+// dedupe feature requires by design (see above); it is not closable by a
+// filter here without reintroducing the correctness regression the KNOWN GAP
+// this replaces already rejected. The adversary this can't stop: a proposer
+// that runs enough embedding-adjacent guesses to roughly localize a low-entropy
+// summary-depth fact's topic. It can no longer confirm exact wording or obtain
+// the fact's ID through this path.
+func (s *Store) findDedupeCandidate(ctx context.Context, content string, embedding []float32, grantedScopes []GrantedScope) (DedupeVerdict, string, error) {
 	if len(embedding) == 0 || len(grantedScopes) == 0 {
 		return DedupeNovel, "", nil
 	}
@@ -158,11 +190,12 @@ func (s *Store) findDedupeCandidate(ctx context.Context, content string, embeddi
 	if err != nil {
 		return "", "", err
 	}
-	prefixes := scopePrefixes(grantedScopes)
+	flatScopes := grantedScopeStrings(grantedScopes)
+	prefixes := scopePrefixes(flatScopes)
 
 	row, err := s.q.FindDedupeCandidate(ctx, sqlcgen.FindDedupeCandidateParams{
 		Embedding1:    *embParam,
-		GrantedScopes: grantedScopes,
+		GrantedScopes: flatScopes,
 		ScopePrefixes: prefixes,
 		Embedding2:    *embParam,
 	})
@@ -173,14 +206,24 @@ func (s *Store) findDedupeCandidate(ctx context.Context, content string, embeddi
 		return "", "", fmt.Errorf("store: dedupe candidate search: %w", err)
 	}
 
+	var verdict DedupeVerdict
 	switch {
 	case row.Content == content:
-		return DedupeDuplicate, row.ID, nil
+		verdict = DedupeDuplicate
 	case row.Distance.Float64 < dedupeCosineThreshold:
-		return DedupeContradiction, row.ID, nil
+		verdict = DedupeContradiction
 	default:
 		return DedupeNovel, "", nil
 	}
+
+	depth, err := effectiveDepth(row.Scopes, grantedScopes)
+	if err != nil {
+		return "", "", fmt.Errorf("store: dedupe candidate depth: %w", err)
+	}
+	if depth == "summary" {
+		return DedupeReview, "", nil
+	}
+	return verdict, row.ID, nil
 }
 
 // GetStagedDiff fetches a single diff by ID. Used by the approval UI's REST API to

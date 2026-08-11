@@ -51,6 +51,19 @@ const (
 	DedupeNovel         DedupeVerdict = "novel"
 	DedupeDuplicate     DedupeVerdict = "duplicate"
 	DedupeContradiction DedupeVerdict = "contradiction"
+	// DedupeReview is returned in place of DedupeDuplicate/DedupeContradiction
+	// when the nearest dedupe candidate's effective depth for the proposer
+	// (facts.go's effectiveDepth, applied to the candidate's own scope tags) is
+	// "summary" — see findDedupeCandidate (staged_diffs.go) for the full
+	// rationale (issue #83). It tells an honest proposer the same actionable
+	// thing contradiction already does ("expect human review, don't assume this
+	// is safe to auto-merge") without confirming whether the match was exact
+	// (duplicate) or a near-paraphrase (contradiction): that distinction is
+	// exactly the content-confirmation oracle a guessing adversary would use.
+	// Never persisted for a candidate the proposer holds "facts" or "full"
+	// depth on — those already disclose full content via SearchFacts, so the
+	// precise verdict there leaks nothing new.
+	DedupeReview DedupeVerdict = "needs_review"
 )
 
 type DiffStatus string

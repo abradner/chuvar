@@ -15,7 +15,14 @@ SELECT EXISTS (
 -- embedding_1/embedding_2 are the same repeated-named-param workaround used
 -- elsewhere in this migration (see facts.sql's SearchFacts) — bound to the
 -- identical value at the call site.
-SELECT f.id, f.content, f.embedding <=> @embedding_1::vector AS distance
+--
+-- scopes is the candidate fact's own scope tags, same array_agg-subquery
+-- shape as GetFact/SearchFacts — findDedupeCandidate (staged_diffs.go) needs
+-- them to compute the candidate's effective depth for the proposer
+-- (facts.go's effectiveDepth) before deciding how much of the verdict it's
+-- allowed to disclose (issue #83).
+SELECT f.id, f.content, f.embedding <=> @embedding_1::vector AS distance,
+       (SELECT array_agg(fs.scope) FROM fact_scopes fs WHERE fs.fact_id = f.id)::text[] AS scopes
 FROM facts f
 WHERE f.invalid_at IS NULL AND f.embedding IS NOT NULL
   AND EXISTS (SELECT 1 FROM fact_scopes fs WHERE fs.fact_id = f.id)

@@ -49,6 +49,12 @@ type Querier interface {
 	// embedding_1/embedding_2 are the same repeated-named-param workaround used
 	// elsewhere in this migration (see facts.sql's SearchFacts) — bound to the
 	// identical value at the call site.
+	//
+	// scopes is the candidate fact's own scope tags, same array_agg-subquery
+	// shape as GetFact/SearchFacts — findDedupeCandidate (staged_diffs.go) needs
+	// them to compute the candidate's effective depth for the proposer
+	// (facts.go's effectiveDepth) before deciding how much of the verdict it's
+	// allowed to disclose (issue #83).
 	FindDedupeCandidate(ctx context.Context, arg FindDedupeCandidateParams) (FindDedupeCandidateRow, error)
 	// A regressed sign counter is treated as a clone signal and fails closed by
 	// revoking the credential in the same statement that flags it — a warning

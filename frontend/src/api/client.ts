@@ -32,7 +32,14 @@ export interface StagedDiff {
   proposed_scopes: string[];
   target_fact_id?: string;
   status: "pending" | "approved" | "rejected" | "committed";
-  dedupe_verdict?: "novel" | "duplicate" | "contradiction";
+  // needs_review: the nearest dedupe candidate is one this diff's proposer only
+  // holds summary-depth access to — backend collapses duplicate/contradiction
+  // into this coarser verdict and withholds dedupe_candidate_fact_id rather
+  // than confirm an exact-content guess (chuvar issue #83). The reviewer still
+  // sees the real fact via target_fact_id/getFact if the diff sets one; this
+  // verdict is about what the PROPOSER learned, not what the human reviewer
+  // can see.
+  dedupe_verdict?: "novel" | "duplicate" | "contradiction" | "needs_review";
   dedupe_candidate_fact_id?: string;
   created_at: string;
 }

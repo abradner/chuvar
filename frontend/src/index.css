@@ -207,6 +207,16 @@ button.secondary {
   font-weight: 600;
 }
 
+/* Same danger palette as .verdict-contradiction — needs_review is the same
+   "don't auto-approve, a human should look" tier of signal, just for a
+   proposer with only summary-depth visibility into the match (see
+   StagedDiffs.tsx's VERDICT_LABEL comment). */
+.verdict-needs_review {
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-weight: 600;
+}
+
 .actions {
   display: flex;
   gap: 8px;

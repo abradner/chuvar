@@ -181,14 +181,19 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 		scopeStrs[i] = string(sc)
 	}
 
-	// The subject's current granted scopes gate both the dedupe candidate search
-	// and target_fact_id visibility inside ProposeDiff — see that function's doc
-	// comment. Fetched here rather than inside the store layer because Bouncer
-	// already owns "what does this subject need to act" plumbing (Embedder,
-	// Classifier); Store just persists what it's handed.
-	grantedScopes, err := b.Store.GrantedScopes(ctx, subject)
+	// The subject's current granted (scope, depth) pairs gate the dedupe
+	// candidate search, its verdict precision, and target_fact_id visibility
+	// inside ProposeDiff — see that function's doc comment. GrantedScopeDepths,
+	// not the flat GrantedScopes, because findDedupeCandidate needs each
+	// covering grant's depth (not just scope coverage) to decide how much of
+	// the dedupe verdict a summary-depth proposer is allowed to see (issue
+	// #83) — the same depth data SearchFacts already uses for its own
+	// content/summary split. Fetched here rather than inside the store layer
+	// because Bouncer already owns "what does this subject need to act"
+	// plumbing (Embedder, Classifier); Store just persists what it's handed.
+	grantedScopes, err := b.Store.GrantedScopeDepths(ctx, subject)
 	if err != nil {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: granted scopes: %w", err)
+		return store.StagedDiff{}, fmt.Errorf("bouncer: granted scope depths: %w", err)
 	}
 	diff, err := b.Store.ProposeDiff(ctx, subject, content, scopeStrs, vec, targetFactID, grantedScopes)
 	if err != nil {
