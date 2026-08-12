@@ -137,6 +137,18 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("GET /api/tokens", a.listTokens)
 	mux.HandleFunc("POST /api/tokens", a.createToken)
 	mux.HandleFunc("POST /api/tokens/{id}/revoke", a.revokeToken)
+	// Agent-class tokens (agent_tokens.go): a structurally distinct
+	// credential from the reviewer tokens above (its own table, its own
+	// hash namespace) that a later PR hands to mcpserver in place of a raw
+	// database connection (AGENTS.md §3.6, ticket E3). Minting is gated by
+	// requireStrongFactor unconditionally — unlike createToken there is no
+	// bootstrap carve-out, because minting a standing agent credential
+	// always happens from an already-authenticated, already-enrolled
+	// reviewer session; see createAgentToken's doc comment. List/revoke are
+	// bearer-only, matching the reviewer token routes above.
+	mux.HandleFunc("GET /api/agent-tokens", a.listAgentTokens)
+	mux.HandleFunc("POST /api/agent-tokens", a.requireStrongFactor(a.createAgentToken))
+	mux.HandleFunc("POST /api/agent-tokens/{id}/revoke", a.revokeAgentToken)
 	// WebAuthn (passkey) ceremonies — see webauthn.go's package-level doc
 	// comment for the two-endpoint-per-ceremony shape and why the strong-
 	// factor gate sits on *begin*, not finish.

@@ -11,6 +11,16 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
+type AgentToken struct {
+	ID         string
+	Subject    string
+	Label      string
+	TokenHash  []byte
+	CreatedAt  time.Time
+	LastUsedAt *time.Time
+	RevokedAt  *time.Time
+}
+
 type AuditLog struct {
 	ID             string
 	EventType      string
