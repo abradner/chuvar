@@ -495,6 +495,63 @@ func TestAgentSearch_InsufficientScopeIsAudited(t *testing.T) {
 	}
 }
 
+// TestAgentSearch_BodySuppliedSubjectIsIgnored proves a raw JSON body
+// containing an unrecognized "subject" field (agentSearchRequest declares no
+// such field — see agent_routes.go's package doc comment) cannot spoof a
+// different actor's scope: the search is always scoped to the authenticated
+// agent token's subject, not a body-supplied one. Seeds a fact visible only
+// under a grant held by "victim" — none held by the authenticated "agent-a".
+// If the handler used the body-supplied subject to check grants, this would
+// return status=ok with the victim's fact disclosed; it must instead return
+// insufficient_scope, and the resulting audit row must record "agent-a", not
+// "victim".
+func TestAgentSearch_BodySuppliedSubjectIsIgnored(t *testing.T) {
+	srv, st, pool, token := agentTestServer(t, "agent-a", nil)
+	ctx := context.Background()
+
+	mustCommitAgentFact(t, st, "victim", "victim's secret medical detail", []string{"identity.medical"}, "medical summary")
+	if _, err := st.CreateGrant(ctx, "victim", []string{"identity.medical"}, "memory", "full", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+	// Deliberately no grant for "agent-a" on identity.medical.
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/agent/search",
+		bytes.NewReader([]byte(`{"subject":"victim","query":"secret","requested_scopes":["identity.medical"],"limit":10}`)))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	out := decodeInto[agentSearchResponse](t, resp)
+	if out.Status != "insufficient_scope" {
+		t.Fatalf("status = %q, want insufficient_scope (a body-supplied \"subject\":\"victim\" must not borrow victim's grant)", out.Status)
+	}
+	if len(out.Facts) != 0 {
+		t.Fatalf("facts = %+v, want none disclosed", out.Facts)
+	}
+	if len(out.MissingScopes) != 1 || out.MissingScopes[0] != "identity.medical" {
+		t.Fatalf("missing_scopes = %v, want [identity.medical]", out.MissingScopes)
+	}
+
+	var subject string
+	if err := pool.QueryRow(ctx,
+		`SELECT subject FROM audit_log WHERE event_type = 'insufficient_scope' ORDER BY created_at DESC LIMIT 1`,
+	).Scan(&subject); err != nil {
+		t.Fatalf("querying audit_log.subject: %v", err)
+	}
+	if subject != "agent-a" {
+		t.Fatalf("audit_log.subject = %q, want the authenticated agent's subject %q (body-supplied \"subject\" must be ignored)", subject, "agent-a")
+	}
+}
+
 // --- confused deputy, both directions -----------------------------------
 
 // TestAgentListenerRejectsReviewerToken and
@@ -734,6 +791,42 @@ func TestAgentProposals_RateLimited(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("rate_limited audit rows = %d, want 1", n)
+	}
+}
+
+// TestAgentPropose_BodySuppliedSubjectIsIgnored proves a raw JSON body
+// containing an unrecognized "subject" field (agentProposalRequest declares
+// no such field — see agent_routes.go's package doc comment) cannot
+// attribute a staged diff to a different actor: the diff's Subject column
+// always matches the authenticated agent token's subject, not a
+// body-supplied one.
+func TestAgentPropose_BodySuppliedSubjectIsIgnored(t *testing.T) {
+	srv, st, _, token := agentTestServer(t, "agent-a", nil)
+	ctx := context.Background()
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/agent/proposals",
+		bytes.NewReader([]byte(`{"subject":"victim","content":"spoofed proposal","proposed_scopes":["preferences.coffee"]}`)))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	out := decodeInto[agentProposalResponse](t, resp)
+
+	diff, err := st.GetStagedDiff(ctx, out.DiffID)
+	if err != nil {
+		t.Fatalf("GetStagedDiff() error = %v", err)
+	}
+	if diff.Subject != "agent-a" {
+		t.Fatalf("staged diff Subject = %q, want the authenticated agent's subject %q (body-supplied \"subject\" must be ignored)", diff.Subject, "agent-a")
 	}
 }
 

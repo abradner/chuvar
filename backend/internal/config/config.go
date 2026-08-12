@@ -25,6 +25,18 @@ type Config struct {
 	// still be needlessly wide open. Set it explicitly to widen on purpose.
 	HTTPAddr string
 
+	// AgentAddr is where the agent-facing HTTP surface (internal/api's
+	// AgentRoutes(), cmd/apiserver/main.go's second http.Server) listens —
+	// HTTPAddr's direct sibling, not its counterpart: entirely separate from
+	// the reviewer listener, on its own port, so an agent process holding
+	// nothing but its own agent token can't reach the reviewer routes even at
+	// the network layer (AGENTS.md §3.6, ticket E3). Defaults to
+	// loopback-only (127.0.0.1) for the same reason HTTPAddr does — gated by
+	// requireAgentAuth as the primary control, but binding all interfaces by
+	// default on top of that would still be needlessly wide open. Set it
+	// explicitly to widen on purpose.
+	AgentAddr string
+
 	// RequestTimeout bounds individual request handling.
 	RequestTimeout time.Duration
 
@@ -52,6 +64,7 @@ func Load() (Config, error) {
 	return Config{
 		DatabaseURL:                 databaseURL,
 		HTTPAddr:                    envOr("HTTP_ADDR", "127.0.0.1:8080"),
+		AgentAddr:                   envOr("CHUVAR_AGENT_ADDR", "127.0.0.1:8081"),
 		RequestTimeout:              envDurationOr("REQUEST_TIMEOUT", 10*time.Second),
 		ProposeWriteRateLimit:       envIntOr("PROPOSE_WRITE_RATE_LIMIT", 20),
 		ProposeWriteRateLimitWindow: envDurationOr("PROPOSE_WRITE_RATE_LIMIT_WINDOW", time.Minute),

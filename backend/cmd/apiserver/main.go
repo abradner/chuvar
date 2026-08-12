@@ -114,24 +114,21 @@ func run() error {
 		ReadHeaderTimeout: cfg.RequestTimeout,
 	}
 
-	// CHUVAR_AGENT_ADDR is a second, entirely separate listener carrying only
-	// AgentRoutes() (internal/api/agent_routes.go) — the agent-authenticated
-	// HTTP surface a later PR points mcpserver at instead of a raw database
-	// credential (AGENTS.md §3.6, ticket E3). This is deliberately not
-	// cfg.HTTPAddr: an agent process holding nothing but its own agent token
-	// must not be able to reach the reviewer routes even at the network
-	// layer, on top of requireAgentAuth already rejecting a reviewer token
-	// that tried and requireAuth already rejecting an agent token that tried
-	// the other way. Not part of config.Config for the same reason
-	// CORS_ALLOWED_ORIGIN above isn't: specific to this binary, not shared
-	// with cmd/mcpserver. Defaults to loopback-only, same reasoning as
-	// HTTP_ADDR's own default (config.Load's doc comment).
-	agentAddr := os.Getenv("CHUVAR_AGENT_ADDR")
-	if agentAddr == "" {
-		agentAddr = "127.0.0.1:8081"
-	}
+	// cfg.AgentAddr (CHUVAR_AGENT_ADDR, config.Config's doc comment) is a
+	// second, entirely separate listener carrying only AgentRoutes()
+	// (internal/api/agent_routes.go) — the agent-authenticated HTTP surface a
+	// later PR points mcpserver at instead of a raw database credential
+	// (AGENTS.md §3.6, ticket E3). This is deliberately not cfg.HTTPAddr: an
+	// agent process holding nothing but its own agent token must not be able
+	// to reach the reviewer routes even at the network layer, on top of
+	// requireAgentAuth already rejecting a reviewer token that tried and
+	// requireAuth already rejecting an agent token that tried the other way.
+	// Unlike CORS_ALLOWED_ORIGIN above (an optional origin string specific to
+	// this binary), AgentAddr is a listen address — HTTPAddr's direct
+	// sibling — so it belongs in config.Config alongside it rather than read
+	// ad hoc here.
 	agentServer := &http.Server{
-		Addr:              agentAddr,
+		Addr:              cfg.AgentAddr,
 		Handler:           a.AgentRoutes(),
 		ReadTimeout:       cfg.RequestTimeout,
 		WriteTimeout:      cfg.RequestTimeout,
