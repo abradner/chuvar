@@ -2,18 +2,18 @@ package mcptools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/abradner/chuvar/backend/internal/scope"
-	"github.com/abradner/chuvar/backend/internal/store"
+	"github.com/abradner/chuvar/backend/internal/agentclient"
 )
 
 // maxJustificationLength bounds request_grant's free-text justification, same
 // resource-exhaustion reasoning as maxContentLength/maxQueryLength in mcptools.go
 // — this is display text shown to a human reviewer, not something a real request
-// needs to pad out.
+// needs to pad out. Mirrors agent_routes.go's agentMaxJustificationLength.
 const maxJustificationLength = 2048
 
 type requestGrantArgs struct {
@@ -28,7 +28,30 @@ type requestGrantOutput struct {
 	Status    string `json:"status"`
 }
 
-func registerRequestGrant(s *mcp.Server, subject string, st *store.Store) {
+// registerRequestGrant registers request_grant as a thin adapter over
+// client.RequestGrant, POST /api/agent/grant-requests.
+//
+// Old -> new mapping (the brief's required diff, for this tool):
+//   - The justification length cap — STILL HERE, client-side, as a courtesy;
+//     agentRequestGrant re-enforces it server-side regardless.
+//   - The requested_scopes count cap — STILL HERE, same reasoning.
+//   - The empty-requested_scopes check, per-scope scope.Validate, the
+//     depth-default-to-"facts" + store.ValidDepth check, and the
+//     negative-ttl_seconds rejection — ALL DELETED here. None of these are
+//     size caps, they're domain validation, and agentRequestGrant
+//     (agent_routes.go) already reproduces every one of them line for line —
+//     including the negative-ttl_seconds check's own "must not silently
+//     collapse to no-expiry" reasoning. A caller that gets any of these
+//     wrong now finds out one HTTP round trip later than it used to, via the
+//     server's 400 (*agentclient.ValidationError, returned verbatim below)
+//     instead of a local error — same externally-visible outcome (a tool
+//     error mentioning the real problem), one fewer place the rule is
+//     encoded.
+//   - st.RequestGrant(ctx, subject, ...) — DELETED here, MOVED to
+//     agentRequestGrant, which calls the identical store method using the
+//     subject its own bearer-token auth resolved. This tool holds no
+//     *store.Store to call it with any more.
+func registerRequestGrant(s *mcp.Server, client *agentclient.Client) {
 	falsePtr := false
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "request_grant",
@@ -42,53 +65,27 @@ func registerRequestGrant(s *mcp.Server, subject string, st *store.Store) {
 			IdempotentHint:  false,
 		},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args requestGrantArgs) (*mcp.CallToolResult, requestGrantOutput, error) {
-		if len(args.RequestedScopes) == 0 {
-			return nil, requestGrantOutput{}, fmt.Errorf("request_grant: requested_scopes must not be empty")
-		}
 		if len(args.RequestedScopes) > maxScopesPerRequest {
 			return nil, requestGrantOutput{}, fmt.Errorf("request_grant: requested_scopes exceeds max of %d", maxScopesPerRequest)
 		}
 		if len(args.Justification) > maxJustificationLength {
 			return nil, requestGrantOutput{}, fmt.Errorf("request_grant: justification exceeds max length of %d", maxJustificationLength)
 		}
-		for _, sc := range args.RequestedScopes {
-			if err := scope.Validate(scope.Scope(sc)); err != nil {
-				return nil, requestGrantOutput{}, fmt.Errorf("request_grant: %w", err)
-			}
-		}
 
-		depth := args.Depth
-		if depth == "" {
-			depth = "facts"
-		}
-		if !store.ValidDepth(depth) {
-			return nil, requestGrantOutput{}, fmt.Errorf("request_grant: depth must be one of summary, facts, full (got %q)", depth)
-		}
-
-		// A negative ttl_seconds used to fall through the `> 0` check below
-		// exactly like an omitted one, silently turning "an invalid value" into
-		// "no expiry requested" — the opposite of what the tool's own contract
-		// promises (omission, not an invalid value, means no expiry). Reject it
-		// explicitly instead. Zero is still treated as "omitted": ttl_seconds
-		// has no pointer type to distinguish an explicit 0 from a field the
-		// caller left out entirely, and 0 is nonsensical either reading.
-		// Found in review.
-		if args.TTLSeconds < 0 {
-			return nil, requestGrantOutput{}, fmt.Errorf("request_grant: ttl_seconds must be positive if provided (got %d)", args.TTLSeconds)
-		}
-		var ttl *int
-		if args.TTLSeconds > 0 {
-			ttl = &args.TTLSeconds
-		}
-
-		// kind is hardcoded to memory — agents can't request a capability-kind
-		// grant through this tool (no such flow exists yet; see store.CreateGrant's
-		// doc comment on the equivalent REST path).
-		req, err := st.RequestGrant(ctx, subject, args.RequestedScopes, string(store.GrantKindMemory), depth, ttl, args.Justification)
+		res, err := client.RequestGrant(ctx, agentclient.GrantRequestRequest{
+			RequestedScopes: args.RequestedScopes,
+			Depth:           args.Depth,
+			TTLSeconds:      args.TTLSeconds,
+			Justification:   args.Justification,
+		})
 		if err != nil {
+			var verr *agentclient.ValidationError
+			if errors.As(err, &verr) {
+				return nil, requestGrantOutput{}, verr
+			}
 			return nil, requestGrantOutput{}, toolError("request_grant", err)
 		}
 
-		return nil, requestGrantOutput{RequestID: req.ID, Status: string(req.Status)}, nil
+		return nil, requestGrantOutput{RequestID: res.RequestID, Status: res.Status}, nil
 	})
 }

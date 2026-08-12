@@ -2,15 +2,12 @@ package mcptools
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/abradner/chuvar/backend/internal/embed"
-	"github.com/abradner/chuvar/backend/internal/scope"
-	"github.com/abradner/chuvar/backend/internal/store"
+	"github.com/abradner/chuvar/backend/internal/agentclient"
 )
 
 type readArgs struct {
@@ -19,25 +16,10 @@ type readArgs struct {
 	Limit           int      `json:"limit,omitempty" jsonschema:"max facts to return, default 20, max 200"`
 }
 
-// factView projects a Fact through the depth of the grant(s) that authorized
-// returning it (store.SearchFacts' effectiveDepth): Content is set at "facts" or
-// "full" depth, Summary at "summary" depth — never both, and Depth reports which
-// one applies so a caller can tell "no summary" (empty Summary at summary depth,
-// e.g. a pre-migration fact with none generated yet) apart from "not summary
-// depth" (empty Summary because Content was returned instead).
-//
-// Provenance is "full" depth's own addition on top of "facts": the ladder was
-// designed as summary → facts → *full provenance* (the init migration's
-// "progressive disclosure per Notion §3"), so "full" adds a fact's provenance
-// to its content rather than more content. There is exactly one gate for this,
-// and it is not here: store.SearchFacts sets Fact.Provenance only when that
-// row's own effective depth is "full" (see its doc comment), so copying it
-// through whenever it's non-nil is the whole of this function's job —
-// factView has no separate depth check to get wrong, because Provenance being
-// nil already means "not full depth" for that fact. Shipping decided_by here
-// discloses a human's identity (who approved the diff that produced this
-// fact), which the fact's content alone never does — exactly why this is its
-// own grant level rather than folded into "facts".
+// factView mirrors agentclient.Fact field-for-field — the response shape this
+// tool has always returned, kept identical across the cutover (the brief's
+// "existing, unchanged output types") even though the request now goes over
+// HTTP instead of directly against store.Store.
 type factView struct {
 	ID         string              `json:"id"`
 	Content    string              `json:"content,omitempty"`
@@ -47,11 +29,11 @@ type factView struct {
 	Provenance *factProvenanceView `json:"provenance,omitempty"`
 }
 
-// factProvenanceView is the JSON shape of a "full"-depth fact's provenance:
-// store.FactProvenance's fields plus the bi-temporal window's two starts,
-// CreatedAt (system time) and ValidAt (real-world time), which live on the
-// Fact itself. Times are formatted as RFC3339 strings, matching the rest of
-// this package's *string time convention — see formatTimePtr.
+// factProvenanceView mirrors agentclient.FactProvenance field-for-field.
+// Times arrive already formatted as RFC3339 strings from the server (see
+// agent_routes.go's agentFormatTimePtr) — this tool no longer does any of its
+// own time formatting, unlike the pre-cutover version, because it no longer
+// touches a store.Fact with real time.Time fields at all.
 type factProvenanceView struct {
 	SourceStagedDiffID string  `json:"source_staged_diff_id"`
 	DecidedBy          *string `json:"decided_by,omitempty"`
@@ -72,7 +54,42 @@ type readOutput struct {
 	MissingScopes []string   `json:"missing_scopes,omitempty"`
 }
 
-func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, emb embed.Embedder) {
+// registerReadWithScopeCheck registers read_with_scope_check as a thin
+// adapter over client.Search, POST /api/agent/search.
+//
+// Old -> new mapping (the brief's required diff, for this tool):
+//   - Input caps (requested_scopes count, query length, limit) — STILL HERE,
+//     client-side, as a courtesy; agentSearch re-enforces every one of them
+//     server-side regardless (agent_routes.go's agentMax* constants).
+//   - Per-scope format validation (scope.Validate) — DELETED here. Not a
+//     resource cap, so it doesn't get the courtesy-duplication treatment; the
+//     server validates every requested scope and returns a 400 the caller
+//     sees verbatim (decodeValidationError -> *agentclient.ValidationError ->
+//     returned as-is below), so a malformed scope still surfaces as a tool
+//     error, just via a round trip instead of a local check.
+//   - The scope gate itself (fetch GrantedScopeDepths, compute scope.Missing,
+//     audit "insufficient_scope" if anything's missing) — DELETED here,
+//     MOVED to agentSearch (agent_routes.go), which is now the only place
+//     this authorization decision is made. This tool no longer imports
+//     internal/store or internal/scope at all.
+//   - The embed call (emb.Embed) — DELETED here, MOVED to agentSearch. This
+//     process never sees an Embedder; embedding happens entirely
+//     server-side, inside the same request agentSearch handles.
+//   - The revoke-during-embed re-check (re-fetch GrantedScopeDepths after
+//     Embed, before SearchFacts) — DELETED here, MOVED to agentSearch. This
+//     is the property named in the brief as the actual risk: it only stays a
+//     real gate because agentSearch runs the whole pre-embed-check ->
+//     embed -> post-embed-recheck -> search sequence inside one handler, atomic
+//     from this client's perspective (see that file's own doc comment on why
+//     no piece of it may be split across the HTTP boundary). This tool now
+//     just makes one HTTP call and trusts the single JSON response it gets
+//     back — there is no window here for it to reopen, because there is
+//     nothing left here to have a window.
+//   - The disclosure audit ("read" event, per-fact depth detail) — DELETED
+//     here, MOVED to agentSearch, which writes it using the subject its own
+//     bearer-token auth resolved (agentFromContext), not anything this tool
+//     could supply.
+func registerReadWithScopeCheck(s *mcp.Server, client *agentclient.Client) {
 	falsePtr := false
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "read_with_scope_check",
@@ -98,146 +115,45 @@ func registerReadWithScopeCheck(s *mcp.Server, subject string, st *store.Store, 
 		if args.Limit > maxSearchLimit {
 			return nil, readOutput{}, fmt.Errorf("read_with_scope_check: limit exceeds max of %d", maxSearchLimit)
 		}
-		requested := toScopes(args.RequestedScopes)
-		for _, r := range requested {
-			if err := scope.Validate(r); err != nil {
-				return nil, readOutput{}, fmt.Errorf("read_with_scope_check: %w", err)
-			}
-		}
 
-		grantedDepths, err := st.GrantedScopeDepths(ctx, subject)
+		res, err := client.Search(ctx, agentclient.SearchRequest{
+			Query:           args.Query,
+			RequestedScopes: args.RequestedScopes,
+			Limit:           args.Limit,
+		})
 		if err != nil {
-			return nil, readOutput{}, toolError("read_with_scope_check", err)
-		}
-		grantedStrs := grantedScopeStrs(grantedDepths)
-
-		if missing := scope.Missing(requested, toScopes(grantedStrs)); len(missing) > 0 {
-			missingStrs := fromScopes(missing)
-			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, nil, missingStrs, nil); err != nil {
-				return nil, readOutput{}, toolError("read_with_scope_check", err)
+			// Only a *agentclient.ValidationError (the server's own 400 message,
+			// e.g. a malformed scope) is safe to show the calling agent
+			// verbatim — see agentclient.ValidationError's doc comment for why
+			// that's true of every 400 this server sends. Everything else
+			// (ErrUnauthorized, a 5xx serverError, a transport failure) is
+			// masked, same allowlist-not-denylist stance propose_write.go's
+			// pre-cutover version already documented for its own error taxonomy.
+			var verr *agentclient.ValidationError
+			if errors.As(err, &verr) {
+				return nil, readOutput{}, verr
 			}
-			return nil, readOutput{Status: "insufficient_scope", MissingScopes: missingStrs}, nil
-		}
-
-		limit := args.Limit
-		if limit <= 0 {
-			limit = 20
-		}
-
-		var queryVec []float32
-		if emb != nil {
-			queryVec, err = emb.Embed(ctx, args.Query)
-			if err != nil {
-				return nil, readOutput{}, toolError("read_with_scope_check", err)
-			}
-		}
-
-		// Re-fetch granted scope depths here rather than reusing the snapshot
-		// from before Embed ran: a grant expiring, being revoked, or changing
-		// depth while Embed is in flight would otherwise let SearchFacts run
-		// against a stale, wider/deeper scope list than the subject currently
-		// holds — content disclosed after revocation or a depth downgrade.
-		// Embed is synchronous/instant against the v0 Stub embedder, so this
-		// window is nil today, but the real embedder this is meant to be
-		// swapped for (Research track) is an external, non-trivial-latency
-		// call, which is exactly when this race becomes real. This closes the
-		// window between "embed" and "search"; it doesn't make the whole
-		// request atomic against a grant change — full atomicity would mean
-		// pushing grant membership into the retrieval SQL itself (keyed by
-		// subject, joined at query time), a larger restructure of SearchFacts'
-		// signature and every caller, not justified for a race this narrow
-		// today.
-		grantedDepths, err = st.GrantedScopeDepths(ctx, subject)
-		if err != nil {
-			return nil, readOutput{}, toolError("read_with_scope_check", err)
-		}
-		grantedStrs = grantedScopeStrs(grantedDepths)
-		if missing := scope.Missing(requested, toScopes(grantedStrs)); len(missing) > 0 {
-			missingStrs := fromScopes(missing)
-			if err := st.LogAudit(ctx, "insufficient_scope", subject, nil, nil, nil, nil, missingStrs, nil); err != nil {
-				return nil, readOutput{}, toolError("read_with_scope_check", err)
-			}
-			return nil, readOutput{Status: "insufficient_scope", MissingScopes: missingStrs}, nil
-		}
-
-		facts, err := st.SearchFacts(ctx, args.Query, queryVec, grantedDepths, limit)
-		if err != nil {
 			return nil, readOutput{}, toolError("read_with_scope_check", err)
 		}
 
-		out := readOutput{Status: "ok"}
-		for _, f := range facts {
+		out := readOutput{Status: res.Status, MissingScopes: res.MissingScopes}
+		for _, f := range res.Facts {
 			fv := factView{ID: f.ID, Content: f.Content, Summary: f.Summary, Depth: f.Depth, Scopes: f.Scopes}
 			if f.Provenance != nil {
 				p := f.Provenance
 				fv.Provenance = &factProvenanceView{
 					SourceStagedDiffID: p.SourceStagedDiffID,
 					DecidedBy:          p.DecidedBy,
-					DecidedAt:          formatTimePtr(p.DecidedAt),
+					DecidedAt:          p.DecidedAt,
 					SupersededBy:       p.SupersededBy,
-					CreatedAt:          f.CreatedAt.Format(time.RFC3339),
-					ValidAt:            f.ValidAt.Format(time.RFC3339),
-					InvalidAt:          formatTimePtr(p.InvalidAt),
-					ExpiredAt:          formatTimePtr(p.ExpiredAt),
+					CreatedAt:          p.CreatedAt,
+					ValidAt:            p.ValidAt,
+					InvalidAt:          p.InvalidAt,
+					ExpiredAt:          p.ExpiredAt,
 				}
 			}
 			out.Facts = append(out.Facts, fv)
 		}
-		// Record what was actually disclosed (fact ID + the depth it was disclosed
-		// at), not just which scopes the subject held — granted scopes alone answer
-		// "what was this agent allowed to see," not "what did it actually see, and
-		// at what fidelity," which is the question that matters after a suspected
-		// compromise. One row per read call: depth is computed per fact (see
-		// ReadAuditDetail's doc comment), so this is a per-fact list, not a single
-		// value for the whole call.
-		detail := store.ReadAuditDetail{Facts: make([]store.ReadFactDisclosure, 0, len(out.Facts))}
-		for _, f := range out.Facts {
-			detail.Facts = append(detail.Facts, store.ReadFactDisclosure{FactID: f.ID, Depth: f.Depth})
-		}
-		detailJSON, err := json.Marshal(detail)
-		if err != nil {
-			return nil, readOutput{}, toolError("read_with_scope_check", err)
-		}
-		if err := st.LogAudit(ctx, "read", subject, nil, nil, nil, nil, grantedStrs, detailJSON); err != nil {
-			return nil, readOutput{}, toolError("read_with_scope_check", err)
-		}
 		return nil, out, nil
 	})
-}
-
-// grantedScopeStrs discards the depth half of each pair and dedupes, for the
-// scope.Missing visibility check and audit logging — both only ever needed
-// which scopes were granted, not at what depth (depth only matters once
-// SearchFacts runs). Deduping matters here specifically because
-// GrantedScopeDepths is DISTINCT on (scope, depth), not scope alone: a
-// subject holding two active grants over the same scope at different depths
-// produces two rows with an identical Scope, which would otherwise duplicate
-// that scope in the audit log's recorded scopes list. Found in review.
-func grantedScopeStrs(granted []store.GrantedScope) []string {
-	seen := make(map[string]struct{}, len(granted))
-	out := make([]string, 0, len(granted))
-	for _, g := range granted {
-		if _, ok := seen[g.Scope]; ok {
-			continue
-		}
-		seen[g.Scope] = struct{}{}
-		out = append(out, g.Scope)
-	}
-	return out
-}
-
-func toScopes(ss []string) []scope.Scope {
-	out := make([]scope.Scope, len(ss))
-	for i, s := range ss {
-		out[i] = scope.Scope(s)
-	}
-	return out
-}
-
-func fromScopes(ss []scope.Scope) []string {
-	out := make([]string, len(ss))
-	for i, s := range ss {
-		out[i] = string(s)
-	}
-	return out
 }

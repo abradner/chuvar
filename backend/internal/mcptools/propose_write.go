@@ -7,8 +7,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/abradner/chuvar/backend/internal/bouncer"
-	"github.com/abradner/chuvar/backend/internal/store"
+	"github.com/abradner/chuvar/backend/internal/agentclient"
 )
 
 type proposeWriteArgs struct {
@@ -31,7 +30,45 @@ type proposeWriteOutput struct {
 	CandidateFactID *string `json:"candidate_fact_id,omitempty"`
 }
 
-func registerProposeWrite(s *mcp.Server, subject string, b *bouncer.Bouncer) {
+// registerProposeWrite registers propose_write as a thin adapter over
+// client.Propose, POST /api/agent/proposals.
+//
+// Old -> new mapping (the brief's required diff, for this tool):
+//   - Input caps (proposed_scopes count, content length) — STILL HERE,
+//     client-side, as a courtesy; agentProposeWrite re-enforces both
+//     server-side regardless (agent_routes.go's agentMax* constants).
+//   - The bouncer pipeline call (b.ProposeWrite: classify, embed, dedupe,
+//     stage) — DELETED here, MOVED to agentProposeWrite, which calls the
+//     exact same a.Bouncer.ProposeWrite this tool used to call directly. This
+//     tool never touches a *bouncer.Bouncer at all now.
+//   - The store.ErrRateLimited branch (audit "rate_limited", return
+//     status=RATE_LIMITED with no error) — DELETED here, MOVED to
+//     agentProposeWrite, which does the equivalent audit write and responds
+//     with HTTP 429 carrying the same {status: RATE_LIMITED} JSON shape
+//     (agentclient.Propose decodes a 429 into the same ProposeResult struct
+//     as a 200 — see the TRAP note below).
+//   - The bouncer.ValidationError branch (return the message verbatim) —
+//     DELETED here in its original form, MOVED to agentProposeWrite, which
+//     does the same errors.As check server-side and returns it as an HTTP
+//     400. This tool's OWN errors.As check below (against
+//     *agentclient.ValidationError, not bouncer.ValidationError) is what
+//     turns that 400 back into a verbatim tool error — a different type,
+//     same externally-visible behavior: the caller still sees the real
+//     validation message, not a masked one.
+//   - The generic masking fallback (toolError) — KEPT here, now wrapping
+//     agentclient errors (ErrUnauthorized, serverError, transport failures)
+//     instead of store/bouncer errors, but same "allowlist of what's safe to
+//     show verbatim, mask everything else" stance.
+//
+// TRAP (flagged by agentclient's author, see agentclient.ProposeResult's doc
+// comment): the 200 and 429 responses share one struct, discriminated only
+// by Status — a 429 comes back with DiffID at its zero value, "", not a
+// sentinel. The branch below checks res.Status == agentclient.StatusRateLimited
+// FIRST and returns early on it, rather than ever asking "is DiffID empty?"
+// to decide anything. That ordering is deliberate: it's what stops a
+// rate-limited response from being read as a successful one with an empty
+// diff ID.
+func registerProposeWrite(s *mcp.Server, client *agentclient.Client) {
 	falsePtr := false
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "propose_write",
@@ -57,59 +94,32 @@ func registerProposeWrite(s *mcp.Server, subject string, b *bouncer.Bouncer) {
 			return nil, proposeWriteOutput{}, fmt.Errorf("propose_write: content exceeds max length of %d", maxContentLength)
 		}
 
-		scopes := toScopes(args.ProposedScopes)
-
-		var target *string
-		if args.TargetFactID != "" {
-			target = &args.TargetFactID
-		}
-
-		diff, err := b.ProposeWrite(ctx, subject, args.Content, scopes, target)
+		res, err := client.Propose(ctx, agentclient.ProposeRequest{
+			Content:        args.Content,
+			ProposedScopes: args.ProposedScopes,
+			TargetFactID:   args.TargetFactID,
+		})
 		if err != nil {
-			if errors.Is(err, store.ErrRateLimited) {
-				// Distinguishable from every other bouncer/store failure below on
-				// purpose (CLAUDE.md's ticket calls for "RATE_LIMITED as a signal
-				// rather than backpressure") — returned as a structured status with
-				// no tool error, not masked by toolError, since there's nothing
-				// sensitive in "you're proposing too fast" that toolError's masking
-				// exists to protect.
-				//
-				// Audited before responding, same as insufficient_scope in
-				// read_with_scope_check.go: a tripwire that reports only to the
-				// adversary who tripped it is not a tripwire. The counter row alone
-				// is lossy evidence (limit+1 and a 10,000-request flood look the
-				// same after the window rolls), so each denial gets its own
-				// attributable row — and like the insufficient_scope sibling, a
-				// failed audit write fails the response rather than being dropped.
-				if auditErr := b.Store.LogAudit(ctx, "rate_limited", subject, nil, nil, nil, nil, nil, nil); auditErr != nil {
-					return nil, proposeWriteOutput{}, toolError("propose_write", auditErr)
-				}
-				return nil, proposeWriteOutput{Status: "RATE_LIMITED"}, nil
-			}
-			// bouncer.ProposeWrite's errors mix genuine input-validation failures
-			// (safe and useful to show the agent verbatim, e.g. a malformed scope —
-			// it can self-correct and retry) with wrapped store/DB errors (not
-			// safe — could contain raw driver text). errors.As against
-			// bouncer.ValidationError is how those are told apart: only errors
-			// ProposeWrite positively constructed as that type are returned
-			// verbatim; everything else — including anything unrecognized — still
-			// goes through toolError's generic masking. Fail closed: this is an
-			// allowlist, not a denylist.
-			var verr *bouncer.ValidationError
+			var verr *agentclient.ValidationError
 			if errors.As(err, &verr) {
 				return nil, proposeWriteOutput{}, verr
 			}
 			return nil, proposeWriteOutput{}, toolError("propose_write", err)
 		}
 
-		out := proposeWriteOutput{
-			DiffID:          diff.ID,
-			Status:          string(diff.Status),
-			CandidateFactID: diff.DedupeCandidateFactID,
+		// See the TRAP note above the function: Status is checked before any
+		// other field is trusted, precisely so a rate-limited response can
+		// never be mistaken for a successful one just because DiffID happens
+		// to be empty either way.
+		if res.Status == agentclient.StatusRateLimited {
+			return nil, proposeWriteOutput{Status: res.Status}, nil
 		}
-		if diff.DedupeVerdict != nil {
-			out.DedupeVerdict = string(*diff.DedupeVerdict)
-		}
-		return nil, out, nil
+
+		return nil, proposeWriteOutput{
+			DiffID:          res.DiffID,
+			Status:          res.Status,
+			DedupeVerdict:   res.DedupeVerdict,
+			CandidateFactID: res.CandidateFactID,
+		}, nil
 	})
 }

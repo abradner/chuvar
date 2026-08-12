@@ -1,21 +1,36 @@
 // Command mcpserver runs the Chuvar MCP server: the read-with-scope-check,
-// propose-write, and list-grants tools, backed by Postgres+pgvector.
+// propose-write, list-grants, and request-grant tools, backed by chuvar's
+// agent-facing HTTP API (internal/api/agent_routes.go), never a direct
+// database connection.
+//
+// This is the cutover ticket E3 names (AGENTS.md §3.6): mcpserver runs inside
+// an agent host's own process tree, so it is the process that must hold
+// least. It used to hold a raw DATABASE_URL — the chuvar_agent role
+// constrained what that credential could do, but the connection itself was
+// still a root of trust reachable from agent context, the last live
+// violation of CLAUDE.md principle 3 (zero ambient authority). This binary
+// now holds exactly one credential, a revocable agent-class bearer token
+// (store.AuthenticateAgentToken, minted by a human via POST /api/agent-tokens
+// and never by an agent-reachable path — principle 4), and speaks nothing but
+// HTTP to reach the backend. There is no db.Open, no pgxpool.Pool, no
+// store.Store, no embed.Embedder, no bouncer.Bouncer anywhere in this
+// process — every one of those now lives exactly once, server-side, behind
+// internal/api/agent_routes.go.
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/abradner/chuvar/backend/internal/bouncer"
+	"github.com/abradner/chuvar/backend/internal/agentclient"
 	"github.com/abradner/chuvar/backend/internal/config"
-	"github.com/abradner/chuvar/backend/internal/db"
-	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/mcptools"
-	"github.com/abradner/chuvar/backend/internal/store"
 )
 
 func main() {
@@ -26,63 +41,83 @@ func main() {
 }
 
 func run() error {
-	cfg, err := config.Load()
+	baseURL, err := requiredSecret("CHUVAR_API_BASE_URL")
+	if err != nil {
+		return err
+	}
+	token, err := requiredSecret("CHUVAR_API_TOKEN")
 	if err != nil {
 		return err
 	}
 
-	// MCP_SUBJECT identifies who this server process is authorized to act as.
-	// Required, fail-fast — see mcptools.Register's doc comment for why this can't
-	// be a client-supplied tool argument: with the stdio transport, whoever
-	// launches this process (an agent host spawning one server per session) IS the
-	// trust boundary, and the host is expected to set this to the identity of the
-	// agent session it's spawning the server for.
-	subject, ok := os.LookupEnv("MCP_SUBJECT")
-	if !ok || subject == "" {
-		return fmt.Errorf("mcpserver: required environment variable MCP_SUBJECT is not set")
-	}
+	client := &agentclient.Client{BaseURL: baseURL, Token: token, HTTP: &http.Client{}}
 
 	ctx := context.Background()
-	pool, err := db.Open(ctx, cfg.DatabaseURL)
+
+	// mcpserver has no database of its own any more (see the package doc
+	// comment), so it cannot run db.CheckSchema the way it used to on boot —
+	// there is no schema for this process to check. That verification isn't
+	// gone, it moved: apiserver (cmd/apiserver/main.go) still runs its own
+	// db.CheckSchema at ITS boot, before it ever starts serving AgentRoutes()
+	// at all, so "is the backend up and its schema current" is exactly the
+	// question a successful whoami call below already answers by construction
+	// — if the schema were stale, apiserver would have refused to start, and
+	// this call would be hitting nothing. Calling whoami here is mcpserver's
+	// substitute boot health check: fail fast and loudly (CLAUDE.md principle
+	// 5) if the configured token doesn't authenticate, or if the backend
+	// can't be reached at all, rather than starting up cleanly and failing
+	// every subsequent MCP tool call one at a time with no clear diagnosis.
+	who, err := checkHealth(ctx, client)
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
-
-	// Checks the schema; does not change it. This process is spawned by an agent
-	// host and runs inside the agent's own process tree, so it must not assert
-	// DDL authority on boot — see db.CheckSchema and AGENTS.md §3.0. Migrating
-	// is cmd/migrate's job, or cmd/apiserver's.
-	//
-	// Runs on the pool rather than opening its own handle, so the check issues
-	// exactly one SELECT and no DDL — going through golang-migrate would create
-	// the schema_migrations table just by looking.
-	//
-	// This narrows what mcpserver does with the credentials it holds; it does
-	// not remove them. mcpserver still receives DATABASE_URL, and anything
-	// holding that can run DDL through SQL regardless. Closing that is ticket
-	// E3 (mcpserver becomes an API client with an agent-class token), and this
-	// is a step toward it, not a substitute for it.
-	if err := db.CheckSchema(ctx, pool); err != nil {
-		return err
-	}
-	// Loudest here of anywhere: this is the process an agent host spawns, so an
-	// over-privileged connection is the one that matters most (ticket E8).
-	db.WarnIfOverprivileged(ctx, pool, "mcpserver")
-
-	st := store.New(pool)
-	emb := embed.Stub{} // TODO: swap for a real Embedder once the Research track lands one
-	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
-	// bouncer.New already defaults these; override from config so an operator
-	// can tune propose_write's per-subject rate limit (PROPOSE_WRITE_RATE_LIMIT*)
-	// without a code change — see that migration's doc comment for why this
-	// exists at all.
-	b.RateLimit = cfg.ProposeWriteRateLimit
-	b.RateLimitWindow = cfg.ProposeWriteRateLimitWindow
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "chuvar", Version: "v0"}, nil)
-	mcptools.Register(server, subject, st, emb, b)
+	mcptools.Register(server, client)
 
-	slog.Info("mcpserver: connected, schema verified, serving on stdio", "subject", subject)
+	slog.Info("mcpserver: authenticated, serving on stdio", "subject", who)
 	return server.Run(ctx, &mcp.StdioTransport{})
+}
+
+// checkHealth calls GET /api/agent/whoami and returns the authenticated
+// subject on success. Split out from run() so a test can drive it directly
+// against a fake or real backend without going through process env vars or
+// serving stdio.
+//
+// errors.Is(err, agentclient.ErrUnauthorized) gets its own, more actionable
+// message ("bad or revoked token") than every other failure mode (backend
+// unreachable, a 5xx, a transport error) — those stay generic per
+// agentclient's own masking stance (see its doc comments), since there's
+// nothing this process can usefully add beyond "could not reach the API."
+func checkHealth(ctx context.Context, client *agentclient.Client) (subject string, err error) {
+	who, err := client.Whoami(ctx)
+	if err != nil {
+		if errors.Is(err, agentclient.ErrUnauthorized) {
+			return "", fmt.Errorf("mcpserver: agent token rejected by %s — it may be missing, malformed, or revoked: %w", client.BaseURL, err)
+		}
+		return "", fmt.Errorf("mcpserver: could not reach chuvar API at %s: %w", client.BaseURL, err)
+	}
+	return who.Subject, nil
+}
+
+// requiredSecret reads key via config.Secret (so <KEY>_FILE indirection
+// works, AGENTS.md §3.7) and fails fast with a clear message if it's absent
+// — the same two-branch shape cmd/approver/main.go uses for CHUVAR_API_TOKEN:
+// a hard error from config.Secret itself (e.g. a credential file with bad
+// permissions) is reported as-is, while a plain "nothing was set"
+// (config.ErrNotSet) gets mcpserver's own explanatory message naming the
+// variable. Both CHUVAR_API_BASE_URL and CHUVAR_API_TOKEN are required here,
+// unlike cmd/approver's optional base URL (which falls back to
+// http://localhost:8080): mcpserver runs unattended inside an agent host, so
+// a silent default pointing at the wrong backend is a worse failure mode
+// than refusing to start.
+func requiredSecret(key string) (string, error) {
+	v, err := config.Secret(key)
+	if err != nil && !errors.Is(err, config.ErrNotSet) {
+		return "", fmt.Errorf("mcpserver: %w", err)
+	}
+	if err != nil || v == "" {
+		return "", fmt.Errorf("mcpserver: required environment variable %s is not set (or %s_FILE)", key, key)
+	}
+	return v, nil
 }

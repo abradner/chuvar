@@ -4,6 +4,20 @@
 // be added without revisiting AGENTS.md §3.1 first. request_grant follows the same
 // shape as propose_write: it stages a request, never creates a real grant — only
 // a human, via the REST API, does that (store.ApproveGrantRequest).
+//
+// Every tool here is a thin adapter over internal/agentclient — mcpserver's own
+// process holds no database credential and no store.Store (ticket E3, AGENTS.md
+// §3.6): each tool marshals its args, calls the one HTTP method on
+// *agentclient.Client that mirrors it, and maps the response onto this package's
+// unchanged output types. This is a deliberate, one-way cutover: the DB
+// orchestration these tools used to run directly — the scope gate (checking
+// GrantedScopeDepths and computing missing scopes), the embed call, and the
+// revoke-during-embed re-check — has moved server-side, into
+// internal/api/agent_routes.go's agentSearch handler, and is NOT reproduced
+// here. That handler is now the single chokepoint for that sequence (CLAUDE.md
+// principle 7); duplicating it here again would just recreate the two-copies
+// problem PR 2 introduced on the way to this cutover. See each tool file's own
+// comment for the specific old-code -> new-location mapping.
 package mcptools
 
 import (
@@ -12,69 +26,57 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/abradner/chuvar/backend/internal/bouncer"
-	"github.com/abradner/chuvar/backend/internal/embed"
-	"github.com/abradner/chuvar/backend/internal/store"
+	"github.com/abradner/chuvar/backend/internal/agentclient"
 )
 
-// maxScopesPerRequest and maxContentLength bound tool inputs. Nothing about a real
-// use of this API needs anywhere near these many scopes or this much text in one
-// call — they exist so a malformed or hostile request can't turn scope.Missing's
-// O(requested×granted) comparison or an unbounded content/embedding insert into a
-// cheap resource-exhaustion lever.
+// maxScopesPerRequest, maxContentLength, maxQueryLength, maxSearchLimit, and
+// maxJustificationLength (request_grant.go) mirror
+// internal/api/agent_routes.go's agentMax* constants exactly. Kept here too,
+// even though the server re-enforces every one of them independently, purely
+// as a courtesy: rejecting an obviously-oversized request locally saves a
+// round trip to the backend rather than making the network do the work of
+// telling the caller "no." They are not a security boundary — the server-side
+// checks are (see that file's own doc comment for why duplicating input caps,
+// as opposed to the authorization logic around them, is fine to leave on both
+// sides).
 const (
 	maxScopesPerRequest = 50
 	maxContentLength    = 16384
-
-	// maxQueryLength bounds read_with_scope_check's free-text query, separately
-	// from maxContentLength: a search query has no legitimate reason to approach
-	// the size of a proposed fact, and it flows into both embedding generation and
-	// Postgres's plainto_tsquery — an unbounded query string is a cheap way to
-	// force expensive work on both without ever proposing a write.
-	maxQueryLength = 1024
-
-	// maxSearchLimit bounds read_with_scope_check's requested result count.
-	// store.SearchFacts only normalizes non-positive values to a default of 20; an
-	// arbitrarily large positive value passes straight through as a SQL LIMIT,
-	// which is cheap authorization-wise (still scope-filtered) but not cheap
-	// compute/response-size-wise.
-	maxSearchLimit = 200
+	maxQueryLength      = 1024
+	maxSearchLimit      = 200
 )
 
-// Register adds all v0 tools to s, all acting as subject.
+// Register adds all v0 tools to s, each backed by client.
 //
-// subject identifies who this server session is authorized to act as, and is
-// bound once here rather than accepted as a per-call tool argument. Every v0 tool
-// originally took `subject` as a client-supplied JSON field with nothing
-// validating it against the actual caller — any MCP client could pass any
-// subject string and read/write on that subject's behalf (enumerate their grants,
-// read everything they're granted, forge writes attributed to them). That defeated
-// the "consent-based, audited" premise the whole project is built on (AGENTS.md
-// §1, §3.1) — found in review, not a hypothetical.
-//
-// Binding subject at server construction instead matches how MCP's stdio transport
-// actually deploys: a host application spawns one server process per agent
-// session, so the process's own launch environment (see cmd/mcpserver, MCP_SUBJECT)
-// is the actual trust boundary, not client-supplied tool arguments. This doesn't
-// solve identity for the REST API (internal/api), which legitimately serves many
-// human reviewers over HTTP — that side is now covered by per-reviewer device
-// tokens (see that package's comment) rather than a client-supplied string. Nor
-// does it invent real multi-tenant auth; it closes the one clean, narrow hole this
-// transport model has an obvious answer for. A real auth layer later replaces "one
-// configured subject" with "subject derived from an authenticated session," same
-// shape.
-func Register(s *mcp.Server, subject string, st *store.Store, emb embed.Embedder, b *bouncer.Bouncer) {
-	registerListGrants(s, subject, st)
-	registerReadWithScopeCheck(s, subject, st, emb)
-	registerProposeWrite(s, subject, b)
-	registerRequestGrant(s, subject, st)
+// Register used to take `subject` and bind it once at server construction,
+// because with the old direct-DB design, whoever launched this process was
+// the trust boundary the tools had no other way to check (see this
+// function's git history for the fuller version of that reasoning — subject
+// used to be a client-supplied tool argument with nothing validating it,
+// found in review, then fixed by binding it server-process-wide instead).
+// That reasoning has now moved one hop further out: client carries a bearer
+// agent-class token (store.AuthenticateAgentToken), and every request it
+// sends is authenticated by internal/api's requireAgentAuth, which derives
+// the acting subject from that token — never from anything this process
+// sends in a request body (agent_routes.go's package doc comment). mcpserver
+// itself no longer needs to know or assert a subject at all; it just holds
+// one credential and lets the server resolve who that credential belongs to,
+// on every call, same as any other HTTP client of an authenticated API.
+func Register(s *mcp.Server, client *agentclient.Client) {
+	registerListGrants(s, client)
+	registerReadWithScopeCheck(s, client)
+	registerProposeWrite(s, client)
+	registerRequestGrant(s, client)
 }
 
 // toolError logs the real error server-side and returns a generic, client-facing
 // one. Returning err.Error() verbatim from a tool handler puts it straight into the
 // MCP response (go-sdk places a returned error into CallToolResult.Content) — that
-// would leak raw Postgres/pgx error text (query fragments, column names) to
-// whatever agent is calling the tool.
+// would leak agentclient's own internal detail (a transport failure's underlying
+// text, an unexpected status code) to whatever agent is calling the tool. The one
+// case that IS safe to return verbatim is *agentclient.ValidationError — see each
+// tool's own errors.As branch, which returns that one directly instead of routing
+// it through toolError.
 func toolError(op string, err error) error {
 	slog.Error("mcptools: internal error", "op", op, "error", err)
 	return fmt.Errorf("%s: internal error", op)
