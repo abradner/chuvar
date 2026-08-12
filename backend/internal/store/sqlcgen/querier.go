@@ -83,6 +83,7 @@ type Querier interface {
 	// closes the race between two concurrent proposals from the same subject —
 	// see store.CheckProposeWriteRateLimit's doc comment.
 	IncrementProposeWriteRateLimit(ctx context.Context, arg IncrementProposeWriteRateLimitParams) (int32, error)
+	InsertAgentToken(ctx context.Context, arg InsertAgentTokenParams) (InsertAgentTokenRow, error)
 	InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) error
 	// ON CONFLICT DO NOTHING rather than an upsert: two processes booting at once
 	// must not each mint a DEK and have the second overwrite the first, because
@@ -108,6 +109,7 @@ type Querier interface {
 	// grant narrows with it (see the least_privilege_roles migration).
 	InsertStagedDiff(ctx context.Context, arg InsertStagedDiffParams) (InsertStagedDiffRow, error)
 	InsertWebAuthnCredential(ctx context.Context, arg InsertWebAuthnCredentialParams) (WebauthnCredential, error)
+	ListAgentTokens(ctx context.Context) ([]ListAgentTokensRow, error)
 	ListGrantRequests(ctx context.Context, status string) ([]GrantRequest, error)
 	// Explicit-bound variant of ListGrantRequests for the /api/events SSE poll
 	// loop, same rationale as staged_diffs.sql's ListStagedDiffsBounded. The REST
@@ -184,6 +186,7 @@ type Querier interface {
 	LoadGrantRequestForUpdate(ctx context.Context, id string) (LoadGrantRequestForUpdateRow, error)
 	LoadStagedDiffForUpdate(ctx context.Context, id string) (LoadStagedDiffForUpdateRow, error)
 	LockTargetFact(ctx context.Context, id string) (*time.Time, error)
+	LookupActiveAgentToken(ctx context.Context, tokenHash []byte) (LookupActiveAgentTokenRow, error)
 	LookupActiveReviewerToken(ctx context.Context, tokenHash []byte) (LookupActiveReviewerTokenRow, error)
 	MarkDiffCommitted(ctx context.Context, arg MarkDiffCommittedParams) error
 	RejectDiff(ctx context.Context, arg RejectDiffParams) (int64, error)
@@ -208,6 +211,7 @@ type Querier interface {
 	// answers "does *this* token have a factor to demand", not "has anything ever
 	// been enrolled" — see requireExistingSecondFactor (internal/api).
 	ReviewerHasTOTP(ctx context.Context, id string) (pgtype.Bool, error)
+	RevokeAgentToken(ctx context.Context, id string) (int64, error)
 	RevokeGrant(ctx context.Context, id string) (int64, error)
 	RevokeReviewerToken(ctx context.Context, id string) (int64, error)
 	RevokeWebAuthnCredential(ctx context.Context, arg RevokeWebAuthnCredentialParams) (int64, error)
@@ -227,6 +231,7 @@ type Querier interface {
 	// operator action, not something any store method exposes.
 	SetEnrollmentLatch(ctx context.Context) error
 	SupersedeFact(ctx context.Context, arg SupersedeFactParams) error
+	TouchAgentToken(ctx context.Context, id string) error
 	TouchReviewerToken(ctx context.Context, id string) error
 	UpdateWebAuthnCredentialCounter(ctx context.Context, arg UpdateWebAuthnCredentialCounterParams) error
 	// One row per repo: a second upsert for the same repo replaces the previous

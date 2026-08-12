@@ -137,6 +137,18 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("GET /api/tokens", a.listTokens)
 	mux.HandleFunc("POST /api/tokens", a.createToken)
 	mux.HandleFunc("POST /api/tokens/{id}/revoke", a.revokeToken)
+	// Agent-class tokens (ticket E3, PR 1): a structurally distinct credential
+	// from reviewer_tokens (own table, own hash space — see the agent_tokens
+	// migration and agent_tokens.go's package doc comment). Unlike POST
+	// /api/tokens, POST /api/agent-tokens has NO bootstrap carve-out — it is
+	// wrapped in requireStrongFactor unconditionally, since minting one is
+	// always an act of extending standing authority to a new principal, never
+	// a one-time deployment bootstrap step (createAgentToken's doc comment).
+	// List/revoke are bearer-only, same "only reduces/never widens authority"
+	// stance as the reviewer token routes above.
+	mux.HandleFunc("GET /api/agent-tokens", a.listAgentTokens)
+	mux.HandleFunc("POST /api/agent-tokens", a.requireStrongFactor(a.createAgentToken))
+	mux.HandleFunc("POST /api/agent-tokens/{id}/revoke", a.revokeAgentToken)
 	// WebAuthn (passkey) ceremonies — see webauthn.go's package-level doc
 	// comment for the two-endpoint-per-ceremony shape and why the strong-
 	// factor gate sits on *begin*, not finish.
