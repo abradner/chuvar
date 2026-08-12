@@ -6,14 +6,13 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/abradner/chuvar/backend/internal/scope"
-	"github.com/abradner/chuvar/backend/internal/store"
+	"github.com/abradner/chuvar/backend/internal/agentclient"
 )
 
-// maxJustificationLength bounds request_grant's free-text justification, same
-// resource-exhaustion reasoning as maxContentLength/maxQueryLength in mcptools.go
-// — this is display text shown to a human reviewer, not something a real request
-// needs to pad out.
+// maxJustificationLength bounds request_grant's free-text justification —
+// courtesy client-side cap only, matching maxScopesPerRequest/maxContentLength/
+// maxQueryLength in mcptools.go; agent_routes.go's agentMaxJustificationLength
+// re-enforces the same bound server-side regardless of what this client sends.
 const maxJustificationLength = 2048
 
 type requestGrantArgs struct {
@@ -28,7 +27,19 @@ type requestGrantOutput struct {
 	Status    string `json:"status"`
 }
 
-func registerRequestGrant(s *mcp.Server, subject string, st *store.Store) {
+// registerRequestGrant registers request_grant as a thin adapter over
+// client.RequestGrant: marshal args into an agentclient.GrantRequestRequest,
+// call the agent API, map the response onto requestGrantOutput.
+//
+// Semantic validation this tool used to run itself — scope.Validate against
+// each requested scope, the depth enum check (store.ValidDepth), and
+// rejecting a negative ttl_seconds as distinct from an omitted one (found in
+// review, pre-cutover) — is deleted, not relocated: agentRequestGrant
+// (internal/api/agent_routes.go) reproduces every one of those checks
+// server-side, byte-for-byte, and is the sole place they now run. Only the
+// size caps stay here, as a courtesy (see maxJustificationLength/
+// maxScopesPerRequest's doc comments) — the server re-enforces those too.
+func registerRequestGrant(s *mcp.Server, client *agentclient.Client) {
 	falsePtr := false
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "request_grant",
@@ -51,44 +62,17 @@ func registerRequestGrant(s *mcp.Server, subject string, st *store.Store) {
 		if len(args.Justification) > maxJustificationLength {
 			return nil, requestGrantOutput{}, fmt.Errorf("request_grant: justification exceeds max length of %d", maxJustificationLength)
 		}
-		for _, sc := range args.RequestedScopes {
-			if err := scope.Validate(scope.Scope(sc)); err != nil {
-				return nil, requestGrantOutput{}, fmt.Errorf("request_grant: %w", err)
-			}
-		}
 
-		depth := args.Depth
-		if depth == "" {
-			depth = "facts"
-		}
-		if !store.ValidDepth(depth) {
-			return nil, requestGrantOutput{}, fmt.Errorf("request_grant: depth must be one of summary, facts, full (got %q)", depth)
-		}
-
-		// A negative ttl_seconds used to fall through the `> 0` check below
-		// exactly like an omitted one, silently turning "an invalid value" into
-		// "no expiry requested" — the opposite of what the tool's own contract
-		// promises (omission, not an invalid value, means no expiry). Reject it
-		// explicitly instead. Zero is still treated as "omitted": ttl_seconds
-		// has no pointer type to distinguish an explicit 0 from a field the
-		// caller left out entirely, and 0 is nonsensical either reading.
-		// Found in review.
-		if args.TTLSeconds < 0 {
-			return nil, requestGrantOutput{}, fmt.Errorf("request_grant: ttl_seconds must be positive if provided (got %d)", args.TTLSeconds)
-		}
-		var ttl *int
-		if args.TTLSeconds > 0 {
-			ttl = &args.TTLSeconds
-		}
-
-		// kind is hardcoded to memory — agents can't request a capability-kind
-		// grant through this tool (no such flow exists yet; see store.CreateGrant's
-		// doc comment on the equivalent REST path).
-		req, err := st.RequestGrant(ctx, subject, args.RequestedScopes, string(store.GrantKindMemory), depth, ttl, args.Justification)
+		res, err := client.RequestGrant(ctx, agentclient.GrantRequestRequest{
+			RequestedScopes: args.RequestedScopes,
+			Depth:           args.Depth,
+			TTLSeconds:      args.TTLSeconds,
+			Justification:   args.Justification,
+		})
 		if err != nil {
-			return nil, requestGrantOutput{}, toolError("request_grant", err)
+			return nil, requestGrantOutput{}, mapClientError("request_grant", err)
 		}
 
-		return nil, requestGrantOutput{RequestID: req.ID, Status: string(req.Status)}, nil
+		return nil, requestGrantOutput{RequestID: res.RequestID, Status: res.Status}, nil
 	})
 }
