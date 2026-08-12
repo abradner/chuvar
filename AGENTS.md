@@ -64,10 +64,10 @@ Two rules fall out of it, operationally:
   may be reachable from agent context through a legitimate, discoverable interface — an env var,
   a checked-in secret, an open port. The distinction that matters is *ambient reach* (must be
   zero) vs *attack-shaped actions* (`docker exec` into the DB container, reading `pgdata` bytes —
-  detected and tripwired, not prevented, on a single-user box). Known debt, being paid:
-  `mcpserver` still requires `DATABASE_URL` inside the agent's own process tree, so anything
-  holding it can reach the database directly (ticket E3; it no longer migrates — §3.6). That is
-  debt, **not precedent** — never add a new root of trust to an agent-reachable environment.
+  detected and tripwired, not prevented, on a single-user box). Debt paid (#82/#86, ticket E3):
+  `mcpserver` used to require `DATABASE_URL` inside the agent's own process tree; it now holds a
+  revocable agent-class API token instead — see §3.6. That closure is not license to relax
+  elsewhere — never add a new root of trust to an agent-reachable environment.
 - **Tripwires are fail-closed.** When attack-shaped access is detected, the response is an
   outage — zeroize data-keys, seal, halt, require human re-unlock — never just a log line.
 
@@ -128,30 +128,54 @@ adding a binary or moving work between them, place it on this table:
 |---|---|---|---|---|
 | `cmd/apiserver` | operator | `chuvar_app` — DML, no DDL | **no** — `db.CheckSchema` only | **yes** — only process that verifies TOTP |
 | `cmd/migrate` | operator | owner — the only role with DDL | yes (that's its whole job) | no |
-| `cmd/mcpserver` | **an agent host** | `chuvar_agent` — narrow (see below) | **no** — `db.CheckSchema` only | **no** |
+| `cmd/mcpserver` | **an agent host** | none — `CHUVAR_API_TOKEN` only | **no** — it has no database | no |
 | `cmd/brokerd` | operator | `chuvar_broker` — narrow (see below) | **no** — `db.CheckSchema` only | **yes** — holds a decrypted git-signing key in guarded process memory (`internal/broker/keyring`) |
 | `cmd/approver`, `cmd/pushbridge` | operator | none — `CHUVAR_API_TOKEN` only | no | no |
 
+`cmd/mcpserver` now shares its DB-role/migrate/master-key column values with `cmd/approver`
+and `cmd/pushbridge` below it — all three are API-only clients with no database connection of
+any kind — but it keeps its own row rather than folding into theirs: "Launched by" is what
+actually matters for this table's purpose, and mcpserver is the one binary here launched by an
+agent host rather than the operator, which is why it stays the most tightly constrained of the
+four despite the matching columns (see below).
+
 **Exactly one binary migrates.** `cmd/migrate` holds DDL; nothing else does, including
-`apiserver`. On a fresh database run it before starting anything — both services verify the
-schema and refuse to start if it is behind.
+`apiserver`. On a fresh database run it before starting anything — `apiserver` and `brokerd`
+verify the schema and refuse to start if it is behind; `mcpserver` has no schema of its own to
+check (see below).
 
-`cmd/mcpserver` is the one that runs inside an agent's process tree, so it is
-the one that must hold least. It verifies the schema and refuses to start if it
-is stale, rather than migrating — an agent-side process silently applying DDL is
-how a migration ends up run by whoever happened to launch a tool first.
+`cmd/mcpserver` is the one that runs inside an agent's process tree, so it is the one that must
+hold least — as of #82/#86 (ticket E3) it holds no database credential at all. Boot resolves a
+`CHUVAR_API_TOKEN` (an agent-class token, never a reviewer token) and calls
+`GET /api/agent/whoami` against the agent-only listener (`CHUVAR_AGENT_ADDR`); a successful
+response already proves `apiserver`'s own `db.CheckSchema` passed at its boot, so mcpserver's
+boot check delegates schema-currency to `apiserver` rather than re-implementing it. A bad or
+revoked token fails boot with a message distinct from an unreachable backend — see
+`docs/operations.md`'s agent-token section for the full mint/deploy/rotate procedure.
 
-`chuvar_agent` is derived from what the code actually calls, not from what seemed
-plausible: SELECT on `grants`, `grant_scopes`, `facts`, `fact_scopes`, `staged_diffs`,
-`grant_requests`; INSERT on `staged_diffs`, `grant_requests`, `audit_log`. It has **no
-access at all** to `reviewer_tokens` or `data_keys`, and **INSERT without SELECT** on
-`audit_log` — it can append to the audit trail but never read it back.
+`chuvar_agent` was derived from what mcpserver's code used to call directly, back when it held
+`DATABASE_URL`: SELECT on `grants`, `grant_scopes`, `facts`, `fact_scopes`, `staged_diffs`,
+`grant_requests`; INSERT on `staged_diffs`, `grant_requests`, `audit_log`; no access at all to
+`reviewer_tokens` or `data_keys`; INSERT without SELECT on `audit_log` (append, never read
+back). **As of #82/#86 this role is unused by mcpserver and deprecated** — mcpserver holds no
+database credential of any kind, so nothing connects as `chuvar_agent` today. It is retained
+rather than dropped: `chuvar_agent` is a cluster-global, stamped role (`docs/operations.md`,
+"Roles are cluster-global"), and dropping one is its own migration with its own risk (a
+same-named future role, a deployment caught mid-upgrade) — while a dormant `NOLOGIN` role that
+nothing can authenticate as carries no standing risk of its own. Per principle 7's deletion
+test: removing this role today would change nothing about what's possible, only tidiness, so
+dropping it is a deliberate future PR's job, not an incidental one.
 
-**The residual gap: mcpserver still holds a database credential.** The role constrains what
-that credential can *do*, which is why an agent can no longer `INSERT INTO grants` and grant
-itself every scope — but the connection still exists. Removing it entirely is ticket E3
-(mcpserver becomes an API client with an agent-class token). Until then: never widen
-`chuvar_agent`, and never add a new root-of-trust to any binary an agent launches.
+**The residual gap is closed: mcpserver no longer holds a database credential.** #82/#86
+replaced it with a revocable agent-class API token (`agent_tokens`, structurally distinct from
+`reviewer_tokens` — its own table, its own hash namespace, so an agent token can never
+authenticate as a reviewer; see `docs/decisions.md`), presented to a separate agent-only HTTP
+listener (`CHUVAR_AGENT_ADDR`) that the reviewer surface is never mounted on, so a process
+holding only an agent token cannot reach reviewer routes even at the network layer. Identity is
+resolved server-side from the token on every request (`agentFromContext`) — mcpserver never
+declares its own subject the way `MCP_SUBJECT` used to let it. Never widen `chuvar_agent` (it
+is dormant, see above) and never add a new root-of-trust to any binary an agent launches — that
+constraint outlives the specific credential it was originally written about.
 
 `chuvar_broker` (brokerd, issues #95/#79) is narrower still and touches a disjoint
 set of tables: SELECT on `grants`, `grant_scopes`, `capability_grant_identities`,

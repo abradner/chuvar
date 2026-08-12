@@ -27,6 +27,88 @@ they ever appear to disagree, the newer dated entry wins.
 
 ---
 
+## 2026-08-13 — mcpserver's residual database credential is closed: an agent-class HTTP token replaces `DATABASE_URL`
+
+**`mcpserver` — the process an agent host spawns, the least-trusted binary in the launch
+topology — no longer holds `DATABASE_URL` or any other database credential. It authenticates
+to a new, agent-only HTTP listener with a revocable agent-class token
+(`agent_tokens`, structurally distinct from `reviewer_tokens`), and its identity is resolved
+server-side from that token on every request rather than self-declared via `MCP_SUBJECT` at
+launch. This closes ticket E3, the last item the 2026-08-01 trust-boundary decision
+(`docs/capability-broker.md`) named as debt rather than precedent.**
+
+**Context.** Every prior root-of-trust removal (least-privilege database roles, files-over-env
+credentials, sealing) narrowed what a credential inside `mcpserver`'s process tree could *do*.
+None of them removed the credential itself: an agent host spawning `mcpserver` still handed it
+a live connection string, and anything holding that string could run arbitrary SQL as
+`chuvar_agent` regardless of what the role's grants said — the role narrows the blast radius of
+misuse, it doesn't remove the ambient reach. Landed as four PRs: (1) the `agent_tokens` table,
+store methods, and a human-gated `POST /api/agent-tokens` mint surface; (2) `/api/agent/*` —
+search, proposals, grants, grant-requests, whoami — behind `requireAgentAuth`, served on its
+own listener (`CHUVAR_AGENT_ADDR`); (3) `internal/agentclient`, a typed HTTP client with a
+distinct `ErrUnauthorized` for boot fail-fast; (4) the cutover — `mcpserver`'s production
+imports are now only `agentclient`, `config`, `mcptools`, and stdlib; `db.Open`, `store.New`,
+`bouncer.New`, `embed.Stub`, and `MCP_SUBJECT` are all gone from it.
+
+**Rejected alternatives.**
+- *A `kind` column on `reviewer_tokens`, distinguishing agent tokens from reviewer tokens by
+  value rather than by table.* Rejected: the boundary between "can authenticate as a reviewer"
+  and "cannot" would become a `WHERE kind = 'reviewer'` clause that every reviewer-token lookup
+  has to remember to add. Forget it once, in one query, and an agent token authenticates a
+  human-gated mutation — a single missed predicate away from the exact self-escalation the
+  agent/reviewer split exists to prevent. A separate table with its own hash namespace makes
+  that class of mistake structurally impossible rather than a discipline to maintain: a lookup
+  against `reviewer_tokens` simply has no row an agent token could ever match.
+- *Reusing the reviewer listener, gated purely by `requireAgentAuth`'s own check.* Rejected as
+  the sole layer: auth alone already rejects a reviewer token presented to `requireAgentAuth`
+  and an agent token presented to `requireAuth` (they don't hash-match anything in the other's
+  table), but a single listener still means a confused or compromised agent process can *reach*
+  every reviewer route at the network layer and only fail there. A second bind address closes
+  that at the layer below auth, so a network-level mistake (a proxy misconfigured to forward
+  the wrong path, a firewall rule that's broader than intended) fails closed instead of relying
+  on the application-layer check alone to catch it every time.
+- *A conditional strong-factor gate on minting an agent token, matching `createToken`'s
+  bootstrap carve-out for the very first reviewer token.* Rejected: `createToken` needs a
+  carve-out because a fresh deployment has no enrolled factor yet to prove anything against,
+  and without one the operator could never mint their first device. No equivalent bootstrap
+  problem exists here — minting an agent token always happens from an already-authenticated,
+  already-enrolled reviewer session, since reaching `POST /api/agent-tokens` at all requires a
+  reviewer bearer token in the first place. An agent-class token is pure standing authority
+  handed to a long-running, unattended process with no human-presence check of its own once
+  minted, so the moment of minting it is the one point a human factor can be demanded — a
+  factorless bootstrap token must not be able to mint itself, or another agent, a standing
+  credential.
+
+**Accepted costs.**
+- A second bind address and a second `http.Server` to operate, monitor, and secure —
+  `CHUVAR_AGENT_ADDR` alongside `HTTP_ADDR` — rather than one listener doing double duty. A
+  Unix-domain socket with `0600` permissions would tighten this further (no network-layer
+  reachability at all, not just a different port) but is not implemented; noted as future
+  hardening, not done here.
+- Embedding stays a server-side call inside the same request that checks and re-checks granted
+  scope (`agentSearch` in `internal/api/agent_routes.go`, byte-for-byte mirroring
+  `read_with_scope_check.go`'s sequence) rather than moving to the client. This was necessary,
+  not incidental: the revoke-during-embed re-check — re-fetching granted scope depths *after*
+  `Embed` returns, to catch a grant that expired or narrowed while the embed call was in flight
+  — is only a real guarantee if the whole embed-then-search sequence runs atomically from the
+  caller's perspective inside one server-side handler. Splitting it across the HTTP boundary
+  (client embeds, or client passes down a pre-fetched scope snapshot) would reopen exactly that
+  race and turn the re-check from an enforced property into an advisory one. The cost is a
+  second copy of that sequence's types and helpers in `internal/api/agent_routes.go`, deliberately
+  duplicated from `internal/mcptools` rather than shared, until a later PR deletes the
+  `mcptools`-side copy once nothing but this HTTP surface serves it.
+- `chuvar_agent`, the least-privilege database role `mcpserver` used to connect as, is not
+  dropped. Nothing connects as it now — `mcpserver` holds no database credential at all — but
+  removing a cluster-global, stamped Postgres role is its own migration with its own risk (a
+  same-named future role colliding, a deployment caught mid-upgrade), while a dormant `NOLOGIN`
+  role nothing can authenticate as carries no standing risk of its own. Per the deletion test:
+  removing it today changes nothing about what's possible, only tidiness. Left for a deliberate
+  future PR rather than folded into this one.
+
+**Status:** standing.
+
+---
+
 ## 2026-08-09 — WebAuthn passkeys ship as an additive second factor alongside TOTP
 
 **Reviewer authentication gains passkeys (WebAuthn, issue #70): a second
