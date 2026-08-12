@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/abradner/chuvar/backend/internal/api"
+	"github.com/abradner/chuvar/backend/internal/bouncer"
 	"github.com/abradner/chuvar/backend/internal/config"
 	"github.com/abradner/chuvar/backend/internal/custody"
 	"github.com/abradner/chuvar/backend/internal/db"
@@ -85,7 +87,19 @@ func run() error {
 
 	// TODO: swap for a real Summarizer once the Research track lands one, same as
 	// embed.Stub below.
-	a := api.New(st, embed.Stub{}, summarize.Stub{}, allowedOrigin, cfg.RequestTimeout, wa)
+	emb := embed.Stub{}
+
+	// bouncer.New's classify -> embed -> dedupe -> stage pipeline backs
+	// POST /api/agent/proposals (internal/api/agent_routes.go) exactly as it
+	// backs the propose_write MCP tool in cmd/mcpserver/main.go — constructed
+	// identically (same stub Embedder, same PassthroughClassifier, same
+	// config-driven rate limit) so the two callers can never silently
+	// diverge in how a proposal gets classified, embedded, or rate-limited.
+	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
+	b.RateLimit = cfg.ProposeWriteRateLimit
+	b.RateLimitWindow = cfg.ProposeWriteRateLimitWindow
+
+	a := api.New(st, emb, summarize.Stub{}, allowedOrigin, cfg.RequestTimeout, wa, b)
 
 	// Read/Write/IdleTimeout and ReadHeaderTimeout all come from cfg.RequestTimeout
 	// rather than being left at the zero-value http.Server default (no timeout at
@@ -100,8 +114,66 @@ func run() error {
 		ReadHeaderTimeout: cfg.RequestTimeout,
 	}
 
-	slog.Info("apiserver: listening", "addr", cfg.HTTPAddr, "allowedOrigin", allowedOrigin)
-	return server.ListenAndServe()
+	// CHUVAR_AGENT_ADDR is a second, entirely separate listener carrying only
+	// AgentRoutes() (internal/api/agent_routes.go) — the agent-authenticated
+	// HTTP surface a later PR points mcpserver at instead of a raw database
+	// credential (AGENTS.md §3.6, ticket E3). This is deliberately not
+	// cfg.HTTPAddr: an agent process holding nothing but its own agent token
+	// must not be able to reach the reviewer routes even at the network
+	// layer, on top of requireAgentAuth already rejecting a reviewer token
+	// that tried and requireAuth already rejecting an agent token that tried
+	// the other way. Not part of config.Config for the same reason
+	// CORS_ALLOWED_ORIGIN above isn't: specific to this binary, not shared
+	// with cmd/mcpserver. Defaults to loopback-only, same reasoning as
+	// HTTP_ADDR's own default (config.Load's doc comment).
+	agentAddr := os.Getenv("CHUVAR_AGENT_ADDR")
+	if agentAddr == "" {
+		agentAddr = "127.0.0.1:8081"
+	}
+	agentServer := &http.Server{
+		Addr:              agentAddr,
+		Handler:           a.AgentRoutes(),
+		ReadTimeout:       cfg.RequestTimeout,
+		WriteTimeout:      cfg.RequestTimeout,
+		IdleTimeout:       cfg.RequestTimeout,
+		ReadHeaderTimeout: cfg.RequestTimeout,
+	}
+
+	return runServers(cfg.RequestTimeout, allowedOrigin, server, agentServer)
+}
+
+// runServers runs the reviewer and agent listeners concurrently and blocks
+// until either one exits. Neither listener is allowed to keep running
+// unsupervised once the other has stopped (whether from a real error or an
+// operator-triggered Shutdown) — an agent listener silently outliving a dead
+// reviewer listener, or vice versa, is exactly the kind of half-up state
+// that should be an outage, not a partially-working server (CLAUDE.md
+// principle 5, fail closed, loudly).
+func runServers(requestTimeout time.Duration, allowedOrigin string, server, agentServer *http.Server) error {
+	errCh := make(chan error, 2)
+	go func() {
+		slog.Info("apiserver: listening (reviewer)", "addr", server.Addr, "allowedOrigin", allowedOrigin)
+		errCh <- fmt.Errorf("reviewer listener: %w", server.ListenAndServe())
+	}()
+	go func() {
+		slog.Info("apiserver: listening (agent)", "addr", agentServer.Addr)
+		errCh <- fmt.Errorf("agent listener: %w", agentServer.ListenAndServe())
+	}()
+
+	firstErr := <-errCh
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	// Best-effort: whichever listener didn't fail gets a clean shutdown: we've
+	// already decided the process is exiting, so its own shutdown error (if
+	// any) doesn't change that outcome and isn't worth masking firstErr for.
+	_ = server.Shutdown(shutdownCtx)
+	_ = agentServer.Shutdown(shutdownCtx)
+
+	if errors.Is(firstErr, http.ErrServerClosed) {
+		return nil
+	}
+	return firstErr
 }
 
 // newWebAuthn builds the Relying Party configuration every WebAuthn

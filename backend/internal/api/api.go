@@ -31,6 +31,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/abradner/chuvar/backend/internal/bouncer"
 	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/store"
 	"github.com/abradner/chuvar/backend/internal/summarize"
@@ -66,9 +67,16 @@ type API struct {
 	// validation is exactly the property that must never be silently absent
 	// (AGENTS.md §6, "every network-facing default must be secure by default").
 	WebAuthn *webauthn.WebAuthn
+
+	// Bouncer runs the classify/embed/dedupe/stage pipeline behind
+	// POST /api/agent/proposals (agent_routes.go), the same
+	// bouncer.ProposeWrite the propose_write MCP tool wraps. Required (New
+	// panics if nil): a nil Bouncer would mean that route panics on first
+	// use instead of failing at boot, matching WebAuthn's stance above.
+	Bouncer *bouncer.Bouncer
 }
 
-func New(st *store.Store, emb embed.Embedder, summ summarize.Summarizer, allowedOrigin string, requestTimeout time.Duration, wa *webauthn.WebAuthn) *API {
+func New(st *store.Store, emb embed.Embedder, summ summarize.Summarizer, allowedOrigin string, requestTimeout time.Duration, wa *webauthn.WebAuthn, b *bouncer.Bouncer) *API {
 	if requestTimeout <= 0 {
 		panic("api: RequestTimeout must be positive — a zero or negative value disables request cancellation entirely")
 	}
@@ -78,7 +86,10 @@ func New(st *store.Store, emb embed.Embedder, summ summarize.Summarizer, allowed
 	if wa == nil {
 		panic("api: WebAuthn must not be nil — construct it with webauthn.New and the deployment's RP ID/origins")
 	}
-	return &API{Store: st, Embedder: emb, Summarizer: summ, AllowedOrigin: allowedOrigin, RequestTimeout: requestTimeout, WebAuthn: wa}
+	if b == nil {
+		panic("api: Bouncer must not be nil — construct it with bouncer.New")
+	}
+	return &API{Store: st, Embedder: emb, Summarizer: summ, AllowedOrigin: allowedOrigin, RequestTimeout: requestTimeout, WebAuthn: wa, Bouncer: b}
 }
 
 // validateAllowedOrigin rejects anything that isn't either empty (CORS disabled)
