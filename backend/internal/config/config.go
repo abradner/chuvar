@@ -25,6 +25,17 @@ type Config struct {
 	// still be needlessly wide open. Set it explicitly to widen on purpose.
 	HTTPAddr string
 
+	// AgentAddr is where the agent-facing HTTP surface (api.AgentRoutes —
+	// /api/agent/*) listens, bound to a SEPARATE net.Listener/http.Server
+	// from HTTPAddr's reviewer surface (api.Routes). This is the network-layer
+	// half of the isolation between the two credential classes: agent-token
+	// auth (requireAgentAuth) is the first layer, but a bug in that check
+	// alone would still leave reviewer routes reachable from agent context if
+	// both surfaces shared one listener. Defaults to loopback-only, same
+	// reasoning as HTTPAddr, on a different port so the two can run side by
+	// side in the same process.
+	AgentAddr string
+
 	// RequestTimeout bounds individual request handling.
 	RequestTimeout time.Duration
 
@@ -52,6 +63,7 @@ func Load() (Config, error) {
 	return Config{
 		DatabaseURL:                 databaseURL,
 		HTTPAddr:                    envOr("HTTP_ADDR", "127.0.0.1:8080"),
+		AgentAddr:                   envOr("CHUVAR_AGENT_ADDR", "127.0.0.1:8081"),
 		RequestTimeout:              envDurationOr("REQUEST_TIMEOUT", 10*time.Second),
 		ProposeWriteRateLimit:       envIntOr("PROPOSE_WRITE_RATE_LIMIT", 20),
 		ProposeWriteRateLimitWindow: envDurationOr("PROPOSE_WRITE_RATE_LIMIT_WINDOW", time.Minute),

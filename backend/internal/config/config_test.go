@@ -16,6 +16,7 @@ func TestLoad_MissingRequiredVar(t *testing.T) {
 func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost:54322/chuvar")
 	t.Setenv("HTTP_ADDR", "")
+	t.Setenv("CHUVAR_AGENT_ADDR", "")
 	t.Setenv("REQUEST_TIMEOUT", "")
 	t.Setenv("PROPOSE_WRITE_RATE_LIMIT", "")
 	t.Setenv("PROPOSE_WRITE_RATE_LIMIT_WINDOW", "")
@@ -26,6 +27,9 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if cfg.HTTPAddr != "127.0.0.1:8080" {
 		t.Errorf("HTTPAddr = %q, want %q", cfg.HTTPAddr, "127.0.0.1:8080")
+	}
+	if cfg.AgentAddr != "127.0.0.1:8081" {
+		t.Errorf("AgentAddr = %q, want %q", cfg.AgentAddr, "127.0.0.1:8081")
 	}
 	if cfg.RequestTimeout != 10*time.Second {
 		t.Errorf("RequestTimeout = %v, want %v", cfg.RequestTimeout, 10*time.Second)
@@ -41,6 +45,7 @@ func TestLoad_Defaults(t *testing.T) {
 func TestLoad_OverridesApplied(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost:54322/chuvar")
 	t.Setenv("HTTP_ADDR", ":9090")
+	t.Setenv("CHUVAR_AGENT_ADDR", ":9091")
 	t.Setenv("REQUEST_TIMEOUT", "30s")
 	t.Setenv("PROPOSE_WRITE_RATE_LIMIT", "5")
 	t.Setenv("PROPOSE_WRITE_RATE_LIMIT_WINDOW", "10s")
@@ -51,6 +56,9 @@ func TestLoad_OverridesApplied(t *testing.T) {
 	}
 	if cfg.HTTPAddr != ":9090" {
 		t.Errorf("HTTPAddr = %q, want %q", cfg.HTTPAddr, ":9090")
+	}
+	if cfg.AgentAddr != ":9091" {
+		t.Errorf("AgentAddr = %q, want %q", cfg.AgentAddr, ":9091")
 	}
 	if cfg.RequestTimeout != 30*time.Second {
 		t.Errorf("RequestTimeout = %v, want %v", cfg.RequestTimeout, 30*time.Second)

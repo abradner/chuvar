@@ -1,19 +1,33 @@
-// Package api is the REST API behind the approval UI: reviewing/approving/
-// rejecting staged diffs, and creating/listing/revoking grants. This is the human
-// side of the consent model — nothing here is reachable from an MCP tool, and
-// nothing in mcptools calls into this package.
+// Package api serves two DISTINCT HTTP surfaces, deliberately never merged
+// onto one listener:
 //
-// Every route requires a named, individually-revocable reviewer/device token (see
-// requireAuth and store.AuthenticateReviewerToken) — this replaces the original v0
-// answer of a single shared secret. Every mutation's decided_by/approved_by/
-// revoked_by is now derived from the authenticated token's label (reviewerFromContext),
-// never read from the request body: a client-supplied identity field is exactly
-// the "self-reported, not authenticated" gap flagged after v0 shipped (Notion tasks
-// tracker), since nothing stopped one reviewer's browser session from attributing an
-// approval to a different name. This still isn't real multi-user auth with roles —
-// every active token can do everything any other active token can, matching "one
-// trusted operator, multiple devices" rather than a permissions model — but who
-// performed an action is now provably the token holder, not a string they typed.
+//   - Routes(): the REST API behind the approval UI — reviewing/approving/
+//     rejecting staged diffs, creating/listing/revoking grants. This is the
+//     human side of the consent model.
+//   - AgentRoutes() (agent_routes.go): the agent-facing surface an agent
+//     token authenticates against — search, propose, list its own grants,
+//     request more. This is the HTTP counterpart to internal/mcptools' MCP
+//     tools (a later PR makes mcpserver a client of it and deletes
+//     mcptools' duplicate logic); nothing in mcptools calls into this
+//     package, and nothing here calls into mcptools.
+//
+// Every reviewer route requires a named, individually-revocable reviewer/
+// device token (see requireAuth and store.AuthenticateReviewerToken) — this
+// replaces the original v0 answer of a single shared secret. Every
+// mutation's decided_by/approved_by/revoked_by is now derived from the
+// authenticated token's label (reviewerFromContext), never read from the
+// request body: a client-supplied identity field is exactly the
+// "self-reported, not authenticated" gap flagged after v0 shipped (Notion
+// tasks tracker), since nothing stopped one reviewer's browser session from
+// attributing an approval to a different name. This still isn't real
+// multi-user auth with roles — every active token can do everything any
+// other active token can, matching "one trusted operator, multiple devices"
+// rather than a permissions model — but who performed an action is now
+// provably the token holder, not a string they typed. Every agent route
+// derives its acting subject the same way, from a structurally distinct
+// agent-class token (requireAgentAuth, agent_auth.go) — see that file's doc
+// comment for why the two credential classes and the two listeners are both
+// required, not just one or the other.
 // The server also binds 127.0.0.1 by default (internal/config) and CORS reflects
 // one specific configured origin rather than a wildcard (see Routes/cors below) as
 // defense in depth on top of token auth, not instead of it.
@@ -31,6 +45,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/abradner/chuvar/backend/internal/bouncer"
 	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/store"
 	"github.com/abradner/chuvar/backend/internal/summarize"
@@ -48,6 +63,16 @@ type API struct {
 	Store      *store.Store
 	Embedder   embed.Embedder
 	Summarizer summarize.Summarizer
+
+	// Bouncer runs the propose_write pipeline (classify, embed, dedupe,
+	// stage) for the agent-facing surface (AgentRoutes' POST
+	// /api/agent/proposals) — the HTTP twin of mcptools.propose_write's
+	// bouncer.ProposeWrite call. Not used by any reviewer route (Routes());
+	// present on API rather than a separate type because it's constructed
+	// once, alongside Store/Embedder, from the same config (see
+	// cmd/apiserver/main.go, built exactly as cmd/mcpserver/main.go builds
+	// its own).
+	Bouncer *bouncer.Bouncer
 
 	// AllowedOrigin is the single origin the CORS policy permits (e.g.
 	// "http://localhost:5173" for the Vite dev server). Empty disables CORS
@@ -68,7 +93,7 @@ type API struct {
 	WebAuthn *webauthn.WebAuthn
 }
 
-func New(st *store.Store, emb embed.Embedder, summ summarize.Summarizer, allowedOrigin string, requestTimeout time.Duration, wa *webauthn.WebAuthn) *API {
+func New(st *store.Store, emb embed.Embedder, summ summarize.Summarizer, b *bouncer.Bouncer, allowedOrigin string, requestTimeout time.Duration, wa *webauthn.WebAuthn) *API {
 	if requestTimeout <= 0 {
 		panic("api: RequestTimeout must be positive — a zero or negative value disables request cancellation entirely")
 	}
@@ -78,7 +103,10 @@ func New(st *store.Store, emb embed.Embedder, summ summarize.Summarizer, allowed
 	if wa == nil {
 		panic("api: WebAuthn must not be nil — construct it with webauthn.New and the deployment's RP ID/origins")
 	}
-	return &API{Store: st, Embedder: emb, Summarizer: summ, AllowedOrigin: allowedOrigin, RequestTimeout: requestTimeout, WebAuthn: wa}
+	if b == nil {
+		panic("api: Bouncer must not be nil — POST /api/agent/proposals (AgentRoutes) requires one; construct it with bouncer.New, matching cmd/mcpserver/main.go")
+	}
+	return &API{Store: st, Embedder: emb, Summarizer: summ, Bouncer: b, AllowedOrigin: allowedOrigin, RequestTimeout: requestTimeout, WebAuthn: wa}
 }
 
 // validateAllowedOrigin rejects anything that isn't either empty (CORS disabled)
@@ -116,11 +144,17 @@ func validateAllowedOrigin(origin string) error {
 	return nil
 }
 
-// Routes builds the mux. Uses Go's stdlib method+path routing (net/http as of
-// 1.22) rather than a router framework — see AGENTS.md §6, not enough surface
-// here to justify the dependency. cors wraps requireAuth, not the other way
-// around: a CORS preflight (OPTIONS) request never carries the Authorization
-// header, so it has to be answered before auth is checked, not after.
+// Routes builds the mux for the human-reviewer surface. See AgentRoutes
+// (agent_routes.go) for the separate, agent-facing surface this package also
+// serves — the two MUST be bound to different net.Listeners (cmd/apiserver),
+// never merged onto one http.Server; nothing in this package's own auth
+// chain ever mixes them (requireAuth here vs. requireAgentAuth there, one
+// credential table each). Uses Go's stdlib method+path routing (net/http as
+// of 1.22) rather than a router framework — see AGENTS.md §6, not enough
+// surface here to justify the dependency. cors wraps requireAuth, not the
+// other way around: a CORS preflight (OPTIONS) request never carries the
+// Authorization header, so it has to be answered before auth is checked, not
+// after.
 func (a *API) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/staged-diffs", a.listStagedDiffs)

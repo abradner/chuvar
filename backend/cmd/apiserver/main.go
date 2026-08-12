@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/abradner/chuvar/backend/internal/api"
+	"github.com/abradner/chuvar/backend/internal/bouncer"
 	"github.com/abradner/chuvar/backend/internal/config"
 	"github.com/abradner/chuvar/backend/internal/custody"
 	"github.com/abradner/chuvar/backend/internal/db"
@@ -83,9 +85,27 @@ func run() error {
 		return err
 	}
 
+	// emb is shared between api.New (agent search's server-side embed step,
+	// agent_search.go) and the Bouncer below (propose_write's embed step) —
+	// one Embedder, same as cmd/mcpserver, not two independently-configured
+	// ones that could silently drift.
+	//
 	// TODO: swap for a real Summarizer once the Research track lands one, same as
 	// embed.Stub below.
-	a := api.New(st, embed.Stub{}, summarize.Stub{}, allowedOrigin, cfg.RequestTimeout, wa)
+	emb := embed.Stub{}
+
+	// b backs AgentRoutes' POST /api/agent/proposals (agent_proposals.go),
+	// constructed exactly as cmd/mcpserver/main.go builds its own — same
+	// Classifier stub, same config-sourced rate limit — so the two surfaces
+	// enforce the identical propose_write policy rather than two that can
+	// drift apart. This is also the reason api.New now requires a
+	// *bouncer.Bouncer: the reviewer surface (Routes) has no use for it, but
+	// api.New builds one API for both surfaces this binary serves.
+	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
+	b.RateLimit = cfg.ProposeWriteRateLimit
+	b.RateLimitWindow = cfg.ProposeWriteRateLimitWindow
+
+	a := api.New(st, emb, summarize.Stub{}, b, allowedOrigin, cfg.RequestTimeout, wa)
 
 	// Read/Write/IdleTimeout and ReadHeaderTimeout all come from cfg.RequestTimeout
 	// rather than being left at the zero-value http.Server default (no timeout at
@@ -100,8 +120,57 @@ func run() error {
 		ReadHeaderTimeout: cfg.RequestTimeout,
 	}
 
+	// agentServer is a SEPARATE http.Server on its own listener
+	// (CHUVAR_AGENT_ADDR) serving AgentRoutes() — never merged onto server
+	// above. This is the network-layer half of the isolation between the
+	// reviewer and agent surfaces (api.AgentRoutes' doc comment): an agent
+	// process holding a valid agent token has no route at all to anything
+	// server serves, and vice versa for a reviewer token against
+	// agentServer — on top of, not instead of, requireAgentAuth/requireAuth
+	// each rejecting the other's credential. Same four timeouts as server,
+	// for the identical slowloris/hung-connection reasoning.
+	agentServer := &http.Server{
+		Addr:              cfg.AgentAddr,
+		Handler:           a.AgentRoutes(),
+		ReadTimeout:       cfg.RequestTimeout,
+		WriteTimeout:      cfg.RequestTimeout,
+		IdleTimeout:       cfg.RequestTimeout,
+		ReadHeaderTimeout: cfg.RequestTimeout,
+	}
+
 	slog.Info("apiserver: listening", "addr", cfg.HTTPAddr, "allowedOrigin", allowedOrigin)
-	return server.ListenAndServe()
+	slog.Info("apiserver: agent surface listening", "addr", cfg.AgentAddr)
+	return runServers(server, agentServer)
+}
+
+// runServers runs both listeners concurrently and ties their lifetimes
+// together: if either one exits (a bind failure, or a graceful Shutdown
+// called from outside — there is no signal handler here yet, matching this
+// binary's pre-existing stance of a bare server.ListenAndServe() with no
+// graceful-shutdown story at all), the other is given a bounded window to
+// shut down cleanly rather than being silently left listening on its own
+// after its sibling has already gone. Returns the first real error (nil for
+// a clean http.ErrServerClosed on both, which is what a deliberate Shutdown
+// produces).
+func runServers(server, agentServer *http.Server) error {
+	errs := make(chan error, 2)
+	go func() { errs <- server.ListenAndServe() }()
+	go func() { errs <- agentServer.ListenAndServe() }()
+
+	first := <-errs
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = server.Shutdown(shutdownCtx)
+	_ = agentServer.Shutdown(shutdownCtx)
+	second := <-errs
+
+	for _, err := range []error{first, second} {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	}
+	return nil
 }
 
 // newWebAuthn builds the Relying Party configuration every WebAuthn
