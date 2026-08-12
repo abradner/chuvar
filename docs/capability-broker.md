@@ -11,8 +11,9 @@ the decision dates below are original to when each decision was made, not to thi
 >
 > 1. **The zero-ambient-authority floor** (tracker tickets E1, E2, E6). E1 and E6 are done;
 >    E2 is in progress. A related but separate ticket, E3 — removing `mcpserver`'s residual
->    direct database credential — is outstanding and tracked independently (see the trust
->    boundary decision below).
+>    direct database credential — **is done** (#82/#86): `mcpserver` now authenticates with a
+>    revocable agent-class API token against a separate agent-only listener instead of holding
+>    `DATABASE_URL` (see the trust boundary decision below, and the update appended to it).
 > 2. **A phishing-resistant reviewer factor** (Passkeys/WebAuthn) on the grant-approval path.
 >    Not started. Today that path is protected by a device-local TOTP second factor, which is
 >    an explicit interim stopgap, not the target state.
@@ -184,8 +185,8 @@ flowchart TB
   Human -->|"grant: interactive, once per session"| UI
   UI --> API
   API --> DB
-  MCP --> DB
-  MCP --> FACTS
+  API --> FACTS
+  MCP -->|"agent-class token, HTTP"| API
   BROKER --> DB
   BROKER --> CUSTODY
   CUSTODY --> OP
@@ -199,8 +200,12 @@ flowchart TB
 
 **Invariants the diagram encodes:**
 
-- `brokerd` never reads `facts`. `mcpserver` never holds key material. The only shared
-  surface is the grant and audit tables.
+- `brokerd` never reads `facts`. `mcpserver` never holds key material, and — as of #82/#86 —
+  holds no database credential of any kind either: it reaches `grants`/`facts` only indirectly,
+  as an HTTP client of `apiserver`'s agent-only listener, authenticated with a revocable
+  agent-class token. The only shared *database* surface between `mcpserver` and `brokerd` is
+  the grant and audit tables, and neither process holds a direct connection to reach it —
+  `apiserver` does, on `mcpserver`'s behalf.
 - The ssh-agent shim means git needs no modification beyond pointing at a socket.
 - Preflight is a separate, cheap call — not a side effect of attempting to sign.
 
@@ -554,6 +559,22 @@ credentials; the direct database credential out of agent reach; reviewer-factor 
 sealed) — the same posture already flagged for the TOTP/WebAuthn interim above. Enforcement
 tickets for closing this gap live in the sibling enforcement-boundary workstream, alongside
 other known gaps that outlive the project that discovered them.
+
+*Update 2026-08-13 (#82/#86):* the "Consequences" paragraph above is now
+shipped, not projected — `mcpserver` no longer holds `DATABASE_URL` or migration authority.
+It is a stdio-to-HTTP shim exactly as predicted: a thin MCP process authenticated with a
+revocable agent-class token (`agent_tokens`, structurally distinct from `reviewer_tokens`)
+against `apiserver`'s agent-only listener (`CHUVAR_AGENT_ADDR`), never the reviewer one. The
+calling subject is resolved server-side from that token on every request — it is no longer
+self-declared by whoever spawns the process (`MCP_SUBJECT` is gone). This closes one item of
+the zero-ambient-authority floor named in "Interim state" above ("the direct database
+credential out of agent reach"); the other two items listed there (custody-held database
+password rotation; reviewer-factor secrets sealed beyond the current plaintext master key —
+see `docs/operations.md`, "⚠️ Not sealed at rest yet") remain open, so capability grants stay
+blocked on those, not on this one anymore. See `docs/operations.md`'s "Minting and deploying an
+agent token" for the operational procedure, and `docs/decisions.md`'s 2026-08-13 entry for the
+rejected alternatives and accepted costs behind the specific shape this took (separate table,
+separate listener, unconditional strong factor on mint).
 
 ### 2026-08-01 — Sealed vault committed: ciphertext at rest, local AND cloud
 
