@@ -2,15 +2,15 @@ package mcptools
 
 import (
 	"context"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/abradner/chuvar/backend/internal/store"
+	"github.com/abradner/chuvar/backend/internal/agentclient"
 )
 
-// listGrantsArgs is intentionally empty — subject is bound at server construction
-// (see Register's doc comment), not supplied by the caller.
+// listGrantsArgs is intentionally empty — subject is resolved server-side
+// from the agent-class bearer token client carries (see mcptools.go's
+// Register doc comment), not supplied by the caller.
 type listGrantsArgs struct{}
 
 type grantView struct {
@@ -26,7 +26,13 @@ type listGrantsOutput struct {
 	Grants []grantView `json:"grants"`
 }
 
-func registerListGrants(s *mcp.Server, subject string, st *store.Store) {
+// registerListGrants registers list_grants as a thin adapter over
+// client.ListGrants: no request body, map the response onto
+// listGrantsOutput. Active/ExpiresAt/RevokedAt all arrive already computed
+// (agentGrantView, internal/api/agent_routes.go) — there is no time.Time on
+// this side of the wire to compute Active(now) against or format, unlike
+// before the cutover.
+func registerListGrants(s *mcp.Server, client *agentclient.Client) {
 	falsePtr := false
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "list_grants",
@@ -38,31 +44,22 @@ func registerListGrants(s *mcp.Server, subject string, st *store.Store) {
 			IdempotentHint:  true,
 		},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ listGrantsArgs) (*mcp.CallToolResult, listGrantsOutput, error) {
-		grants, err := st.ListGrants(ctx, subject)
+		res, err := client.ListGrants(ctx)
 		if err != nil {
-			return nil, listGrantsOutput{}, toolError("list_grants", err)
+			return nil, listGrantsOutput{}, mapClientError("list_grants", err)
 		}
 
-		now := time.Now()
 		out := listGrantsOutput{}
-		for _, g := range grants {
+		for _, g := range res.Grants {
 			out.Grants = append(out.Grants, grantView{
 				ID:        g.ID,
 				Scopes:    g.Scopes,
 				Depth:     g.Depth,
-				Active:    g.Active(now),
-				ExpiresAt: formatTimePtr(g.ExpiresAt),
-				RevokedAt: formatTimePtr(g.RevokedAt),
+				Active:    g.Active,
+				ExpiresAt: g.ExpiresAt,
+				RevokedAt: g.RevokedAt,
 			})
 		}
 		return nil, out, nil
 	})
-}
-
-func formatTimePtr(t *time.Time) *string {
-	if t == nil {
-		return nil
-	}
-	s := t.Format(time.RFC3339)
-	return &s
 }

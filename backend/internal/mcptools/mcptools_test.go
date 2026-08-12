@@ -4,24 +4,65 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/abradner/chuvar/backend/internal/agentclient"
+	"github.com/abradner/chuvar/backend/internal/api"
 	"github.com/abradner/chuvar/backend/internal/bouncer"
 	"github.com/abradner/chuvar/backend/internal/db"
 	"github.com/abradner/chuvar/backend/internal/embed"
 	"github.com/abradner/chuvar/backend/internal/store"
+	"github.com/abradner/chuvar/backend/internal/summarize"
 )
 
-// testSession spins up a real MCP server bound to subject (with all v0 tools
-// registered) and a real client connected over an in-memory transport, so these
-// tests exercise the actual protocol marshaling/unmarshaling, not just the Go
-// function calls underneath it.
-func testSession(t *testing.T, subject string) (*mcp.ClientSession, *store.Store) {
+// Post-cutover (ticket E3, #82/#86 PR 4), this package no longer touches
+// Postgres, an Embedder, or a Bouncer directly — every tool is a thin HTTP
+// client of internal/api's agent-facing surface. These tests therefore drive
+// the full real path: a genuine *api.API serving AgentRoutes() over
+// httptest, an agent-class token minted directly through the store (the same
+// shortcut a human reviewer's mint action stands in for, since minting over
+// HTTP needs a second factor by design), and an *agentclient.Client built
+// against that server. This is deliberately the same shape as
+// internal/api/agent_routes_test.go's own agentTestServer helper —
+// reproduced here rather than imported, because that package (a branch below
+// this PR) is off-limits to modify, and importing its unexported test
+// helpers isn't possible from another package anyway.
+
+const (
+	testRPID   = "localhost"
+	testOrigin = "http://localhost:5173"
+)
+
+func testWebAuthn(t *testing.T) *webauthn.WebAuthn {
+	t.Helper()
+	wa, err := webauthn.New(&webauthn.Config{
+		RPID:          testRPID,
+		RPDisplayName: "Chuvar mcptools test",
+		RPOrigins:     []string{testOrigin},
+		AuthenticatorSelection: protocol.AuthenticatorSelection{
+			UserVerification: protocol.VerificationRequired,
+		},
+	})
+	if err != nil {
+		t.Fatalf("webauthn.New() error = %v", err)
+	}
+	return wa
+}
+
+// testPool opens a migrated, truncated connection to DATABASE_URL, skipping
+// the test entirely if it isn't set — matching every other integration test
+// in this codebase (AGENTS.md §4).
+func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
@@ -30,37 +71,86 @@ func testSession(t *testing.T, subject string) (*mcp.ClientSession, *store.Store
 	if err := db.Migrate(url); err != nil {
 		t.Fatalf("db.Migrate() error = %v", err)
 	}
-
 	ctx := context.Background()
 	pool, err := db.Open(ctx, url)
 	if err != nil {
 		t.Fatalf("db.Open() error = %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits, capability_grant_identities, capability_grant_tokens`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, agent_tokens, grant_requests, data_keys, propose_write_rate_limits, capability_grant_identities, capability_grant_tokens`); err != nil {
 		t.Fatalf("truncating tables: %v", err)
 	}
+	return pool
+}
 
+// testHarness bundles a real store, bouncer and api.API serving AgentRoutes()
+// over httptest — everything a test needs both to drive tools through a real
+// HTTP+MCP round trip (session) and to reach into the store directly for
+// fixtures a human reviewer would normally provide (grants, committed facts).
+type testHarness struct {
+	pool *pgxpool.Pool
+	st   *store.Store
+	b    *bouncer.Bouncer
+	srv  *httptest.Server
+}
+
+func newTestHarness(t *testing.T, emb embed.Embedder) *testHarness {
+	t.Helper()
+	pool := testPool(t)
 	st := store.New(pool)
-	emb := embed.Stub{}
+	if emb == nil {
+		emb = embed.Stub{}
+	}
 	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
+	a := api.New(st, emb, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t), b)
+	srv := httptest.NewServer(a.AgentRoutes())
+	t.Cleanup(srv.Close)
+	return &testHarness{pool: pool, st: st, b: b, srv: srv}
+}
+
+// tokenSeq guarantees a unique plaintext per minted agent token across a
+// single test binary run — agent_tokens' active-token index is unique on
+// token_hash (20260812120000_agent_tokens.up.sql), so two active tokens
+// must never hash the same, even for the same subject minted twice in one
+// test.
+var tokenSeq atomic.Int64
+
+// session mints a fresh agent-class token for subject, builds an
+// *agentclient.Client authenticated with it against h.srv, registers the
+// v0 tool surface with that client, and returns a live in-memory MCP client
+// session — the same shape cmd/mcpserver constructs at boot (agentclient.Client
+// + mcptools.Register), minus the process boundary and stdio transport.
+func (h *testHarness) session(t *testing.T, subject string) *mcp.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+	plaintext := fmt.Sprintf("test-agent-token-%s-%d", subject, tokenSeq.Add(1))
+	if _, err := h.st.CreateAgentToken(ctx, subject, "test agent: "+subject, plaintext); err != nil {
+		t.Fatalf("CreateAgentToken() error = %v", err)
+	}
+	client := &agentclient.Client{BaseURL: h.srv.URL, Token: plaintext, HTTP: h.srv.Client()}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
-	Register(server, subject, st, emb, b)
-
+	Register(server, client)
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
 		t.Fatalf("server.Connect() error = %v", err)
 	}
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "test"}, nil)
-	session, err := client.Connect(ctx, clientTransport, nil)
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "test"}, nil)
+	session, err := mcpClient.Connect(ctx, clientTransport, nil)
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
 	t.Cleanup(func() { _ = session.Close() })
+	return session
+}
 
-	return session, st
+// testSession is the common-case entry point: a harness with the stub
+// embedder plus one session bound to subject, for tests that don't need to
+// tune the bouncer or mint a second session.
+func testSession(t *testing.T, subject string) (*mcp.ClientSession, *testHarness) {
+	t.Helper()
+	h := newTestHarness(t, nil)
+	return h.session(t, subject), h
 }
 
 func callTool[T any](t *testing.T, session *mcp.ClientSession, name string, args any) T {
@@ -84,11 +174,26 @@ func callTool[T any](t *testing.T, session *mcp.ClientSession, name string, args
 	return out
 }
 
+// toolErrorText extracts the text of a tool-error result, the same value an
+// MCP client actually sees, so tests can assert on what's shown to the calling
+// agent rather than on internal error types.
+func toolErrorText(t *testing.T, res *mcp.CallToolResult) string {
+	t.Helper()
+	if len(res.Content) == 0 {
+		t.Fatal("tool error result has no content")
+	}
+	tc, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("tool error content[0] = %T, want *mcp.TextContent", res.Content[0])
+	}
+	return tc.Text
+}
+
 func TestListGrants_ViaMCP(t *testing.T) {
-	session, st := testSession(t, "agent-a")
+	session, h := testSession(t, "agent-a")
 	ctx := context.Background()
 
-	if _, err := st.CreateGrant(ctx, "agent-a", []string{"identity.basic", "preferences.coffee"}, "memory", "facts", nil, "human-reviewer"); err != nil {
+	if _, err := h.st.CreateGrant(ctx, "agent-a", []string{"identity.basic", "preferences.coffee"}, "memory", "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
@@ -104,62 +209,30 @@ func TestListGrants_ViaMCP(t *testing.T) {
 	}
 }
 
-// TestSubjectIsBoundNotClientSupplied is the regression test for the review
-// finding that `subject` used to be a client-supplied, unauthenticated tool
-// argument: any caller could pass any subject string and act on their behalf
-// (enumerate their grants, read everything they're granted, forge writes
-// attributed to them). Now subject is bound once at server construction — this
-// proves two independently-bound sessions each only ever see their own subject's
-// grants, with no tool argument able to cross that boundary (the args structs
-// literally have no Subject field anymore, so this is also enforced at compile
-// time, but this test proves the runtime behavior end to end).
-func TestSubjectIsBoundNotClientSupplied(t *testing.T) {
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		t.Skip("DATABASE_URL not set; skipping mcptools integration tests")
-	}
-	if err := db.Migrate(url); err != nil {
-		t.Fatalf("db.Migrate() error = %v", err)
-	}
+// TestSubjectIsBoundToTheAuthenticatedToken is the cutover's regression test
+// for the pre-cutover MCP_SUBJECT trust model: subject used to be an
+// environment variable the launching agent host set — trusted, but not a
+// credential. Now it's resolved server-side from whichever agent-class
+// token client.Token carries (store.AuthenticateAgentToken). Two independent
+// tokens for two different subjects, run through two independent sessions,
+// must each only ever see their own subject's grants — there is still no
+// tool argument anywhere in this package that can cross that boundary (the
+// args structs have no Subject field), but this proves the token-derived
+// binding holds end to end over the real HTTP path, not just at the Go type
+// level.
+func TestSubjectIsBoundToTheAuthenticatedToken(t *testing.T) {
+	h := newTestHarness(t, nil)
 	ctx := context.Background()
-	pool, err := db.Open(ctx, url)
-	if err != nil {
-		t.Fatalf("db.Open() error = %v", err)
-	}
-	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits, capability_grant_identities, capability_grant_tokens`); err != nil {
-		t.Fatalf("truncating tables: %v", err)
-	}
-	st := store.New(pool)
 
-	if _, err := st.CreateGrant(ctx, "alice", []string{"identity.sensitive"}, "memory", "facts", nil, "human-reviewer"); err != nil {
+	if _, err := h.st.CreateGrant(ctx, "alice", []string{"identity.sensitive"}, "memory", "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
-	if _, err := st.CreateGrant(ctx, "bob", []string{"preferences.coffee"}, "memory", "facts", nil, "human-reviewer"); err != nil {
+	if _, err := h.st.CreateGrant(ctx, "bob", []string{"preferences.coffee"}, "memory", "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
-	emb := embed.Stub{}
-	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
-
-	newSession := func(subject string) *mcp.ClientSession {
-		server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
-		Register(server, subject, st, emb, b)
-		clientTransport, serverTransport := mcp.NewInMemoryTransports()
-		if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
-			t.Fatalf("server.Connect() error = %v", err)
-		}
-		client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "test"}, nil)
-		session, err := client.Connect(ctx, clientTransport, nil)
-		if err != nil {
-			t.Fatalf("client.Connect() error = %v", err)
-		}
-		t.Cleanup(func() { _ = session.Close() })
-		return session
-	}
-
-	aliceSession := newSession("alice")
-	bobSession := newSession("bob")
+	aliceSession := h.session(t, "alice")
+	bobSession := h.session(t, "bob")
 
 	aliceGrants := callTool[listGrantsOutput](t, aliceSession, "list_grants", listGrantsArgs{})
 	if len(aliceGrants.Grants) != 1 || aliceGrants.Grants[0].Scopes[0] != "identity.sensitive" {
@@ -244,78 +317,17 @@ func TestReadWithScopeCheck_LimitTooLargeIsError(t *testing.T) {
 	}
 }
 
-// revokingEmbedder wraps a real Embedder and revokes a grant as a side effect of
-// Embed — simulating a grant being revoked while an embedding call is in flight,
-// deterministically rather than relying on real timing. See
-// TestReadWithScopeCheck_RevokedMidEmbedIsRejected.
-type revokingEmbedder struct {
-	embed.Embedder
-	st      *store.Store
-	grantID string
-}
-
-func (e revokingEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	if err := e.st.RevokeGrant(ctx, e.grantID, "test-revoker"); err != nil {
-		return nil, err
-	}
-	return e.Embedder.Embed(ctx, text)
-}
-
-func TestReadWithScopeCheck_RevokedMidEmbedIsRejected(t *testing.T) {
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		t.Skip("DATABASE_URL not set; skipping mcptools integration test")
-	}
-	if err := db.Migrate(url); err != nil {
-		t.Fatalf("db.Migrate() error = %v", err)
-	}
-	ctx := context.Background()
-	pool, err := db.Open(ctx, url)
-	if err != nil {
-		t.Fatalf("db.Open() error = %v", err)
-	}
-	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits, capability_grant_identities, capability_grant_tokens`); err != nil {
-		t.Fatalf("truncating tables: %v", err)
-	}
-
-	st := store.New(pool)
-	g, err := st.CreateGrant(ctx, "agent-a", []string{"identity.basic"}, "memory", "facts", nil, "test-setup")
-	if err != nil {
-		t.Fatalf("CreateGrant() error = %v", err)
-	}
-
-	emb := revokingEmbedder{Embedder: embed.Stub{}, st: st, grantID: g.ID}
-	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
-
-	server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
-	Register(server, "agent-a", st, emb, b)
-	clientTransport, serverTransport := mcp.NewInMemoryTransports()
-	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
-		t.Fatalf("server.Connect() error = %v", err)
-	}
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "test"}, nil)
-	session, err := client.Connect(ctx, clientTransport, nil)
-	if err != nil {
-		t.Fatalf("client.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = session.Close() })
-
-	// The grant is active when the tool call starts (requested_scopes passes the
-	// pre-embed check) but gets revoked inside Embed, before SearchFacts runs.
-	// Without the re-fetch, this would return status=ok using the stale
-	// pre-revocation scope snapshot.
-	out := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
-		Query:           "anything",
-		RequestedScopes: []string{"identity.basic"},
-	})
-	if out.Status != "insufficient_scope" {
-		t.Fatalf("read_with_scope_check after mid-request revocation: status = %q, want insufficient_scope", out.Status)
-	}
-}
+// The revoke-during-embed race (a grant revoked while an embedding call for
+// the same request is in flight) is no longer reproducible from this
+// package: the embed call, and the re-check that closes the race, both now
+// run inside agentSearch (internal/api/agent_routes.go), a single server-side
+// handler this package has no way to inject a side-effecting Embedder into.
+// That test now lives there, as TestAgentSearch_RevokedMidEmbedIsRejected —
+// this comment exists so "the race test disappeared" reads as "moved with
+// the code it exercises," not as a dropped assertion.
 
 func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
-	session, st := testSession(t, "agent-a")
+	session, h := testSession(t, "agent-a")
 	ctx := context.Background()
 
 	proposed := callTool[proposeWriteOutput](t, session, "propose_write", proposeWriteArgs{
@@ -333,7 +345,7 @@ func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 	// separate, human-triggered action (AGENTS.md §3.1), not exposed as an MCP
 	// tool in v0. Commit it directly via the store, standing in for that human
 	// approval step.
-	if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.coffee"}, "memory", "facts", nil, "human-reviewer"); err != nil {
+	if _, err := h.st.CreateGrant(ctx, "agent-a", []string{"preferences.coffee"}, "memory", "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 	beforeCommit := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
@@ -344,15 +356,11 @@ func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 		t.Fatalf("read before commit returned facts = %+v, want none (still only staged)", beforeCommit.Facts)
 	}
 
-	// CommitDiff takes its own embedding rather than reusing the one ProposeDiff
-	// computed for the dedupe check (that one isn't persisted on the diff row) —
-	// re-embedding at commit time is what a real approval-UI backend would do.
-	// embed.Stub is deterministic, so this matches what propose_write used.
 	commitVec, err := embed.Stub{}.Embed(ctx, "user's favorite coffee order is a flat white")
 	if err != nil {
 		t.Fatalf("Embed() error = %v", err)
 	}
-	if _, err := st.CommitDiff(ctx, proposed.DiffID, "human-reviewer", commitVec, ""); err != nil {
+	if _, err := h.st.CommitDiff(ctx, proposed.DiffID, "human-reviewer", commitVec, ""); err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
@@ -366,28 +374,28 @@ func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 	if len(afterCommit.Facts) != 1 {
 		t.Fatalf("read after commit facts = %+v, want 1", afterCommit.Facts)
 	}
-}
 
-// toolErrorText extracts the text of a tool-error result, the same value an
-// MCP client actually sees, so tests can assert on what's shown to the calling
-// agent rather than on internal error types.
-func toolErrorText(t *testing.T, res *mcp.CallToolResult) string {
-	t.Helper()
-	if len(res.Content) == 0 {
-		t.Fatal("tool error result has no content")
+	// audit_log.subject is the authenticated agent's subject, end to end
+	// through the real HTTP path — the cutover's central claim.
+	var auditedSubject string
+	if err := h.pool.QueryRow(ctx,
+		`SELECT subject FROM audit_log WHERE event_type = 'read' ORDER BY created_at DESC LIMIT 1`,
+	).Scan(&auditedSubject); err != nil {
+		t.Fatalf("querying audit_log.subject: %v", err)
 	}
-	tc, ok := res.Content[0].(*mcp.TextContent)
-	if !ok {
-		t.Fatalf("tool error content[0] = %T, want *mcp.TextContent", res.Content[0])
+	if auditedSubject != "agent-a" {
+		t.Errorf("audit_log.subject = %q, want %q", auditedSubject, "agent-a")
 	}
-	return tc.Text
 }
 
 // TestProposeWrite_InvalidScopeReturnsVerbatimValidationError_ViaMCP is the
-// regression test for the bouncer.ValidationError taxonomy: a malformed
-// caller-supplied scope is safe and useful to show the agent verbatim (it can
-// self-correct and retry), unlike every other propose_write failure, which
-// stays masked behind toolError's generic "internal error" message.
+// regression test for the ValidationError taxonomy across the cutover: a
+// malformed caller-supplied scope now fails agentRequestGrant/agentProposeWrite's
+// own scope.Validate call server-side and comes back as an HTTP 400, which
+// agentclient.decodeValidationError turns into a *agentclient.ValidationError
+// carrying the server's message verbatim — mapClientError passes that through
+// unmasked, the same "safe and useful to show, self-correct and retry"
+// treatment bouncer.ValidationError got before the cutover.
 func TestProposeWrite_InvalidScopeReturnsVerbatimValidationError_ViaMCP(t *testing.T) {
 	session, _ := testSession(t, "agent-a")
 
@@ -413,70 +421,39 @@ func TestProposeWrite_InvalidScopeReturnsVerbatimValidationError_ViaMCP(t *testi
 	}
 }
 
-// TestProposeWrite_StoreErrorIsMasked_ViaMCP is the negative counterpart: an
-// error that originates in the store layer (here, targeting a fact the
-// proposer's grants don't cover) must NOT be shown verbatim, even though its
-// message happens to be informative and non-sensitive in this particular case —
-// the taxonomy only trusts errors bouncer.ProposeWrite positively constructed as
-// ValidationError, never store-originated ones, since other store errors can
-// carry raw driver text.
-func TestProposeWrite_StoreErrorIsMasked_ViaMCP(t *testing.T) {
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		t.Skip("DATABASE_URL not set; skipping mcptools integration tests")
-	}
-	if err := db.Migrate(url); err != nil {
-		t.Fatalf("db.Migrate() error = %v", err)
-	}
+// TestProposeWrite_ServerErrorIsMasked_ViaMCP is the negative counterpart: an
+// error that originates inside the server's store layer (here, targeting a
+// fact the proposer's grants don't cover) must NOT be shown verbatim to the
+// calling agent, even though its message happens to be informative and
+// non-sensitive in this particular case. mapClientError's allowlist only
+// passes through *agentclient.ValidationError; a masked 500 comes back as
+// agentclient's own serverError, which mapClientError routes through
+// toolError — proving the masking survives the extra HTTP hop the cutover
+// introduced, not just the original in-process errors.As check.
+func TestProposeWrite_ServerErrorIsMasked_ViaMCP(t *testing.T) {
+	h := newTestHarness(t, nil)
 	ctx := context.Background()
-	pool, err := db.Open(ctx, url)
-	if err != nil {
-		t.Fatalf("db.Open() error = %v", err)
-	}
-	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, capability_grant_identities, capability_grant_tokens`); err != nil {
-		t.Fatalf("truncating tables: %v", err)
-	}
-	st := store.New(pool)
-	emb := embed.Stub{}
-	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
 
-	newSession := func(subject string) *mcp.ClientSession {
-		server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
-		Register(server, subject, st, emb, b)
-		clientTransport, serverTransport := mcp.NewInMemoryTransports()
-		if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
-			t.Fatalf("server.Connect() error = %v", err)
-		}
-		client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "test"}, nil)
-		session, err := client.Connect(ctx, clientTransport, nil)
-		if err != nil {
-			t.Fatalf("client.Connect() error = %v", err)
-		}
-		t.Cleanup(func() { _ = session.Close() })
-		return session
-	}
-
-	aliceSession := newSession("alice")
+	aliceSession := h.session(t, "alice")
 	proposed := callTool[proposeWriteOutput](t, aliceSession, "propose_write", proposeWriteArgs{
 		Content:        "alice's medical condition is confidential",
 		ProposedScopes: []string{"identity.medical"},
 	})
-	commitVec, err := emb.Embed(ctx, "alice's medical condition is confidential")
+	commitVec, err := embed.Stub{}.Embed(ctx, "alice's medical condition is confidential")
 	if err != nil {
 		t.Fatalf("Embed() error = %v", err)
 	}
-	fact, err := st.CommitDiff(ctx, proposed.DiffID, "human-reviewer", commitVec, "")
+	fact, err := h.st.CommitDiff(ctx, proposed.DiffID, "human-reviewer", commitVec, "")
 	if err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
 	// bob has a real, active grant, just not one covering identity.medical — this
 	// proves the store's rejection is scope-specific.
-	if _, err := st.CreateGrant(ctx, "bob", []string{"preferences.coffee"}, "memory", "facts", nil, "human-reviewer"); err != nil {
+	if _, err := h.st.CreateGrant(ctx, "bob", []string{"preferences.coffee"}, "memory", "facts", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
-	bobSession := newSession("bob")
+	bobSession := h.session(t, "bob")
 
 	res, err := bobSession.CallTool(ctx, &mcp.CallToolParams{
 		Name: "propose_write",
@@ -502,7 +479,7 @@ func TestProposeWrite_StoreErrorIsMasked_ViaMCP(t *testing.T) {
 }
 
 func TestReadWithScopeCheck_SummaryDepthRedactsContent_ViaMCP(t *testing.T) {
-	session, st := testSession(t, "agent-a")
+	session, h := testSession(t, "agent-a")
 	ctx := context.Background()
 
 	proposed := callTool[proposeWriteOutput](t, session, "propose_write", proposeWriteArgs{
@@ -510,7 +487,7 @@ func TestReadWithScopeCheck_SummaryDepthRedactsContent_ViaMCP(t *testing.T) {
 		ProposedScopes: []string{"preferences.coffee"},
 	})
 
-	if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.coffee"}, "memory", "summary", nil, "human-reviewer"); err != nil {
+	if _, err := h.st.CreateGrant(ctx, "agent-a", []string{"preferences.coffee"}, "memory", "summary", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
@@ -518,7 +495,7 @@ func TestReadWithScopeCheck_SummaryDepthRedactsContent_ViaMCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Embed() error = %v", err)
 	}
-	if _, err := st.CommitDiff(ctx, proposed.DiffID, "human-reviewer", commitVec, "a stub summary of the coffee fact"); err != nil {
+	if _, err := h.st.CommitDiff(ctx, proposed.DiffID, "human-reviewer", commitVec, "a stub summary of the coffee fact"); err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
@@ -544,14 +521,12 @@ func TestReadWithScopeCheck_SummaryDepthRedactsContent_ViaMCP(t *testing.T) {
 	}
 }
 
-// The security property the self-review in this ticket asked for: a caller
-// granted only "facts" depth must never see provenance over the wire, even
-// though "full" depth (a different grant, same subject/scope) does. Exercised
-// through callTool's real JSON marshal/unmarshal, not just the Go struct, so
-// an accidental non-omitempty field or a forgotten nil-check would show up
-// here exactly as it would to a real MCP client.
+// A caller granted only "facts" depth must never see provenance over the
+// wire, even though "full" depth (a different grant, same subject/scope)
+// does. Exercised through callTool's real JSON marshal/unmarshal end to end
+// over the HTTP hop this cutover introduced, not just the Go struct.
 func TestReadWithScopeCheck_FullDepthAddsProvenance_FactsDepthDoesNot_ViaMCP(t *testing.T) {
-	session, st := testSession(t, "agent-a")
+	session, h := testSession(t, "agent-a")
 	ctx := context.Background()
 
 	proposed := callTool[proposeWriteOutput](t, session, "propose_write", proposeWriteArgs{
@@ -563,12 +538,12 @@ func TestReadWithScopeCheck_FullDepthAddsProvenance_FactsDepthDoesNot_ViaMCP(t *
 	if err != nil {
 		t.Fatalf("Embed() error = %v", err)
 	}
-	if _, err := st.CommitDiff(ctx, proposed.DiffID, "human-reviewer", commitVec, "editor preference summary"); err != nil {
+	if _, err := h.st.CommitDiff(ctx, proposed.DiffID, "human-reviewer", commitVec, "editor preference summary"); err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
 
 	t.Run("facts depth", func(t *testing.T) {
-		if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.tools"}, "memory", "facts", nil, "human-reviewer"); err != nil {
+		if _, err := h.st.CreateGrant(ctx, "agent-a", []string{"preferences.tools"}, "memory", "facts", nil, "human-reviewer"); err != nil {
 			t.Fatalf("CreateGrant() error = %v", err)
 		}
 		out := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
@@ -587,7 +562,7 @@ func TestReadWithScopeCheck_FullDepthAddsProvenance_FactsDepthDoesNot_ViaMCP(t *
 	})
 
 	t.Run("full depth", func(t *testing.T) {
-		if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.tools"}, "memory", "full", nil, "human-reviewer"); err != nil {
+		if _, err := h.st.CreateGrant(ctx, "agent-a", []string{"preferences.tools"}, "memory", "full", nil, "human-reviewer"); err != nil {
 			t.Fatalf("CreateGrant() error = %v", err)
 		}
 		out := callTool[readOutput](t, session, "read_with_scope_check", readArgs{
@@ -610,9 +585,6 @@ func TestReadWithScopeCheck_FullDepthAddsProvenance_FactsDepthDoesNot_ViaMCP(t *
 		if got.Provenance.SourceStagedDiffID != proposed.DiffID {
 			t.Errorf("Provenance.SourceStagedDiffID = %q, want %q", got.Provenance.SourceStagedDiffID, proposed.DiffID)
 		}
-		// Both starts of the bi-temporal window — created_at (system time)
-		// alongside valid_at (real-world time). created_at was missing from the
-		// wire shape entirely; found in review.
 		if got.Provenance.CreatedAt == "" {
 			t.Error("Provenance.CreatedAt is empty, want the fact's system-time start (RFC3339)")
 		}
@@ -622,47 +594,15 @@ func TestReadWithScopeCheck_FullDepthAddsProvenance_FactsDepthDoesNot_ViaMCP(t *
 	})
 }
 
-// TestReadWithScopeCheck_AuditsPerFactDepth_ViaMCP is the regression test for the
-// audit gap this ticket closes: a "read" audit row used to record only the
-// subject's granted scopes, which answers "what was this agent allowed to see"
-// but not "what did it actually see, and at what fidelity" — the question that
-// matters after a suspected compromise. Two facts, two different granted
-// depths, one read call: proves the audit row carries a per-fact depth (not one
-// depth for the whole call), because a single scalar would be a lie the moment
-// depth varies within a call, which effectiveDepth (facts.go) means it can.
+// TestReadWithScopeCheck_AuditsPerFactDepth_ViaMCP is the regression test for
+// the audit gap this ticket closes: a "read" audit row records a per-fact
+// depth (not one depth for the whole call), since effectiveDepth can vary
+// fact-to-fact within a single call. This logic lives entirely server-side
+// now (agentSearch), so this test drives it through the real HTTP path and
+// reads audit_log directly, same as before the cutover.
 func TestReadWithScopeCheck_AuditsPerFactDepth_ViaMCP(t *testing.T) {
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		t.Skip("DATABASE_URL not set; skipping mcptools integration test")
-	}
-	if err := db.Migrate(url); err != nil {
-		t.Fatalf("db.Migrate() error = %v", err)
-	}
+	session, h := testSession(t, "agent-a")
 	ctx := context.Background()
-	pool, err := db.Open(ctx, url)
-	if err != nil {
-		t.Fatalf("db.Open() error = %v", err)
-	}
-	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, capability_grant_identities, capability_grant_tokens`); err != nil {
-		t.Fatalf("truncating tables: %v", err)
-	}
-
-	st := store.New(pool)
-	emb := embed.Stub{}
-	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
-	server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
-	Register(server, "agent-a", st, emb, b)
-	clientTransport, serverTransport := mcp.NewInMemoryTransports()
-	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
-		t.Fatalf("server.Connect() error = %v", err)
-	}
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "test"}, nil)
-	session, err := client.Connect(ctx, clientTransport, nil)
-	if err != nil {
-		t.Fatalf("client.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = session.Close() })
 
 	coffee := callTool[proposeWriteOutput](t, session, "propose_write", proposeWriteArgs{
 		Content:        "user's favorite coffee order is a flat white",
@@ -673,26 +613,26 @@ func TestReadWithScopeCheck_AuditsPerFactDepth_ViaMCP(t *testing.T) {
 		ProposedScopes: []string{"preferences.tea"},
 	})
 
-	if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.coffee"}, "memory", "full", nil, "human-reviewer"); err != nil {
+	if _, err := h.st.CreateGrant(ctx, "agent-a", []string{"preferences.coffee"}, "memory", "full", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
-	if _, err := st.CreateGrant(ctx, "agent-a", []string{"preferences.tea"}, "memory", "summary", nil, "human-reviewer"); err != nil {
+	if _, err := h.st.CreateGrant(ctx, "agent-a", []string{"preferences.tea"}, "memory", "summary", nil, "human-reviewer"); err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
-	coffeeVec, err := emb.Embed(ctx, "user's favorite coffee order is a flat white")
+	coffeeVec, err := embed.Stub{}.Embed(ctx, "user's favorite coffee order is a flat white")
 	if err != nil {
 		t.Fatalf("Embed() error = %v", err)
 	}
-	coffeeFact, err := st.CommitDiff(ctx, coffee.DiffID, "human-reviewer", coffeeVec, "coffee summary")
+	coffeeFact, err := h.st.CommitDiff(ctx, coffee.DiffID, "human-reviewer", coffeeVec, "coffee summary")
 	if err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
-	teaVec, err := emb.Embed(ctx, "user's favorite tea order is earl grey")
+	teaVec, err := embed.Stub{}.Embed(ctx, "user's favorite tea order is earl grey")
 	if err != nil {
 		t.Fatalf("Embed() error = %v", err)
 	}
-	teaFact, err := st.CommitDiff(ctx, tea.DiffID, "human-reviewer", teaVec, "tea summary")
+	teaFact, err := h.st.CommitDiff(ctx, tea.DiffID, "human-reviewer", teaVec, "tea summary")
 	if err != nil {
 		t.Fatalf("CommitDiff() error = %v", err)
 	}
@@ -717,7 +657,7 @@ func TestReadWithScopeCheck_AuditsPerFactDepth_ViaMCP(t *testing.T) {
 	}
 
 	var detailJSON []byte
-	if err := pool.QueryRow(ctx,
+	if err := h.pool.QueryRow(ctx,
 		`SELECT detail FROM audit_log WHERE event_type = 'read' AND subject = 'agent-a' ORDER BY created_at DESC LIMIT 1`,
 	).Scan(&detailJSON); err != nil {
 		t.Fatalf("querying audit_log.detail: %v", err)
@@ -740,31 +680,8 @@ func TestReadWithScopeCheck_AuditsPerFactDepth_ViaMCP(t *testing.T) {
 	}
 }
 
-func TestGrantedScopeStrs_DedupesWhenSameScopeAtDifferentDepths(t *testing.T) {
-	// GrantedScopeDepths (its query is DISTINCT on (scope, depth), not scope
-	// alone) can legitimately return the same scope twice when two active
-	// grants cover it at different depths. grantedScopeStrs must not let
-	// that duplicate the scope in the audit log's recorded scopes. Found in
-	// review.
-	granted := []store.GrantedScope{
-		{Scope: "identity.basic", Depth: "summary"},
-		{Scope: "identity.basic", Depth: "full"},
-		{Scope: "preferences.coffee", Depth: "facts"},
-	}
-	got := grantedScopeStrs(granted)
-	want := []string{"identity.basic", "preferences.coffee"}
-	if len(got) != len(want) {
-		t.Fatalf("grantedScopeStrs() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("grantedScopeStrs() = %v, want %v (order preserved, duplicates removed)", got, want)
-		}
-	}
-}
-
 func TestRequestGrant_ViaMCP(t *testing.T) {
-	session, st := testSession(t, "agent-a")
+	session, h := testSession(t, "agent-a")
 	ctx := context.Background()
 
 	out := callTool[requestGrantOutput](t, session, "request_grant", requestGrantArgs{
@@ -780,7 +697,7 @@ func TestRequestGrant_ViaMCP(t *testing.T) {
 
 	// It never creates a real grant directly — the whole point of this tool is
 	// that it stages a request for human review (AGENTS.md §3.1 shape).
-	granted, err := st.GrantedScopes(ctx, "agent-a")
+	granted, err := h.st.GrantedScopes(ctx, "agent-a")
 	if err != nil {
 		t.Fatalf("GrantedScopes() error = %v", err)
 	}
@@ -788,9 +705,10 @@ func TestRequestGrant_ViaMCP(t *testing.T) {
 		t.Fatalf("GrantedScopes() after request_grant = %v, want empty (no auto-approval)", granted)
 	}
 
-	// The request is bound to the session's subject, same as every other tool —
-	// not client-suppliable.
-	reqs, err := st.ListGrantRequests(ctx, store.GrantRequestPending)
+	// The request is bound to the session's authenticated subject, same as
+	// every other tool — not client-suppliable (there is no Subject field in
+	// requestGrantArgs).
+	reqs, err := h.st.ListGrantRequests(ctx, store.GrantRequestPending)
 	if err != nil {
 		t.Fatalf("ListGrantRequests() error = %v", err)
 	}
@@ -829,9 +747,11 @@ func TestRequestGrant_EmptyScopesIsError(t *testing.T) {
 	}
 }
 
-// TestRequestGrant_NegativeTTLIsError is the regression test for the review
-// finding: a negative ttl_seconds used to fall through the same branch as an
-// omitted one, silently becoming "no expiry" instead of a rejected value.
+// TestRequestGrant_NegativeTTLIsError proves the negative-ttl_seconds
+// rejection still holds after the cutover, even though this package no
+// longer performs the check itself — agentRequestGrant
+// (internal/api/agent_routes.go) reproduces it server-side, and this test
+// only has HTTP-shaped visibility into that now.
 func TestRequestGrant_NegativeTTLIsError(t *testing.T) {
 	session, _ := testSession(t, "agent-a")
 
@@ -850,57 +770,21 @@ func TestRequestGrant_NegativeTTLIsError(t *testing.T) {
 	}
 }
 
-// TestProposeWrite_RateLimited exercises the ticket this rate limit exists
-// for: propose_write requires no grant at all (a brand-new agent has to be
-// able to propose before it holds anything to be granted), so without some
-// other control any configured MCP_SUBJECT could flood the human review queue
-// for free. This pins the behavior an agent actually observes: hitting a low
-// configured limit surfaces as a structured status=RATE_LIMITED (not a
-// generic tool error — res.IsError stays false, same as insufficient_scope),
-// nothing gets staged once limited, and a different subject's own calls are
-// completely unaffected by the first subject's activity.
+// TestProposeWrite_RateLimited is the trap regression test called out in the
+// cutover brief: agentclient.ProposeResult uses ONE struct for both the 200
+// and the 429 outcome, discriminated only by Status. This proves the tool
+// still reports RATE_LIMITED as a structured status (res.IsError stays
+// false, matching insufficient_scope's shape) with no diff_id, that nothing
+// gets staged once limited, that the denial is audited, and that a different
+// subject's own limit is untouched — end to end through the real HTTP hop
+// the cutover introduced.
 func TestProposeWrite_RateLimited(t *testing.T) {
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		t.Skip("DATABASE_URL not set; skipping mcptools integration test")
-	}
-	if err := db.Migrate(url); err != nil {
-		t.Fatalf("db.Migrate() error = %v", err)
-	}
-	ctx := context.Background()
-	pool, err := db.Open(ctx, url)
-	if err != nil {
-		t.Fatalf("db.Open() error = %v", err)
-	}
-	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE facts, fact_scopes, grants, grant_scopes, staged_diffs, audit_log, grant_requests, data_keys, propose_write_rate_limits, capability_grant_identities, capability_grant_tokens`); err != nil {
-		t.Fatalf("truncating tables: %v", err)
-	}
+	h := newTestHarness(t, nil)
+	h.b.RateLimit = 2
+	h.b.RateLimitWindow = time.Hour
 
-	st := store.New(pool)
-	emb := embed.Stub{}
-	b := bouncer.New(st, emb, bouncer.PassthroughClassifier{})
-	b.RateLimit = 2
-	b.RateLimitWindow = time.Hour
-
-	newSession := func(subject string) *mcp.ClientSession {
-		server := mcp.NewServer(&mcp.Implementation{Name: "chuvar-test", Version: "test"}, nil)
-		Register(server, subject, st, emb, b)
-		clientTransport, serverTransport := mcp.NewInMemoryTransports()
-		if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
-			t.Fatalf("server.Connect() error = %v", err)
-		}
-		client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "test"}, nil)
-		session, err := client.Connect(ctx, clientTransport, nil)
-		if err != nil {
-			t.Fatalf("client.Connect() error = %v", err)
-		}
-		t.Cleanup(func() { _ = session.Close() })
-		return session
-	}
-
-	agentA := newSession("agent-a")
-	agentB := newSession("agent-b")
+	agentA := h.session(t, "agent-a")
+	agentB := h.session(t, "agent-b")
 
 	// The first two proposals for agent-a fit within its configured limit of 2.
 	for i := 0; i < 2; i++ {
@@ -908,7 +792,7 @@ func TestProposeWrite_RateLimited(t *testing.T) {
 			Content:        fmt.Sprintf("agent-a fact number %d", i),
 			ProposedScopes: []string{"preferences.coffee"},
 		})
-		if out.Status == "RATE_LIMITED" {
+		if out.Status == agentclient.StatusRateLimited {
 			t.Fatalf("proposal %d for agent-a: status = RATE_LIMITED, want it to succeed (still within limit)", i)
 		}
 	}
@@ -918,19 +802,19 @@ func TestProposeWrite_RateLimited(t *testing.T) {
 		Content:        "agent-a fact number 3",
 		ProposedScopes: []string{"preferences.coffee"},
 	})
-	if third.Status != "RATE_LIMITED" {
+	if third.Status != agentclient.StatusRateLimited {
 		t.Fatalf("propose_write status = %q after exceeding the limit, want RATE_LIMITED", third.Status)
 	}
 	if third.DiffID != "" {
 		t.Fatalf("RATE_LIMITED response carried a diff_id (%q); nothing should have been staged", third.DiffID)
 	}
+	if third.DedupeVerdict != "" || third.CandidateFactID != nil {
+		t.Fatalf("RATE_LIMITED response carried other 200-only fields = %+v, want them zero", third)
+	}
 
-	// The denial must leave attributable evidence the operator can find later —
-	// the counter row alone is lossy (limit+1 and a sustained flood look the
-	// same once the window rolls). Same discipline as insufficient_scope's
-	// audit row in read_with_scope_check. Found in aggregate review.
+	ctx := context.Background()
 	var audited int
-	if err := pool.QueryRow(ctx,
+	if err := h.pool.QueryRow(ctx,
 		`SELECT count(*) FROM audit_log WHERE event_type = 'rate_limited' AND subject = 'agent-a'`,
 	).Scan(&audited); err != nil {
 		t.Fatalf("querying audit_log for rate_limited rows: %v", err)
@@ -939,15 +823,12 @@ func TestProposeWrite_RateLimited(t *testing.T) {
 		t.Errorf("audit_log rate_limited rows for agent-a = %d, want exactly 1 (one per denial)", audited)
 	}
 
-	// agent-b's own limit must be untouched by agent-a's activity — a shared
-	// limit keyed wrong (e.g. ignoring subject, or on something client-
-	// supplied) would throttle a completely uninvolved subject, which is its
-	// own denial-of-service against a legitimate agent.
+	// agent-b's own limit must be untouched by agent-a's activity.
 	bOut := callTool[proposeWriteOutput](t, agentB, "propose_write", proposeWriteArgs{
 		Content:        "agent-b's own, unrelated fact",
 		ProposedScopes: []string{"preferences.tea"},
 	})
-	if bOut.Status == "RATE_LIMITED" {
+	if bOut.Status == agentclient.StatusRateLimited {
 		t.Fatal("agent-b's first proposal was rate limited by agent-a's activity — the limit is not correctly keyed per subject")
 	}
 }
