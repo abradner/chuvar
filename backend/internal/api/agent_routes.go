@@ -1,39 +1,46 @@
-// agent_routes.go is the agent-facing HTTP surface: the network endpoint an
-// agent process (mcpserver, in a later PR) calls instead of holding a raw
-// database credential itself (AGENTS.md §3.0/§3.6, ticket E3). Every route
-// here authenticates via requireAgentAuth (agent_auth.go) — an agent-class
-// token, store.AuthenticateAgentToken — and is served on its own listener
-// (AgentRoutes(), bound by cmd/apiserver/main.go to CHUVAR_AGENT_ADDR),
-// never mounted alongside Routes()'s reviewer surface. See agent_auth.go's
-// doc comment for why that's two independent layers, not one.
+// agent_routes.go is the agent-facing HTTP surface: the network endpoint
+// mcpserver calls instead of holding a raw database credential itself
+// (AGENTS.md §3.0/§3.6, ticket E3 — the cutover landed in #82/#86 PR 4).
+// Every route here authenticates via requireAgentAuth (agent_auth.go) — an
+// agent-class token, store.AuthenticateAgentToken — and is served on its own
+// listener (AgentRoutes(), bound by cmd/apiserver/main.go to
+// CHUVAR_AGENT_ADDR), never mounted alongside Routes()'s reviewer surface.
+// See agent_auth.go's doc comment for why that's two independent layers,
+// not one.
 //
-// agentSearch below is a byte-for-byte reproduction of
-// internal/mcptools/read_with_scope_check.go's tool-call sequence — same
-// input caps, same pre-embed scope gate, same server-side Embed call, same
+// This file is the single, current home of the agent read/propose
+// orchestration sequence — not a copy of it. agentSearch's body (below) is
+// where the pre-embed scope gate, the server-side Embed call, the
 // POST-embed re-check (the line that closes the revoke-during-embed race),
-// same SearchFacts call, same per-fact projection, same disclosure audit —
-// because that sequence contains the single security property this whole PR
-// exists to preserve: scope-before-rank stays atomic against a grant
-// changing mid-request. Splitting any piece of it across the HTTP boundary
-// (having the client embed, or having the client pass down a pre-fetched
-// scope snapshot) would reopen exactly that race and turn the gate into
-// something advisory rather than enforced — so the whole thing runs inside
-// this one handler, just like the whole thing runs inside that one tool
-// call. Never use store.GetFact for this path: it is a single-ID,
+// SearchFacts, the per-fact projection, and the disclosure audit all
+// actually run; internal/mcptools/read_with_scope_check.go
+// (registerReadWithScopeCheck) is a thin adapter that marshals MCP tool
+// arguments into an agentclient.SearchRequest, calls POST
+// /api/agent/search, and maps the response back onto its own output shape —
+// nothing security-relevant happens on that side of the wire. This is the
+// single chokepoint CLAUDE.md principle 7 asks for: scope-before-rank stays
+// atomic against a grant changing mid-request because the embed call and
+// both scope checks run once, in this one handler, in this one process —
+// splitting any piece of it out to the HTTP client (having the client
+// embed, or having it pass down a pre-fetched scope snapshot) would reopen
+// exactly that race and turn the gate into something advisory rather than
+// enforced. Never use store.GetFact for this path: it is a single-ID,
 // unscoped reviewer lookup (see its own doc comment), not a search endpoint,
 // and calling it here would bypass every scope/depth check this file exists
 // to enforce.
 //
-// This duplicates types and helpers that already exist, unexported, in
-// internal/mcptools (factView, readOutput, toScopes/fromScopes,
-// grantedScopeStrs, the size caps). That duplication is deliberate and
-// temporary, not an oversight: this PR is explicitly told not to modify
-// internal/mcptools (a later PR deletes the tool-side copy once mcpserver
-// itself becomes an HTTP client of these routes and the two implementations
-// converge on one). Until then, two independent copies of a
-// security-critical sequence is safer than one importing the other's
-// unexported internals or the two silently drifting apart behind a shared
-// helper neither side fully owns.
+// The types and helpers below (agentFactView, agentSearchResponse,
+// agentToScopes/agentFromScopes, agentGrantedScopeStrs, the size caps) do
+// still exist as separate declarations from mcptools' own factView/
+// readOutput/toScopes/fromScopes/grantedScopeStrs — see each type's doc
+// comment for the field-for-field mirror. That is a wire-contract mirror
+// (this package's JSON shape vs. the tool's own output shape), not the
+// security-logic duplication this file used to carry pre-cutover: the two
+// sets of types stay independently declared because internal/mcptools
+// imports agentclient's wire types (not this package's unexported ones) and
+// re-projects them onto its own MCP-facing output structs, but there is
+// only one place — here — where a grant is actually checked or a fact is
+// actually read from storage.
 //
 // The authenticated subject always comes from agentFromContext (the agent
 // token), never from a request body field — none of the request structs
@@ -139,13 +146,17 @@ type agentSearchResponse struct {
 }
 
 // agentSearch handles POST /api/agent/search. See the package doc comment:
-// this is a line-for-line reproduction of read_with_scope_check.go's
-// sequence, kept inside one handler so the pre-embed check, the server-side
-// Embed call, and the post-embed re-check all happen atomically from the
-// caller's perspective. Do not refactor any piece of this out to a helper
-// that mcptools also calls, and do not let a future edit move the embedding
-// call to the client — either would reopen the race the second
-// GrantedScopeDepths/scope.Missing pair below exists to close.
+// this handler is the sole place the read/scope-check sequence runs — kept
+// inside one handler so the pre-embed check, the server-side Embed call, and
+// the post-embed re-check all happen atomically from the caller's
+// perspective. mcptools.registerReadWithScopeCheck (the MCP tool client-side
+// callers actually invoke) only ever reaches this sequence over HTTP via
+// agentclient.Client.Search; do not let a future edit move any piece of it
+// — the embedding call especially — to that client side, and do not
+// refactor any piece of it out to a helper a client-side caller could also
+// invoke without going through the HTTP boundary: either would reopen the
+// race the second GrantedScopeDepths/scope.Missing pair below exists to
+// close.
 func (a *API) agentSearch(w http.ResponseWriter, r *http.Request) {
 	subject := agentFromContext(r.Context()).Subject
 	ctx := r.Context()
