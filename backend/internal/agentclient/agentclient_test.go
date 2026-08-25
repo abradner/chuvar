@@ -327,6 +327,37 @@ func TestListGrants_TransportFailureIsGenericError(t *testing.T) {
 	}
 }
 
+// TestListGrants_CancelledContextIsErrorsIsCancelled is the regression test
+// for #118 (Copilot): before this fix, every transport-level failure —
+// including the caller's own ctx.Err() — collapsed into the same generic
+// *serverError, so a caller could never tell "I cancelled this on purpose"
+// apart from "the server/network genuinely failed" via
+// errors.Is(err, context.Canceled). That distinction matters for retry
+// behaviour (don't retry or alert on a caller's own deliberate
+// cancellation) and for log noise (an intentional shutdown showing up as a
+// server-fault log line is misleading). The context here is cancelled
+// before the call even starts, so http.Client.Do fails immediately with
+// ctx.Err() already non-nil — doJSON must surface that, not
+// *serverError.
+func TestListGrants_CancelledContextIsErrorsIsCancelled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler must not be reached: context was cancelled before the request was made")
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	c := newTestClient(srv, "tok")
+	_, err := c.ListGrants(ctx)
+	if err == nil {
+		t.Fatal("ListGrants() with a cancelled context: want an error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("ListGrants() with a cancelled context: err = %v, want errors.Is(err, context.Canceled)", err)
+	}
+}
+
 // --- token/body hygiene ---------------------------------------------------
 
 func TestToken_NeverLoggedOrInErrorMessage(t *testing.T) {
