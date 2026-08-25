@@ -128,7 +128,7 @@ adding a binary or moving work between them, place it on this table:
 |---|---|---|---|---|
 | `cmd/apiserver` | operator | `chuvar_app` — DML, no DDL | **no** — `db.CheckSchema` only | **yes** — only process that verifies TOTP |
 | `cmd/migrate` | operator | owner — the only role with DDL | yes (that's its whole job) | no |
-| `cmd/mcpserver` | **an agent host** | none — `CHUVAR_API_TOKEN` only | **no** — it has no database | no |
+| `cmd/mcpserver` | **an agent host** | none — `CHUVAR_AGENT_TOKEN` only | **no** — it has no database | no |
 | `cmd/brokerd` | operator | `chuvar_broker` — narrow (see below) | **no** — `db.CheckSchema` only | **yes** — holds a decrypted git-signing key in guarded process memory (`internal/broker/keyring`) |
 | `cmd/approver`, `cmd/pushbridge` | operator | none — `CHUVAR_API_TOKEN` only | no | no |
 
@@ -146,7 +146,9 @@ check (see below).
 
 `cmd/mcpserver` is the one that runs inside an agent's process tree, so it is the one that must
 hold least — as of #82/#86 (ticket E3) it holds no database credential at all. Boot resolves a
-`CHUVAR_API_TOKEN` (an agent-class token, never a reviewer token) and calls
+`CHUVAR_AGENT_TOKEN` (an agent-class token, never a reviewer token — renamed off the
+`CHUVAR_API_TOKEN` name `cmd/approver`/`cmd/pushbridge` still use for their own, structurally
+different *reviewer* credential, closing #120's naming collision) and calls
 `GET /api/agent/whoami` against the agent-only listener (`CHUVAR_AGENT_ADDR`); a successful
 response already proves `apiserver`'s own `db.CheckSchema` passed at its boot, so mcpserver's
 boot check delegates schema-currency to `apiserver` rather than re-implementing it. A bad or
