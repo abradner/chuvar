@@ -20,6 +20,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/abradner/chuvar/backend/internal/bouncer"
 	"github.com/abradner/chuvar/backend/internal/custody"
 	"github.com/abradner/chuvar/backend/internal/db"
 	"github.com/abradner/chuvar/backend/internal/embed"
@@ -71,6 +72,17 @@ func testWebAuthn(t *testing.T) *webauthn.WebAuthn {
 	return wa
 }
 
+// testBouncer builds the *bouncer.Bouncer every testServer variant needs to
+// satisfy api.New's now-required Bouncer field (agent_routes.go's
+// POST /api/agent/proposals) — same construction cmd/apiserver/main.go and
+// cmd/mcpserver/main.go both use (bouncer.New + PassthroughClassifier), a
+// fixed embedder regardless of what the API's own Embedder is under test:
+// most tests here never exercise the agent proposals path, so all that
+// matters is that Bouncer is non-nil and functional for the few that do.
+func testBouncer(st *store.Store) *bouncer.Bouncer {
+	return bouncer.New(st, embed.Stub{}, bouncer.PassthroughClassifier{})
+}
+
 func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
 	url := os.Getenv("DATABASE_URL")
@@ -95,7 +107,7 @@ func testServer(t *testing.T) (*httptest.Server, *store.Store) {
 	if _, err := st.CreateReviewerToken(ctx, "test-reviewer", testAuthToken, testTOTPSecret); err != nil {
 		t.Fatalf("seeding reviewer token: %v", err)
 	}
-	a := New(st, embed.Stub{}, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t))
+	a := New(st, embed.Stub{}, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t), testBouncer(st))
 	srv := httptest.NewServer(a.Routes())
 	t.Cleanup(srv.Close)
 	return srv, st
@@ -131,7 +143,7 @@ func testServerWithBootstrapToken(t *testing.T) (*httptest.Server, string) {
 	if _, err := st.CreateReviewerToken(ctx, "bootstrap", bootstrapToken, ""); err != nil {
 		t.Fatalf("seeding bootstrap token: %v", err)
 	}
-	a := New(st, embed.Stub{}, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t))
+	a := New(st, embed.Stub{}, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t), testBouncer(st))
 	srv := httptest.NewServer(a.Routes())
 	t.Cleanup(srv.Close)
 	return srv, bootstrapToken
@@ -313,7 +325,7 @@ func TestRequireTOTP_WhitespaceOnlyHeaderTreatedAsMissing(t *testing.T) {
 func newTestAPIWithReviewer(t *testing.T) (*API, store.AuthenticatedReviewer) {
 	t.Helper()
 	_, st := testServer(t)
-	a := New(st, embed.Stub{}, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t))
+	a := New(st, embed.Stub{}, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t), testBouncer(st))
 	reviewer, ok, err := st.AuthenticateReviewerToken(context.Background(), testAuthToken)
 	if err != nil || !ok {
 		t.Fatalf("authenticating seeded reviewer: ok=%v err=%v", ok, err)
@@ -981,7 +993,7 @@ func TestNew_WildcardOriginRejected(t *testing.T) {
 			t.Fatal("New() with CORS_ALLOWED_ORIGIN=\"*\": want panic, got none")
 		}
 	}()
-	New(nil, nil, nil, "*", 10*time.Second, testWebAuthn(t))
+	New(nil, nil, nil, "*", 10*time.Second, testWebAuthn(t), nil)
 }
 
 func TestNew_NullOriginRejected(t *testing.T) {
@@ -990,7 +1002,7 @@ func TestNew_NullOriginRejected(t *testing.T) {
 			t.Fatal(`New() with CORS_ALLOWED_ORIGIN="null": want panic, got none`)
 		}
 	}()
-	New(nil, nil, nil, "null", 10*time.Second, testWebAuthn(t))
+	New(nil, nil, nil, "null", 10*time.Second, testWebAuthn(t), nil)
 }
 
 func TestNew_OriginWithPathRejected(t *testing.T) {
@@ -999,7 +1011,7 @@ func TestNew_OriginWithPathRejected(t *testing.T) {
 			t.Fatal("New() with a CORS_ALLOWED_ORIGIN containing a path: want panic, got none")
 		}
 	}()
-	New(nil, nil, nil, "http://localhost:5173/app", 10*time.Second, testWebAuthn(t))
+	New(nil, nil, nil, "http://localhost:5173/app", 10*time.Second, testWebAuthn(t), nil)
 }
 
 func TestNew_NonPositiveRequestTimeoutRejected(t *testing.T) {
@@ -1008,7 +1020,7 @@ func TestNew_NonPositiveRequestTimeoutRejected(t *testing.T) {
 			t.Fatal("New() with a zero RequestTimeout: want panic, got none")
 		}
 	}()
-	New(nil, nil, nil, "", 0, testWebAuthn(t))
+	New(nil, nil, nil, "", 0, testWebAuthn(t), nil)
 }
 
 func TestNew_NilWebAuthnRejected(t *testing.T) {
@@ -1017,7 +1029,16 @@ func TestNew_NilWebAuthnRejected(t *testing.T) {
 			t.Fatal("New() with a nil WebAuthn: want panic, got none")
 		}
 	}()
-	New(nil, nil, nil, "", 10*time.Second, nil)
+	New(nil, nil, nil, "", 10*time.Second, nil, nil)
+}
+
+func TestNew_NilBouncerRejected(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("New() with a nil Bouncer: want panic, got none")
+		}
+	}()
+	New(nil, nil, nil, "", 10*time.Second, testWebAuthn(t), nil)
 }
 
 // slowThenCheckContextEmbedder sleeps past the request timeout, then reports
@@ -1064,7 +1085,7 @@ func TestWithRequestTimeout_CancelsSlowHandlerContext(t *testing.T) {
 	// RequestTimeout much shorter than the embedder's sleep: without
 	// withRequestTimeout wiring a.RequestTimeout into the handler's context, the
 	// embedder would just sleep out its full duration and report canceled=false.
-	a := New(st, slowThenCheckContextEmbedder{sleep: 200 * time.Millisecond, canceled: canceled}, summarize.Stub{}, "", 20*time.Millisecond, testWebAuthn(t))
+	a := New(st, slowThenCheckContextEmbedder{sleep: 200 * time.Millisecond, canceled: canceled}, summarize.Stub{}, "", 20*time.Millisecond, testWebAuthn(t), testBouncer(st))
 	srv := httptest.NewServer(a.Routes())
 	t.Cleanup(srv.Close)
 

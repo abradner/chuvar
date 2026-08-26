@@ -49,7 +49,7 @@ func webauthnTestServer(t *testing.T) (*httptest.Server, *store.Store, *pgxpool.
 	if _, err := st.CreateReviewerToken(ctx, "test-reviewer", testAuthToken, testTOTPSecret); err != nil {
 		t.Fatalf("seeding reviewer token: %v", err)
 	}
-	a := New(st, embed.Stub{}, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t))
+	a := New(st, embed.Stub{}, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t), testBouncer(st))
 	srv := httptest.NewServer(a.Routes())
 	t.Cleanup(srv.Close)
 	return srv, st, pool
@@ -640,7 +640,7 @@ func webauthnBootstrapTestServer(t *testing.T) (*httptest.Server, *store.Store, 
 	if _, err := st.CreateReviewerToken(ctx, "bootstrap", bootstrapToken, ""); err != nil {
 		t.Fatalf("seeding bootstrap token: %v", err)
 	}
-	a := New(st, embed.Stub{}, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t))
+	a := New(st, embed.Stub{}, summarize.Stub{}, testOrigin, 10*time.Second, testWebAuthn(t), testBouncer(st))
 	srv := httptest.NewServer(a.Routes())
 	t.Cleanup(srv.Close)
 	return srv, st, bootstrapToken
