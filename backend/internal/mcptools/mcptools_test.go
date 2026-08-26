@@ -388,6 +388,108 @@ func TestProposeWriteThenRead_EndToEnd_ViaMCP(t *testing.T) {
 	}
 }
 
+// TestProposeWrite_SummaryDepthGuessDoesNotConfirmContent_ViaMCP is the
+// end-to-end regression test for issue #83, exercised at the actual surface
+// the named adversary calls — and, post-cutover, through the FULL path:
+// the propose_write MCP tool -> agentclient -> HTTP -> agentProposeWrite ->
+// bouncer -> store. An agent holding only a summary-depth grant calls
+// propose_write with an exact-content guess for a fact it can only see
+// summarized, and must not get a "duplicate" verdict or the fact's ID back —
+// that combination is exactly what would let it confirm the guess was right.
+// The redaction now lives once, server-side (store.disclosureForProposer,
+// surfaced by agentProposeWrite); this proves the tool faithfully forwards it.
+func TestProposeWrite_SummaryDepthGuessDoesNotConfirmContent_ViaMCP(t *testing.T) {
+	session, h := testSession(t, "agent-guesser")
+	st := h.st
+	ctx := context.Background()
+
+	// Seed a fact under a scope agent-guesser will only ever hold at summary
+	// depth, proposed/committed by an unrelated subject — standing in for a
+	// fact that already existed before this agent ever touched the system.
+	content := "user's employer is Acme Corp"
+	vec, err := embed.Stub{}.Embed(ctx, content)
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	seed, _, err := st.ProposeDiff(ctx, "some-other-agent", content, []string{"identity.employer"}, vec, nil, nil)
+	if err != nil {
+		t.Fatalf("ProposeDiff() (seed) error = %v", err)
+	}
+	if _, err := st.CommitDiff(ctx, seed.ID, "human-reviewer", vec, "a stub employer summary"); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	if _, err := st.CreateGrant(ctx, "agent-guesser", []string{"identity.employer"}, "memory", "summary", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	out := callTool[proposeWriteOutput](t, session, "propose_write", proposeWriteArgs{
+		Content:        content,
+		ProposedScopes: []string{"identity.employer"},
+	})
+	if out.DedupeVerdict != "needs_review" {
+		t.Fatalf("propose_write dedupe_verdict for an exact guess at summary depth = %q, want %q (a \"duplicate\" verdict would confirm the guess)", out.DedupeVerdict, "needs_review")
+	}
+	if out.CandidateFactID != nil {
+		t.Fatalf("propose_write leaked candidate_fact_id %s to a summary-depth guesser", *out.CandidateFactID)
+	}
+}
+
+// TestProposeWrite_DisclosureDepthUsesCandidateScopesNotProposalScopes_ViaMCP
+// is the end-to-end counterpart of
+// store.TestProposeDiff_DisclosureDepthUsesCandidateScopesNotProposalScopes:
+// the same bypass attempt, exercised at the actual propose_write MCP surface
+// through the full cutover path. agent-guesser holds a full-depth grant on
+// "billing.invoices" and only a summary-depth grant on "identity.medical",
+// where the real fact lives. It tags its exact-content guess with
+// "billing.invoices" — the full-depth scope it holds, not the one the matched
+// fact is actually under — and must still get the redacted disclosure, not the
+// pre-#83 confirm-by-verdict oracle.
+func TestProposeWrite_DisclosureDepthUsesCandidateScopesNotProposalScopes_ViaMCP(t *testing.T) {
+	session, h := testSession(t, "agent-guesser")
+	st := h.st
+	ctx := context.Background()
+
+	const (
+		fullScope    = "billing.invoices" // agent-guesser holds this at "full"
+		summaryScope = "identity.medical" // agent-guesser holds this at "summary"; the real fact lives here
+	)
+
+	content := "user's blood type is AB-"
+	vec, err := embed.Stub{}.Embed(ctx, content)
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	seed, _, err := st.ProposeDiff(ctx, "some-other-agent", content, []string{summaryScope}, vec, nil, nil)
+	if err != nil {
+		t.Fatalf("ProposeDiff() (seed) error = %v", err)
+	}
+	if _, err := st.CommitDiff(ctx, seed.ID, "human-reviewer", vec, "a stub summary"); err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	if _, err := st.CreateGrant(ctx, "agent-guesser", []string{fullScope}, "memory", "full", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() (full) error = %v", err)
+	}
+	if _, err := st.CreateGrant(ctx, "agent-guesser", []string{summaryScope}, "memory", "summary", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() (summary) error = %v", err)
+	}
+
+	// Tag the guess with fullScope, not summaryScope (where the match
+	// actually lives), attempting to launder the redaction decision through
+	// the proposal's own scope tag rather than the candidate's.
+	out := callTool[proposeWriteOutput](t, session, "propose_write", proposeWriteArgs{
+		Content:        content,
+		ProposedScopes: []string{fullScope},
+	})
+	if out.DedupeVerdict != "needs_review" {
+		t.Fatalf("propose_write dedupe_verdict for an exact guess tagged with an unrelated full-depth scope = %q, want %q", out.DedupeVerdict, "needs_review")
+	}
+	if out.CandidateFactID != nil {
+		t.Fatalf("propose_write leaked candidate_fact_id %s via a proposal tagged with an unrelated full-depth scope", *out.CandidateFactID)
+	}
+}
+
 // TestProposeWrite_InvalidScopeReturnsVerbatimValidationError_ViaMCP is the
 // regression test for the ValidationError taxonomy across the cutover: a
 // malformed caller-supplied scope now fails agentRequestGrant/agentProposeWrite's

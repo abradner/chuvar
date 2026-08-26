@@ -24,7 +24,17 @@ type proposeWriteOutput struct {
 	// outcome the caller is meant to act on — back off and retry later — not
 	// an opaque failure, the same shape read_with_scope_check already uses
 	// for status=insufficient_scope.
-	Status          string  `json:"status"`
+	Status string `json:"status"`
+	// DedupeVerdict/CandidateFactID carry the #83 dedupe-disclosure redaction,
+	// but post-cutover that redaction happens server-side: the agent endpoint
+	// (internal/api/agentProposeWrite) builds its response from the store's
+	// DedupeDisclosure, not the staged diff's always-true fields, so a caller
+	// whose granted depth over the matched fact is "summary" already receives
+	// DedupeVerdict="needs_review" and no CandidateFactID over the wire. This
+	// client forwards the server's values verbatim; it must NOT reconstruct
+	// them from anything else (there's nothing else here to reconstruct from —
+	// mcpserver holds no store), which keeps the redaction a single
+	// server-side chokepoint (issue #83, principle 7).
 	DedupeVerdict   string  `json:"dedupe_verdict"`
 	CandidateFactID *string `json:"candidate_fact_id,omitempty"`
 }
@@ -57,8 +67,12 @@ func registerProposeWrite(s *mcp.Server, client *agentclient.Client) {
 			"it runs the bouncer pipeline (classify, embed, dedupe) and queues a diff that a human " +
 			"must explicitly approve before it becomes a real, readable fact. The dedupe_verdict in " +
 			"the response tells you what happened: novel (new fact), duplicate (matches an existing " +
-			"fact exactly, will likely be rejected as redundant), or contradiction (semantically close " +
-			"to an existing fact but not identical — flagged for human review rather than auto-merged). " +
+			"fact exactly, will likely be rejected as redundant), contradiction (semantically close " +
+			"to an existing fact but not identical — flagged for human review rather than auto-merged), " +
+			"or needs_review (something close enough to flag exists, but you don't hold enough depth on " +
+			"the matched fact to be told which of the above applies or its fact ID — the exact/near " +
+			"distinction and the ID are withheld the same way a summary-depth read would redact that " +
+			"fact's content; this is expected, not an error). " +
 			"Proposals are rate-limited per subject: if status=RATE_LIMITED comes back (no diff_id), " +
 			"you've proposed too many facts too quickly — wait for the current window to pass before " +
 			"retrying rather than looping on this call.",
@@ -90,6 +104,11 @@ func registerProposeWrite(s *mcp.Server, client *agentclient.Client) {
 			return nil, proposeWriteOutput{Status: agentclient.StatusRateLimited}, nil
 		}
 
+		// res.DedupeVerdict/res.CandidateFactID are already the #83-redacted
+		// disclosure — the agent endpoint applied store.disclosureForProposer
+		// server-side before responding (see proposeWriteOutput's field
+		// comment). Forward them verbatim; the redaction is not this client's
+		// to reconstruct.
 		return nil, proposeWriteOutput{
 			DiffID:          res.DiffID,
 			Status:          res.Status,

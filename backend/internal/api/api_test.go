@@ -693,11 +693,11 @@ func TestStagedDiffs_ListApproveReject(t *testing.T) {
 	vec384 := make([]float32, 384)
 	copy(vec384, vec)
 
-	approveMe, err := st.ProposeDiff(ctx, "agent-a", "user likes tea", []string{"preferences.tea"}, vec384, nil, nil)
+	approveMe, _, err := st.ProposeDiff(ctx, "agent-a", "user likes tea", []string{"preferences.tea"}, vec384, nil, nil)
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
-	rejectMe, err := st.ProposeDiff(ctx, "agent-a", "user likes coffee", []string{"preferences.coffee"}, vec384, nil, nil)
+	rejectMe, _, err := st.ProposeDiff(ctx, "agent-a", "user likes coffee", []string{"preferences.coffee"}, vec384, nil, nil)
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -740,7 +740,7 @@ func TestStagedDiffs_Pagination_LimitAndCursor(t *testing.T) {
 	const total = 3
 	want := make(map[string]bool, total)
 	for i := 0; i < total; i++ {
-		d, err := st.ProposeDiff(ctx, "agent-a", fmt.Sprintf("fact %d", i), []string{"preferences.tea"}, vec384, nil, nil)
+		d, _, err := st.ProposeDiff(ctx, "agent-a", fmt.Sprintf("fact %d", i), []string{"preferences.tea"}, vec384, nil, nil)
 		if err != nil {
 			t.Fatalf("ProposeDiff() error = %v", err)
 		}
@@ -855,7 +855,7 @@ func TestGetFact_ViaAPI(t *testing.T) {
 
 	vec := make([]float32, 384)
 	vec[0] = 1
-	d, err := st.ProposeDiff(ctx, "agent-a", "user's favorite color is teal", []string{"preferences.color"}, vec, nil, nil)
+	d, _, err := st.ProposeDiff(ctx, "agent-a", "user's favorite color is teal", []string{"preferences.color"}, vec, nil, nil)
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -1089,7 +1089,7 @@ func TestWithRequestTimeout_CancelsSlowHandlerContext(t *testing.T) {
 	srv := httptest.NewServer(a.Routes())
 	t.Cleanup(srv.Close)
 
-	diff, err := st.ProposeDiff(ctx, "agent-a", "user likes tea", []string{"preferences.tea"}, nil, nil, nil)
+	diff, _, err := st.ProposeDiff(ctx, "agent-a", "user likes tea", []string{"preferences.tea"}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
