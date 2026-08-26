@@ -51,6 +51,18 @@ const (
 	DedupeNovel         DedupeVerdict = "novel"
 	DedupeDuplicate     DedupeVerdict = "duplicate"
 	DedupeContradiction DedupeVerdict = "contradiction"
+
+	// DedupeNeedsReview is a disclosure-only verdict — never persisted to
+	// staged_diffs.dedupe_verdict (the column's CHECK constraint, init
+	// migration, only allows novel/duplicate/contradiction — the true
+	// verdict the reviewer sees). ProposeDiff/disclosureForProposer
+	// (staged_diffs.go) substitutes this for the proposer-facing response
+	// when the proposer's effective depth over the matched candidate is
+	// "summary": collapsing duplicate and contradiction into one signal
+	// closes the exact-vs-near distinction a repeated-guess oracle needs to
+	// confirm a fact's exact content (issue #83) without touching what's
+	// stored for human review.
+	DedupeNeedsReview DedupeVerdict = "needs_review"
 )
 
 type DiffStatus string
@@ -74,6 +86,20 @@ type StagedDiff struct {
 	CreatedAt             time.Time
 	DecidedAt             *time.Time
 	DecidedBy             *string
+}
+
+// DedupeDisclosure is what ProposeDiff hands back to the *proposing agent*
+// about the dedupe comparison it ran — distinct from StagedDiff.DedupeVerdict/
+// DedupeCandidateFactID, which stay at full fidelity for the human reviewer
+// (internal/api's staged-diff endpoints read the StagedDiff row directly, not
+// this type). See ProposeDiff's doc comment for why the comparison itself
+// must see facts beyond the proposer's depth while the disclosure must not.
+type DedupeDisclosure struct {
+	Verdict DedupeVerdict
+	// CandidateFactID is nil whenever Verdict doesn't warrant disclosing an
+	// ID at all (novel, or a needs-review verdict below full disclosure
+	// depth) — see disclosureForProposer.
+	CandidateFactID *string
 }
 
 type Fact struct {

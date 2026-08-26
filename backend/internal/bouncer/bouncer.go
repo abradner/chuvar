@@ -88,9 +88,15 @@ func New(s *store.Store, e embed.Embedder, c Classifier) *Bouncer {
 }
 
 // ProposeWrite runs the pipeline for one proposed fact and returns the staged
-// diff, including the dedupe verdict the store computed. targetFactID, if set,
-// means this proposal claims to update/supersede an existing fact.
-func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, proposedScopes []scope.Scope, targetFactID *string) (store.StagedDiff, error) {
+// diff plus the dedupe disclosure — what the *proposer* may learn about the
+// dedupe comparison the store ran (store.DedupeDisclosure; see that type's
+// doc comment and store.disclosureForProposer for why this is deliberately
+// NOT the same as diff.DedupeVerdict/DedupeCandidateFactID). Callers on the
+// agent-facing path (mcptools/propose_write.go) must build their response
+// from the returned disclosure, never from the diff's own dedupe fields —
+// those stay at full fidelity for the human reviewer only. targetFactID, if
+// set, means this proposal claims to update/supersede an existing fact.
+func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, proposedScopes []scope.Scope, targetFactID *string) (store.StagedDiff, store.DedupeDisclosure, error) {
 	// store.ProposeDiff rejects empty content anyway, but only after this function
 	// has already paid for classification and embedding — both meant to become
 	// real (external, costly) calls. Reject up front instead.
@@ -99,7 +105,7 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 	// retry — so it's a ValidationError, not a plain wrapped error: see that
 	// type's doc comment for why propose_write is allowed to show it verbatim.
 	if content == "" {
-		return store.StagedDiff{}, newValidationError("bouncer: content must not be empty")
+		return store.StagedDiff{}, store.DedupeDisclosure{}, newValidationError("bouncer: content must not be empty")
 	}
 
 	// Validate the caller's input before doing any work on its behalf — in
@@ -111,15 +117,15 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 	// store.
 	for _, sc := range proposedScopes {
 		if err := scope.Validate(sc); err != nil {
-			return store.StagedDiff{}, newValidationError("bouncer: %s", err)
+			return store.StagedDiff{}, store.DedupeDisclosure{}, newValidationError("bouncer: %s", err)
 		}
 	}
 
 	if b.Classifier == nil {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Classifier")
+		return store.StagedDiff{}, store.DedupeDisclosure{}, fmt.Errorf("bouncer: misconfigured: nil Classifier")
 	}
 	if b.Store == nil {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Store")
+		return store.StagedDiff{}, store.DedupeDisclosure{}, fmt.Errorf("bouncer: misconfigured: nil Store")
 	}
 
 	// Rate-limit after the cheap caller-input validation above but before
@@ -133,13 +139,13 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 	// unbounded provider traffic and cost while every request comes back
 	// RATE_LIMITED and stages nothing. Found in aggregate review.
 	if err := b.Store.CheckProposeWriteRateLimit(ctx, subject, b.RateLimit, b.RateLimitWindow); err != nil {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: %w", err)
+		return store.StagedDiff{}, store.DedupeDisclosure{}, fmt.Errorf("bouncer: %w", err)
 	}
 
 	scopes := proposedScopes
 	classified, err := b.Classifier.Classify(ctx, content)
 	if err != nil {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: classify: %w", err)
+		return store.StagedDiff{}, store.DedupeDisclosure{}, fmt.Errorf("bouncer: classify: %w", err)
 	}
 	// nil vs. non-nil-empty matters here (see Classifier's doc comment): only nil
 	// means "defer to the caller." A classifier that deliberately returns "no
@@ -153,7 +159,7 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 				// something the agent can fix by resubmitting — it's this
 				// service's own component misbehaving. Fail closed and mask it
 				// like any other internal failure rather than assume it's safe.
-				return store.StagedDiff{}, fmt.Errorf("bouncer: classifier produced invalid scope: %w", err)
+				return store.StagedDiff{}, store.DedupeDisclosure{}, fmt.Errorf("bouncer: classifier produced invalid scope: %w", err)
 			}
 		}
 		scopes = classified
@@ -165,15 +171,15 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 		// either way the message itself names no store/driver internals and is
 		// actionable ("propose at least one scope"), so it's safe as a
 		// ValidationError even though the root cause isn't always the caller.
-		return store.StagedDiff{}, newValidationError("bouncer: no scopes proposed or classified for content")
+		return store.StagedDiff{}, store.DedupeDisclosure{}, newValidationError("bouncer: no scopes proposed or classified for content")
 	}
 
 	if b.Embedder == nil {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: misconfigured: nil Embedder")
+		return store.StagedDiff{}, store.DedupeDisclosure{}, fmt.Errorf("bouncer: misconfigured: nil Embedder")
 	}
 	vec, err := b.Embedder.Embed(ctx, content)
 	if err != nil {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: embed: %w", err)
+		return store.StagedDiff{}, store.DedupeDisclosure{}, fmt.Errorf("bouncer: embed: %w", err)
 	}
 
 	scopeStrs := make([]string, len(scopes))
@@ -181,18 +187,23 @@ func (b *Bouncer) ProposeWrite(ctx context.Context, subject, content string, pro
 		scopeStrs[i] = string(sc)
 	}
 
-	// The subject's current granted scopes gate both the dedupe candidate search
-	// and target_fact_id visibility inside ProposeDiff — see that function's doc
-	// comment. Fetched here rather than inside the store layer because Bouncer
-	// already owns "what does this subject need to act" plumbing (Embedder,
-	// Classifier); Store just persists what it's handed.
-	grantedScopes, err := b.Store.GrantedScopes(ctx, subject)
+	// The subject's current granted scopes (WITH depth) gate the dedupe
+	// candidate search, target_fact_id visibility, and — the depth half
+	// specifically — what ProposeDiff's returned DedupeDisclosure may reveal
+	// about a match; see that function's doc comment. Fetched here rather than
+	// inside the store layer because Bouncer already owns "what does this
+	// subject need to act" plumbing (Embedder, Classifier); Store just persists
+	// what it's handed. GrantedScopeDepths, not the flat GrantedScopes: a
+	// depth-blind scope list is exactly what let issue #83's oracle through —
+	// findDedupeCandidate could scope-filter but had nothing to depth-filter
+	// against.
+	granted, err := b.Store.GrantedScopeDepths(ctx, subject)
 	if err != nil {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: granted scopes: %w", err)
+		return store.StagedDiff{}, store.DedupeDisclosure{}, fmt.Errorf("bouncer: granted scopes: %w", err)
 	}
-	diff, err := b.Store.ProposeDiff(ctx, subject, content, scopeStrs, vec, targetFactID, grantedScopes)
+	diff, disclosure, err := b.Store.ProposeDiff(ctx, subject, content, scopeStrs, vec, targetFactID, granted)
 	if err != nil {
-		return store.StagedDiff{}, fmt.Errorf("bouncer: stage diff: %w", err)
+		return store.StagedDiff{}, store.DedupeDisclosure{}, fmt.Errorf("bouncer: stage diff: %w", err)
 	}
-	return diff, nil
+	return diff, disclosure, nil
 }

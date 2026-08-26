@@ -49,6 +49,14 @@ type Querier interface {
 	// embedding_1/embedding_2 are the same repeated-named-param workaround used
 	// elsewhere in this migration (see facts.sql's SearchFacts) — bound to the
 	// identical value at the call site.
+	//
+	// scopes is the candidate's own fact_scopes tags, same array_agg subquery
+	// shape as GetFact/SearchFacts (facts.sql) — the caller (store.
+	// findDedupeCandidate) needs them to run effectiveDepth over the match, the
+	// same disclosure-projection rule facts.go's SearchFacts already applies on
+	// the read path. Without this, ProposeDiff's dedupe response can only be
+	// scope-filtered, not depth-filtered, against a candidate it isn't allowed to
+	// fully read — see store.disclosureForProposer's doc comment (issue #83).
 	FindDedupeCandidate(ctx context.Context, arg FindDedupeCandidateParams) (FindDedupeCandidateRow, error)
 	// A regressed sign counter is treated as a clone signal and fails closed by
 	// revoking the credential in the same statement that flags it — a warning

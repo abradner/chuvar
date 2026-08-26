@@ -104,7 +104,7 @@ func TestStreamEvents_AnnouncesNewStagedDiffAndItsResolution(t *testing.T) {
 		t.Fatalf("first event = %q, want %q (no pending diffs yet)", initial[0].Event, "ready")
 	}
 
-	diff, err := st.ProposeDiff(ctx, "agent-a", "user likes tea", []string{"preferences.tea"}, nil, nil, nil)
+	diff, _, err := st.ProposeDiff(ctx, "agent-a", "user likes tea", []string{"preferences.tea"}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
