@@ -7,6 +7,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// versionBeforeEnrollmentLatchBackfill is the migration version immediately
+// preceding 20260811110000_enrollment_latch_backfill
+// (20260811100000_capability_token_hash_unique) — i.e. "the backfill
+// migration has not run yet." Used instead of m.Steps(-1) below: Steps(-1)
+// means "one step back from whatever the latest embedded migration
+// currently is," which silently stopped meaning "immediately before the
+// backfill" the moment a later migration (20260812120000_agent_tokens)
+// landed after it. Targeting this fixed version keeps these tests correct
+// regardless of how many migrations get added later.
+const versionBeforeEnrollmentLatchBackfill = 20260811100000
+
 // TestEnrollmentLatchBackfill_SeedsLatchForPriorEnrollment is the upgrade-path
 // proof for the P1 finding that 20260810000000_enrollment_latch only CREATE
 // TABLEs and never backfills: seed a TOTP enrollment as if it existed before
@@ -33,13 +44,12 @@ func TestEnrollmentLatchBackfill_SeedsLatchForPriorEnrollment(t *testing.T) {
 	_, err = pool.Exec(ctx, `TRUNCATE reviewer_tokens, webauthn_credentials, webauthn_challenges, enrollment_latch`)
 	require.NoError(t, err)
 
-	// Step the schema back exactly one migration — this backfill migration is
-	// the latest embedded one, so this reproduces "20260810000000 has run
-	// (the table exists) but this fix has not" without disturbing anything
-	// else in the schema.
+	// Step the schema back to immediately before the backfill migration —
+	// reproduces "20260810000000 has run (the table exists) but this fix has
+	// not" without disturbing anything else in the schema.
 	m, closeFn, err := migrator(url)
 	require.NoError(t, err)
-	require.NoError(t, m.Steps(-1))
+	require.NoError(t, m.Migrate(versionBeforeEnrollmentLatchBackfill))
 	closeFn()
 
 	// Seed a pre-existing TOTP enrollment directly — standing in for a real
@@ -87,7 +97,7 @@ func TestEnrollmentLatchBackfill_PriorWebAuthnEnrollmentAlsoLatches(t *testing.T
 
 	m, closeFn, err := migrator(url)
 	require.NoError(t, err)
-	require.NoError(t, m.Steps(-1))
+	require.NoError(t, m.Migrate(versionBeforeEnrollmentLatchBackfill))
 	closeFn()
 
 	// A factorless reviewer token (no TOTP secret) with a passkey bound to
@@ -137,7 +147,7 @@ func TestEnrollmentLatchBackfill_NoPriorEnrollmentStaysUnlatched(t *testing.T) {
 
 	m, closeFn, err := migrator(url)
 	require.NoError(t, err)
-	require.NoError(t, m.Steps(-1))
+	require.NoError(t, m.Migrate(versionBeforeEnrollmentLatchBackfill))
 	closeFn()
 
 	// Deliberately nothing seeded: reviewer_tokens and webauthn_credentials
