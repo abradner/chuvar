@@ -24,8 +24,16 @@ Four roles, so no service holds authority it does not use:
 |---|---|---|---|
 | owner (`chuvar`) | `cmd/migrate` only | everything, including DDL | — |
 | `chuvar_app` | `apiserver` | all DML; read `reviewer_tokens`, `data_keys` | DDL; write `schema_migrations` |
-| `chuvar_agent` | `mcpserver` | read grants/scopes/facts; append `audit_log`; stage diffs and grant requests | **write grants**; read `reviewer_tokens`, `data_keys`, `audit_log`; read **other subjects' proposals**; DDL |
+| `chuvar_agent` | **nobody, as of #82/#86** — see below | read grants/scopes/facts; append `audit_log`; stage diffs and grant requests | **write grants**; read `reviewer_tokens`, `data_keys`, `audit_log`; read **other subjects' proposals**; DDL |
 | `chuvar_broker` | `brokerd` | read `grants`/`grant_scopes`/`capability_grant_identities`/`capability_grant_tokens`; append `audit_log` | anything touching `facts`/`fact_scopes`/`staged_diffs`; read `reviewer_tokens`, `data_keys`, or its own `audit_log` writes back; DDL |
+
+`mcpserver` no longer holds a database credential at all — #82/#86 replaced `DATABASE_URL` with
+a revocable agent-class API token (`CHUVAR_API_TOKEN`, see "Minting and deploying an agent
+token" below). `chuvar_agent` is retained rather than dropped (dropping a cluster-global
+stamped role is its own migration risk; a dormant `NOLOGIN` role that nothing authenticates as
+carries none — AGENTS.md §3.6), but nothing connects as it in a deployment that has adopted the
+agent token. The Can/Cannot columns above describe what the role still grants on paper, not
+what any running process currently exercises.
 
 `chuvar_agent` holds only *column-level* `SELECT` (`id`, `status`, `created_at`) on
 `staged_diffs` and `grant_requests`, so it can learn the id of what it wrote and nothing
@@ -65,10 +73,12 @@ ALTER ROLE chuvar_agent  WITH LOGIN PASSWORD 'generate-a-different-one';
 ALTER ROLE chuvar_broker WITH LOGIN PASSWORD 'generate-yet-another-one';
 ```
 
-Then point each service at its own role — `apiserver` at `chuvar_app`, `mcpserver` at
-`chuvar_agent`, `brokerd` at `chuvar_broker`, `cmd/migrate` at the owner — via their
-`DATABASE_URL`. The warning stops when a service is no longer over-privileged, which is
-how you confirm it took effect.
+Then point each database-backed service at its own role — `apiserver` at `chuvar_app`,
+`brokerd` at `chuvar_broker`, `cmd/migrate` at the owner — via their `DATABASE_URL`.
+`mcpserver` is not part of this step: it holds no `DATABASE_URL` at all (see "Minting and
+deploying an agent token" below) and never connects as `chuvar_agent`, which is why that role
+now has nobody using it. The warning stops when a service is no longer over-privileged, which
+is how you confirm it took effect for the services that do hold a database credential.
 
 ### Rotating the database password
 
@@ -114,6 +124,150 @@ It converts **ambient reach** (credentials sitting in the process's environment)
 shell, and nothing here prevents that. It is not claimed to — detecting it is the
 fail-closed tripwire work (ticket E4). What it removes is the ability to do real damage
 *through the credentials the service legitimately holds*.
+
+---
+
+## Minting and deploying an agent token
+
+`mcpserver` (ticket E3, #82/#86) authenticates to `apiserver`'s agent-only listener with a
+revocable **agent-class token** instead of holding `DATABASE_URL`. This section is the
+procedure for minting one, deploying it, and rotating it — the credential `mcpserver`'s launch
+environment needs now, and the two it no longer should.
+
+### Minting
+
+`POST /api/agent-tokens` is gated by `requireStrongFactor` **unconditionally** — unlike
+`POST /api/tokens`'s reviewer-token minting, there is **no bootstrap carve-out** here. A
+reviewer bearer token with no enrolled second factor (including the `REVIEWER_BOOTSTRAP_TOKEN`
+itself) is refused outright, on purpose: an agent-class token is pure standing authority handed
+to a long-running, unattended process, with no ongoing human-presence check of its own, so the
+one moment a human factor can be demanded is the moment of minting it. A confused or injected
+agent holding only a factorless bootstrap token must not be able to mint itself — or another
+agent — a standing credential.
+
+Call it against the **reviewer** listener (`HTTP_ADDR`, default `127.0.0.1:8080`), with a
+reviewer token and a current TOTP code or WebAuthn assertion, same as any other
+`requireStrongFactor`-gated mutation:
+
+```sh
+curl -X POST http://127.0.0.1:8080/api/agent-tokens \
+  -H "Authorization: Bearer $CHUVAR_API_TOKEN" \
+  -H "X-Chuvar-TOTP-Code: 123456" \
+  -H 'Content-Type: application/json' \
+  -d '{"subject":"agent:mcpserver-prod","label":"mcpserver-prod"}'
+```
+
+The response carries the token **plaintext exactly once** — capture it now, the server only
+ever persists its hash and cannot show it again. Losing it means revoking and minting a
+replacement (see "Rotating" below), not recovering it.
+
+`GET /api/agent-tokens` (bearer-only, no second factor) lists every agent token's `subject`,
+`label`, and active/revoked state without ever returning `token_hash` or a plaintext.
+`POST /api/agent-tokens/{id}/revoke` (also bearer-only — revocation only ever reduces
+authority) revokes one immediately.
+
+### ⚠️ `subject` must match what existing grants are keyed on
+
+`subject` is a separate column from the credential itself — it's the identity every grant and
+audit row this token's holder produces gets attributed to, **not** a description of the
+physical token (that's what `label` is for). Before deploying a newly minted token, confirm its
+`subject` is exactly the string this deployment's grants already use — pre-cutover, that was
+whatever `MCP_SUBJECT` was set to at launch. If it differs, existing grants silently stop
+matching: `mcpserver` authenticates fine, `GET /api/agent/whoami` returns a subject, every tool
+call runs — but every scope check comes back empty, because it's checking grants for a subject
+nothing was ever granted to. There is no error for this; it looks exactly like a
+correctly-authenticating agent with no grants.
+
+Check before minting or deploying:
+
+```sql
+SELECT DISTINCT subject FROM grants;
+```
+
+Mint (or rotate into) a token whose `subject` matches one of those rows exactly.
+
+### Deploying
+
+On the agent host, in place of `DATABASE_URL` and `MCP_SUBJECT` (both gone — see below):
+
+```sh
+install -m 600 /dev/null ~/.config/chuvar/mcpserver.token
+printf '%s' '<the plaintext from minting, no trailing newline needed>' > ~/.config/chuvar/mcpserver.token
+
+CHUVAR_API_TOKEN_FILE=~/.config/chuvar/mcpserver.token \
+CHUVAR_API_BASE_URL=http://127.0.0.1:8081 \
+go run ./cmd/mcpserver
+```
+
+- **`CHUVAR_API_TOKEN_FILE`** at mode `0600` — a file beats an environment variable here for
+  the same reason as everywhere else in this codebase (AGENTS.md §3.7): an env var is readable
+  via `/proc` by anything running as the same user and is inherited by every child process,
+  which is precisely the ambient-reach shape this credential exists to avoid. Plain
+  `CHUVAR_API_TOKEN` still works for local development.
+- **`CHUVAR_API_BASE_URL`** (read by `mcpserver`) must name the **agent** listener's origin,
+  matching `apiserver`'s own `CHUVAR_AGENT_ADDR` (default `127.0.0.1:8081`, no scheme — it's an
+  `http.Server.Addr`) — so with defaults on both sides, `CHUVAR_API_BASE_URL=http://127.0.0.1:8081`.
+  Never the reviewer listener (`HTTP_ADDR`, default `127.0.0.1:8080`). The two are separate
+  `http.Server`s specifically so a process holding only an agent token cannot reach reviewer
+  routes even at the network layer; pointing `mcpserver` at the reviewer port doesn't escalate
+  anything (the agent token still won't authenticate there), it just fails to connect. Unset,
+  `mcpserver` falls back to its own built-in default of `http://127.0.0.1:8081`, which matches
+  `apiserver`'s own default and so is correct for a single-host deployment with nothing
+  overridden — but should be set explicitly the moment either side's default is overridden, so
+  the two can't silently drift apart.
+- **Remove `DATABASE_URL`** from the agent host's launch environment — `mcpserver` no longer
+  reads it, and leaving a live database credential sitting in an agent's environment for a
+  process that no longer consults it is exactly the ambient-reach residue #82/#86 exists to
+  close.
+- **Remove `MCP_SUBJECT`** too — it no longer exists as a concept. Identity now comes from the
+  token, resolved server-side on every request; there is nothing left for it to override, and a
+  stale value sitting in the environment is a footgun for a future reader, not a no-op.
+- **Naming collision to watch for:** `cmd/approver` and `cmd/pushbridge` also read
+  `CHUVAR_API_TOKEN` — for them it's a *reviewer* token against the reviewer listener, a
+  structurally different credential from the *agent* token `mcpserver` reads under the same
+  variable name. They are never the same value and must never be deployed to the same process
+  environment; the shared name is a coincidence of both binaries using the same
+  fail-fast-required-config helper, not a shared credential.
+
+### Verifying a deployment
+
+On success, `mcpserver` logs `mcpserver: authenticated, serving on stdio` with the resolved
+`subject` and `api_base_url` — confirm the subject matches what you expected before treating
+the deployment as done. A bad or revoked token fails boot immediately with a message naming the
+token as the problem (distinct from the message for an unreachable or misconfigured
+`CHUVAR_API_BASE_URL`), so a startup failure already tells you which of the two to check first.
+
+### Rotating
+
+Revoke the old token and mint a new one with the **same** `subject`:
+
+```sh
+curl -X POST http://127.0.0.1:8080/api/agent-tokens/<old-id>/revoke \
+  -H "Authorization: Bearer $CHUVAR_API_TOKEN"
+
+curl -X POST http://127.0.0.1:8080/api/agent-tokens \
+  -H "Authorization: Bearer $CHUVAR_API_TOKEN" \
+  -H "X-Chuvar-TOTP-Code: 123456" \
+  -H 'Content-Type: application/json' \
+  -d '{"subject":"agent:mcpserver-prod","label":"mcpserver-prod-2026-08"}'
+```
+
+Grants are unaffected: `subject` persists across rotation because it lives in its own column,
+independent of `token_hash` — a fresh token minted with the old `subject` picks up exactly the
+grants the old token's holder had, with no re-approval needed. Deploy the new plaintext via
+`CHUVAR_API_TOKEN_FILE` and restart `mcpserver`; the revoked token stops authenticating
+immediately.
+
+### Naming convention (not enforced)
+
+Namespacing agent subjects as `agent:<name>` (as in the examples above) is a **convention**,
+not a schema constraint — `subject` is plain `TEXT` on both `agent_tokens` and `grants`, with
+no format check. It's worth following anyway: `audit_log.subject` is a single shared column
+that reviewer mutations populate with the acting reviewer's `label` and agent routes populate
+with the acting agent token's `subject` — nothing stops a reviewer label and an agent subject
+from colliding as bare strings (`"prod"` meaning two different things in two different audit
+rows), and namespacing the agent side is the cheap way to keep that column's values
+unambiguous at a glance.
 
 ---
 
