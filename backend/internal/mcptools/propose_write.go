@@ -26,7 +26,15 @@ type proposeWriteOutput struct {
 	// expected, structured outcome the caller is meant to act on — back off
 	// and retry later — not an opaque failure, the same shape
 	// read_with_scope_check already uses for status=insufficient_scope.
-	Status          string  `json:"status"`
+	Status string `json:"status"`
+	// DedupeVerdict/CandidateFactID are built from the store's DedupeDisclosure,
+	// not from the staged diff's own (always-true) dedupe fields — see the
+	// handler below and store.disclosureForProposer. A caller whose granted
+	// depth over the matched fact is "summary" sees DedupeVerdict collapsed to
+	// "needs_review" and CandidateFactID unset, even when the true verdict is
+	// "duplicate" or "contradiction" (issue #83: the uncollapsed pair is a
+	// guess-and-confirm oracle over content a summary-depth grant would
+	// otherwise redact).
 	DedupeVerdict   string  `json:"dedupe_verdict"`
 	CandidateFactID *string `json:"candidate_fact_id,omitempty"`
 }
@@ -39,8 +47,12 @@ func registerProposeWrite(s *mcp.Server, subject string, b *bouncer.Bouncer) {
 			"it runs the bouncer pipeline (classify, embed, dedupe) and queues a diff that a human " +
 			"must explicitly approve before it becomes a real, readable fact. The dedupe_verdict in " +
 			"the response tells you what happened: novel (new fact), duplicate (matches an existing " +
-			"fact exactly, will likely be rejected as redundant), or contradiction (semantically close " +
-			"to an existing fact but not identical — flagged for human review rather than auto-merged). " +
+			"fact exactly, will likely be rejected as redundant), contradiction (semantically close " +
+			"to an existing fact but not identical — flagged for human review rather than auto-merged), " +
+			"or needs_review (something close enough to flag exists, but you don't hold enough depth on " +
+			"the matched fact to be told which of the above applies or its fact ID — the exact/near " +
+			"distinction and the ID are withheld the same way a summary-depth read would redact that " +
+			"fact's content; this is expected, not an error). " +
 			"Proposals are rate-limited per subject: if status=RATE_LIMITED comes back (no diff_id), " +
 			"you've proposed too many facts too quickly — wait for the current window to pass before " +
 			"retrying rather than looping on this call.",
@@ -64,7 +76,7 @@ func registerProposeWrite(s *mcp.Server, subject string, b *bouncer.Bouncer) {
 			target = &args.TargetFactID
 		}
 
-		diff, err := b.ProposeWrite(ctx, subject, args.Content, scopes, target)
+		diff, disclosure, err := b.ProposeWrite(ctx, subject, args.Content, scopes, target)
 		if err != nil {
 			if errors.Is(err, store.ErrRateLimited) {
 				// Distinguishable from every other bouncer/store failure below on
@@ -102,13 +114,18 @@ func registerProposeWrite(s *mcp.Server, subject string, b *bouncer.Bouncer) {
 			return nil, proposeWriteOutput{}, toolError("propose_write", err)
 		}
 
+		// Built from disclosure, NOT diff.DedupeVerdict/diff.DedupeCandidateFactID —
+		// those carry the true, unredacted dedupe result for the human reviewer
+		// (internal/api's staged-diff endpoints read diff's fields directly).
+		// disclosure is what store.ProposeDiff already redacted to this subject's
+		// actual granted depth over the matched fact — see
+		// store.disclosureForProposer. Using diff's fields here would be exactly
+		// issue #83 again.
 		out := proposeWriteOutput{
 			DiffID:          diff.ID,
 			Status:          string(diff.Status),
-			CandidateFactID: diff.DedupeCandidateFactID,
-		}
-		if diff.DedupeVerdict != nil {
-			out.DedupeVerdict = string(*diff.DedupeVerdict)
+			DedupeVerdict:   string(disclosure.Verdict),
+			CandidateFactID: disclosure.CandidateFactID,
 		}
 		return nil, out, nil
 	})

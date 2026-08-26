@@ -92,25 +92,25 @@ func integrationStore(t *testing.T) *store.Store {
 
 func TestProposeWrite_NoScopesIsError(t *testing.T) {
 	b := New(integrationStore(t), embed.Stub{}, PassthroughClassifier{})
-	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", nil, nil)
+	_, _, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", nil, nil)
 	wantValidationError(t, err)
 }
 
 func TestProposeWrite_InvalidScopeIsError(t *testing.T) {
 	b := New(nil, embed.Stub{}, PassthroughClassifier{})
-	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"Not Valid"}, nil)
+	_, _, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"Not Valid"}, nil)
 	wantValidationError(t, err)
 }
 
 func TestProposeWrite_EmptyContentIsError(t *testing.T) {
 	b := New(nil, embed.Stub{}, PassthroughClassifier{})
-	_, err := b.ProposeWrite(context.Background(), "agent-a", "", []scope.Scope{"identity.basic"}, nil)
+	_, _, err := b.ProposeWrite(context.Background(), "agent-a", "", []scope.Scope{"identity.basic"}, nil)
 	wantValidationError(t, err)
 }
 
 func TestProposeWrite_NilClassifierReturnsErrorNotPanic(t *testing.T) {
 	b := &Bouncer{Store: nil, Embedder: embed.Stub{}, Classifier: nil}
-	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
+	_, _, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
 	// Misconfiguration, not a caller mistake — must stay masked.
 	wantNotValidationError(t, err)
 }
@@ -122,13 +122,13 @@ func TestProposeWrite_NilEmbedderReturnsErrorNotPanic(t *testing.T) {
 	// Found in the batch's independent aggregate review.
 	b := &Bouncer{Store: integrationStore(t), Embedder: nil, Classifier: PassthroughClassifier{},
 		RateLimit: defaultRateLimit, RateLimitWindow: defaultRateLimitWindow}
-	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
+	_, _, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
 	wantNotValidationError(t, err)
 }
 
 func TestProposeWrite_NilStoreReturnsErrorNotPanic(t *testing.T) {
 	b := &Bouncer{Store: nil, Embedder: embed.Stub{}, Classifier: PassthroughClassifier{}}
-	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
+	_, _, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
 	wantNotValidationError(t, err)
 }
 
@@ -143,7 +143,7 @@ func TestProposeWrite_ClassifierNonNilEmptySliceOverridesCaller(t *testing.T) {
 	// from nil ("defer to caller") — see Classifier's doc comment. It must override
 	// the caller's proposed scopes down to nothing, not be treated as "no opinion."
 	b := New(integrationStore(t), embed.Stub{}, emptySliceClassifier{})
-	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
+	_, _, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
 	// "No scopes proposed or classified" is still safe/actionable even though the
 	// classifier (not the caller) drove it here — see the ValidationError call
 	// site's comment in bouncer.go.
@@ -152,7 +152,7 @@ func TestProposeWrite_ClassifierNonNilEmptySliceOverridesCaller(t *testing.T) {
 
 func TestProposeWrite_ClassifierErrorIsWrapped(t *testing.T) {
 	b := New(integrationStore(t), embed.Stub{}, fakeClassifier{err: errors.New("classifier unavailable")})
-	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
+	_, _, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
 	// A Classifier failure isn't caller input — could wrap an external service's
 	// error text — so it must stay masked.
 	wantNotValidationError(t, err)
@@ -175,7 +175,7 @@ func TestProposeWrite_ClassifierProducedInvalidScopeIsNotValidationError(t *test
 	// the exact "passes against unfixed code" failure mode AGENTS.md warns
 	// about. Found in the batch's independent aggregate review.
 	b := New(integrationStore(t), embed.Stub{}, invalidScopeClassifier{})
-	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
+	_, _, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
 	wantNotValidationError(t, err)
 }
 
@@ -184,7 +184,7 @@ func TestProposeWrite_EmbedderErrorIsWrapped(t *testing.T) {
 	// before ProposeWrite touches the store, or this panics instead of failing
 	// cleanly.
 	b := New(integrationStore(t), fakeEmbedder{err: errors.New("embedding provider unavailable")}, PassthroughClassifier{})
-	_, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
+	_, _, err := b.ProposeWrite(context.Background(), "agent-a", "some fact", []scope.Scope{"identity.basic"}, nil)
 	// An Embedder failure isn't caller input either — same reasoning as the
 	// Classifier failure case above.
 	wantNotValidationError(t, err)
@@ -216,7 +216,7 @@ func TestProposeWrite_ClassifierOverridesProposedScopes(t *testing.T) {
 	classifierScopes := []scope.Scope{"identity.professional"}
 	b := New(store.New(pool), embed.Stub{}, fakeClassifier{scopes: classifierScopes})
 
-	diff, err := b.ProposeWrite(ctx, "agent-a", "user works as a software engineer",
+	diff, _, err := b.ProposeWrite(ctx, "agent-a", "user works as a software engineer",
 		[]scope.Scope{"preferences.coffee"}, nil) // caller proposes the "wrong" scope
 	if err != nil {
 		t.Fatalf("ProposeWrite() error = %v", err)
@@ -250,7 +250,7 @@ func TestProposeWrite_DuplicateScopesDedupedSoCommitSucceeds(t *testing.T) {
 	st := store.New(pool)
 	b := New(st, embed.Stub{}, PassthroughClassifier{})
 
-	diff, err := b.ProposeWrite(ctx, "agent-a", "user's favorite tea is earl grey",
+	diff, _, err := b.ProposeWrite(ctx, "agent-a", "user's favorite tea is earl grey",
 		[]scope.Scope{"preferences.tea", "preferences.tea"}, nil)
 	if err != nil {
 		t.Fatalf("ProposeWrite() error = %v", err)
@@ -289,7 +289,7 @@ func TestProposeWrite_TargetOutsideSubjectGrantsRejected(t *testing.T) {
 	b := New(st, embed.Stub{}, PassthroughClassifier{})
 
 	// agent-a proposes and commits a fact under a scope agent-b has no grant for.
-	first, err := b.ProposeWrite(ctx, "agent-a", "user's medical condition is confidential",
+	first, _, err := b.ProposeWrite(ctx, "agent-a", "user's medical condition is confidential",
 		[]scope.Scope{"identity.medical"}, nil)
 	if err != nil {
 		t.Fatalf("ProposeWrite() (first) error = %v", err)
@@ -310,7 +310,7 @@ func TestProposeWrite_TargetOutsideSubjectGrantsRejected(t *testing.T) {
 	// Store.ProposeDiff, which is what rejects the out-of-grant target. A unit
 	// test with a fake/hardcoded scopes list wouldn't catch a wiring mistake here
 	// (wrong subject, wrong variable, argument left out) the way this does.
-	_, err = b.ProposeWrite(ctx, "agent-b", "innocuous-looking replacement content",
+	_, _, err = b.ProposeWrite(ctx, "agent-b", "innocuous-looking replacement content",
 		[]scope.Scope{"preferences.coffee"}, &fact.ID)
 	if err == nil {
 		t.Fatal("ProposeWrite() targeting a fact outside the subject's actual grants: want error, got nil")
@@ -342,7 +342,7 @@ func TestProposeWrite_EndToEnd(t *testing.T) {
 
 	b := New(store.New(pool), embed.Stub{}, PassthroughClassifier{})
 
-	diff, err := b.ProposeWrite(ctx, "agent-a", "user prefers dark roast coffee", []scope.Scope{"preferences.coffee"}, nil)
+	diff, _, err := b.ProposeWrite(ctx, "agent-a", "user prefers dark roast coffee", []scope.Scope{"preferences.coffee"}, nil)
 	if err != nil {
 		t.Fatalf("ProposeWrite() error = %v", err)
 	}
@@ -401,11 +401,11 @@ func TestProposeWrite_RateLimitExceededIsDistinguishable(t *testing.T) {
 	b.RateLimit = 1
 	b.RateLimitWindow = time.Hour
 
-	if _, err := b.ProposeWrite(ctx, "agent-a", "first fact, within the limit", []scope.Scope{"preferences.coffee"}, nil); err != nil {
+	if _, _, err := b.ProposeWrite(ctx, "agent-a", "first fact, within the limit", []scope.Scope{"preferences.coffee"}, nil); err != nil {
 		t.Fatalf("ProposeWrite() (first, within limit) error = %v", err)
 	}
 
-	_, err = b.ProposeWrite(ctx, "agent-a", "second fact, over the limit", []scope.Scope{"preferences.coffee"}, nil)
+	_, _, err = b.ProposeWrite(ctx, "agent-a", "second fact, over the limit", []scope.Scope{"preferences.coffee"}, nil)
 	if !errors.Is(err, store.ErrRateLimited) {
 		t.Fatalf("ProposeWrite() over the limit: err = %v, want errors.Is(err, store.ErrRateLimited)", err)
 	}
@@ -413,7 +413,7 @@ func TestProposeWrite_RateLimitExceededIsDistinguishable(t *testing.T) {
 	// A subject with no rate-limit history of its own must not be affected by
 	// agent-a's — otherwise the control keyed wrong and throttles an
 	// uninvolved subject, which is its own denial-of-service.
-	if _, err := b.ProposeWrite(ctx, "agent-b", "agent-b's own, unrelated fact", []scope.Scope{"preferences.tea"}, nil); err != nil {
+	if _, _, err := b.ProposeWrite(ctx, "agent-b", "agent-b's own, unrelated fact", []scope.Scope{"preferences.tea"}, nil); err != nil {
 		t.Fatalf("ProposeWrite() for a different subject: unexpected error = %v (agent-a's limit leaked across subjects)", err)
 	}
 
@@ -424,7 +424,7 @@ func TestProposeWrite_RateLimitExceededIsDistinguishable(t *testing.T) {
 	// back RATE_LIMITED and stages nothing. Found in aggregate review.
 	b.Classifier = trippingClassifier{t: t}
 	b.Embedder = trippingEmbedder{t: t}
-	if _, err := b.ProposeWrite(ctx, "agent-a", "still over the limit", []scope.Scope{"preferences.coffee"}, nil); !errors.Is(err, store.ErrRateLimited) {
+	if _, _, err := b.ProposeWrite(ctx, "agent-a", "still over the limit", []scope.Scope{"preferences.coffee"}, nil); !errors.Is(err, store.ErrRateLimited) {
 		t.Fatalf("ProposeWrite() over the limit with tripping pipeline: err = %v, want errors.Is(err, store.ErrRateLimited)", err)
 	}
 }
