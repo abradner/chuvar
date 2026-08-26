@@ -385,7 +385,7 @@ func (a *API) agentProposeWrite(w http.ResponseWriter, r *http.Request) {
 		target = &req.TargetFactID
 	}
 
-	diff, err := a.Bouncer.ProposeWrite(ctx, subject, req.Content, scopes, target)
+	diff, disclosure, err := a.Bouncer.ProposeWrite(ctx, subject, req.Content, scopes, target)
 	if err != nil {
 		if errors.Is(err, store.ErrRateLimited) {
 			// Audited before responding, same as insufficient_scope in
@@ -409,9 +409,18 @@ func (a *API) agentProposeWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out := agentProposalResponse{DiffID: diff.ID, Status: string(diff.Status), CandidateFactID: diff.DedupeCandidateFactID}
-	if diff.DedupeVerdict != nil {
-		out.DedupeVerdict = string(*diff.DedupeVerdict)
+	// Built from disclosure, NOT diff.DedupeVerdict/diff.DedupeCandidateFactID:
+	// those carry the true, unredacted dedupe result for the human reviewer
+	// (the reviewer-facing staged-diff endpoints read diff's fields directly),
+	// while disclosure is what store.ProposeDiff already redacted to this
+	// agent's actual granted depth over the matched fact. This is the agent
+	// surface's copy of the exact rule mcptools/propose_write.go follows —
+	// using diff's fields here would reopen issue #83 through the agent API.
+	out := agentProposalResponse{
+		DiffID:          diff.ID,
+		Status:          string(diff.Status),
+		DedupeVerdict:   string(disclosure.Verdict),
+		CandidateFactID: disclosure.CandidateFactID,
 	}
 	writeJSON(w, http.StatusOK, out)
 }

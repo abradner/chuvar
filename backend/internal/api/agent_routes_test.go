@@ -107,7 +107,7 @@ func mustCommitAgentFact(t *testing.T, st *store.Store, subject, content string,
 	if err != nil {
 		t.Fatalf("Embed() error = %v", err)
 	}
-	diff, err := st.ProposeDiff(ctx, subject, content, scopes, vec, nil, nil)
+	diff, _, err := st.ProposeDiff(ctx, subject, content, scopes, vec, nil, nil)
 	if err != nil {
 		t.Fatalf("ProposeDiff() error = %v", err)
 	}
@@ -631,6 +631,76 @@ func TestAgentRequestGrant_BodySuppliedSubjectIgnored(t *testing.T) {
 }
 
 // --- /api/agent/proposals ------------------------------------------------
+
+// TestAgentProposals_SummaryDepthDedupeDisclosureIsRedacted is the agent-HTTP
+// counterpart to store.TestProposeDiff_SummaryDepthDedupeDisclosureIsRedacted
+// (issue #83). The store returns two things from ProposeDiff — the stored diff
+// with the true verdict/ID for the human reviewer, and a proposer-facing
+// disclosure already redacted to the caller's granted depth. agentProposeWrite
+// MUST build its response from the disclosure, never the stored diff's fields:
+// a summary-depth agent proposing an exact guess of a fact it can only see
+// summarised must get "needs_review" and no candidate ID back, or the endpoint
+// becomes the exact content-confirmation oracle #83 closed on the MCP path.
+// This test exists because that property was nearly lost when the agent surface
+// (built against ProposeWrite's pre-#83 two-value signature) was reconciled
+// onto #83's three-value one — a clean git merge that did not textually
+// conflict but would have compiled the oracle straight back in.
+func TestAgentProposals_SummaryDepthDedupeDisclosureIsRedacted(t *testing.T) {
+	srv, st, _, token := agentTestServer(t, "agent-guesser", nil)
+	ctx := context.Background()
+
+	// Seed a fact under identity.medical and commit it, owned by another
+	// subject. embed.Stub is deterministic on content, so an exact-content
+	// re-proposal lands as a dedupe DUPLICATE.
+	content := "user's blood type is O+"
+	vec, err := embed.Stub{}.Embed(ctx, content)
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	seed, _, err := st.ProposeDiff(ctx, "owner", content, []string{"identity.medical"}, vec, nil, []store.GrantedScope{{Scope: "identity.medical", Depth: "full"}})
+	if err != nil {
+		t.Fatalf("ProposeDiff() (seed) error = %v", err)
+	}
+	fact, err := st.CommitDiff(ctx, seed.ID, "human-reviewer", vec, "a stub summary")
+	if err != nil {
+		t.Fatalf("CommitDiff() error = %v", err)
+	}
+
+	// The calling agent holds only SUMMARY depth on identity.medical.
+	if _, err := st.CreateGrant(ctx, "agent-guesser", []string{"identity.medical"}, "memory", "summary", nil, "human-reviewer"); err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	resp := doAgentJSON(t, http.MethodPost, srv.URL+"/api/agent/proposals", agentProposalRequest{
+		Content:        content, // an exact guess of the summary-only fact
+		ProposedScopes: []string{"identity.medical"},
+	}, token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	out := decodeInto[agentProposalResponse](t, resp)
+
+	// The redaction: an exact match must NOT be confirmable, and no ID leaks.
+	if out.DedupeVerdict != string(store.DedupeNeedsReview) {
+		t.Fatalf("dedupe_verdict = %q, want %q (an exact-content guess at summary depth must not be confirmed as a duplicate through the agent API — issue #83)", out.DedupeVerdict, store.DedupeNeedsReview)
+	}
+	if out.CandidateFactID != nil {
+		t.Fatalf("candidate_fact_id = %q leaked to a summary-depth proposer over the agent API (issue #83)", *out.CandidateFactID)
+	}
+
+	// Correctness did not regress: the STORED diff still carries the true
+	// verdict and the real candidate ID for the human reviewer.
+	diff, err := st.GetStagedDiff(ctx, out.DiffID)
+	if err != nil {
+		t.Fatalf("GetStagedDiff() error = %v", err)
+	}
+	if diff.DedupeVerdict == nil || *diff.DedupeVerdict != store.DedupeDuplicate {
+		t.Fatalf("stored (reviewer-facing) verdict = %v, want duplicate (dedupe must still detect the match)", diff.DedupeVerdict)
+	}
+	if diff.DedupeCandidateFactID == nil || *diff.DedupeCandidateFactID != fact.ID {
+		t.Fatalf("stored (reviewer-facing) candidate ID = %v, want %s", diff.DedupeCandidateFactID, fact.ID)
+	}
+}
 
 func TestAgentProposals_HappyPath(t *testing.T) {
 	srv, _, _, token := agentTestServer(t, "agent-a", nil)
