@@ -231,6 +231,7 @@ func TestCutover_MCPServerNeedsNoDatabaseCredential(t *testing.T) {
 	// environment — point both at this test's server/token, then call it
 	// exactly as run() does, with DATABASE_URL absent throughout.
 	t.Setenv("CHUVAR_AGENT_API_URL", bk.srv.URL)
+	t.Setenv("CHUVAR_AGENT_TOKEN_FILE", "") // hermetic: an ambient _FILE would otherwise win
 	t.Setenv("CHUVAR_AGENT_TOKEN", token)
 	bootedClient, subject, err := boot(ctx)
 	if err != nil {
@@ -405,6 +406,7 @@ func TestBoot_FailsFastOnBadToken(t *testing.T) {
 	bk := newBackend(t)
 
 	t.Setenv("CHUVAR_AGENT_API_URL", bk.srv.URL)
+	t.Setenv("CHUVAR_AGENT_TOKEN_FILE", "") // hermetic: an ambient _FILE would otherwise win
 	t.Setenv("CHUVAR_AGENT_TOKEN", "this-token-was-never-minted")
 
 	_, _, err := boot(context.Background())
@@ -433,6 +435,7 @@ func TestBoot_FailsFastOnRevokedToken(t *testing.T) {
 	}
 
 	t.Setenv("CHUVAR_AGENT_API_URL", bk.srv.URL)
+	t.Setenv("CHUVAR_AGENT_TOKEN_FILE", "") // hermetic: an ambient _FILE would otherwise win
 	t.Setenv("CHUVAR_AGENT_TOKEN", token)
 
 	_, _, err = boot(context.Background())
@@ -460,6 +463,7 @@ func TestBoot_FailsFastOnUnreachableBaseURL(t *testing.T) {
 	l.Close()
 
 	t.Setenv("CHUVAR_AGENT_API_URL", unreachable)
+	t.Setenv("CHUVAR_AGENT_TOKEN_FILE", "") // hermetic: an ambient _FILE would otherwise win
 	t.Setenv("CHUVAR_AGENT_TOKEN", "irrelevant-token")
 
 	_, _, err = boot(context.Background())
@@ -524,6 +528,7 @@ func TestBoot_TimesOutOnStalledBackend(t *testing.T) {
 	t.Cleanup(func() { close(unblock) })
 
 	t.Setenv("CHUVAR_AGENT_API_URL", srv.URL)
+	t.Setenv("CHUVAR_AGENT_TOKEN_FILE", "") // hermetic: an ambient _FILE would otherwise win
 	t.Setenv("CHUVAR_AGENT_TOKEN", "irrelevant-token")
 
 	start := time.Now()
@@ -541,7 +546,12 @@ func TestBoot_TimesOutOnStalledBackend(t *testing.T) {
 	if want := apiClientTimeout + 20*time.Second; elapsed > want {
 		t.Fatalf("boot() against a stalled backend took %v, want well under %v (apiClientTimeout=%v) — did the http.Client.Timeout get dropped?", elapsed, want, apiClientTimeout)
 	}
-	if elapsed < apiClientTimeout {
-		t.Fatalf("boot() against a stalled backend returned after %v, before apiClientTimeout (%v) even elapsed — that shouldn't be possible against a handler that never responds", elapsed, apiClientTimeout)
+	// Lower bound with a small tolerance: net/http's timer can fire slightly
+	// before the nominal deadline due to timer granularity/scheduling, so a
+	// strict `elapsed < apiClientTimeout` would flake. A floor comfortably
+	// below the timeout still proves it was the *client's* Timeout that ended
+	// the call (the handler never responds), not something returning early.
+	if floor := apiClientTimeout - time.Second; elapsed < floor {
+		t.Fatalf("boot() against a stalled backend returned after %v, well before apiClientTimeout (%v) — that shouldn't be possible against a handler that never responds", elapsed, apiClientTimeout)
 	}
 }
