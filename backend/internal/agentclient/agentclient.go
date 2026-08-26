@@ -218,10 +218,26 @@ func (c *Client) doJSON(ctx context.Context, op, method, path string, reqBody an
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		// Transport failure (DNS, connection refused, context deadline,
-		// ...) — generic per the brief: don't fold local network detail
-		// into a message an agent-facing caller might display or log
-		// verbatim alongside server errors.
+		// If ctx itself is done, that's why Do failed — surface ctx.Err()
+		// (wrapped, so errors.Is(err, context.Canceled) /
+		// errors.Is(err, context.DeadlineExceeded) both work) rather than
+		// folding it into the same generic *serverError every other
+		// transport failure gets. Found in review (#118, Copilot): an
+		// intentional cancellation (the caller gave up, a request-scoped
+		// deadline elapsed) is not a server or network fault, and callers
+		// need to tell the two apart — different retry behaviour, and a
+		// cancellation showing up as noisy "server error" logs is
+		// misleading. This also covers this package's own Timeout
+		// (net/http.Client.Timeout cancels the request's context under the
+		// hood, so ctx.Err() reports it the same way an explicit caller
+		// cancellation would).
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, nil, fmt.Errorf("agentclient: %s: %w", op, ctxErr)
+		}
+		// Every other transport failure (DNS, connection refused, TLS
+		// handshake failure, ...) — generic per the brief: don't fold local
+		// network detail into a message an agent-facing caller might
+		// display or log verbatim alongside server errors.
 		return 0, nil, &serverError{Op: op}
 	}
 	defer resp.Body.Close()

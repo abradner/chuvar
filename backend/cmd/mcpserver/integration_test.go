@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -123,6 +124,25 @@ func (bk *backend) mintToken(t *testing.T, subject string) string {
 	return plaintext
 }
 
+// unsetenvRestoring removes key from the process environment for the
+// duration of t, restoring whatever value (or absence) key had beforehand
+// once t completes — the same LookupEnv-then-Cleanup shape
+// TestCutover_MCPServerNeedsNoDatabaseCredential already uses for
+// DATABASE_URL above, factored out here because TestBoot_FailsFastOnMissingToken
+// needs it for two variables. t.Setenv can't express "unset" on its own
+// (t.Setenv(key, "") sets an empty value, which is not the same thing:
+// config.Secret would still see the key as present), so this wraps the
+// plain os.Unsetenv this test needs while still guaranteeing the ambient
+// environment this test binary runs in is never left mutated for whichever
+// test runs next.
+func unsetenvRestoring(t *testing.T, key string) {
+	t.Helper()
+	if v, ok := os.LookupEnv(key); ok {
+		t.Cleanup(func() { os.Setenv(key, v) })
+		os.Unsetenv(key)
+	}
+}
+
 func callTool[T any](t *testing.T, session *mcp.ClientSession, name string, args any) T {
 	t.Helper()
 	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
@@ -168,7 +188,7 @@ func newMCPSession(t *testing.T, client *agentclient.Client) *mcp.ClientSession 
 // TestCutover_MCPServerNeedsNoDatabaseCredential is the proof this PR's brief
 // asks for: with DATABASE_URL absent from the process environment (removed,
 // not merely empty, via os.Unsetenv — matching what a real launcher that
-// simply never sets it looks like), boot()'s config.Secret("CHUVAR_API_TOKEN")
+// simply never sets it looks like), boot()'s config.Secret("CHUVAR_AGENT_TOKEN")
 // + client.Whoami() health check succeeds, mcptools.Register wires up the
 // same four tools against nothing but that client, and every tool works end
 // to end over the real HTTP path: list_grants, request_grant,
@@ -207,11 +227,12 @@ func TestCutover_MCPServerNeedsNoDatabaseCredential(t *testing.T) {
 
 	token := bk.mintToken(t, "agent-cutover")
 
-	// boot() reads CHUVAR_API_BASE_URL/CHUVAR_API_TOKEN from the process
+	// boot() reads CHUVAR_AGENT_API_URL/CHUVAR_AGENT_TOKEN from the process
 	// environment — point both at this test's server/token, then call it
 	// exactly as run() does, with DATABASE_URL absent throughout.
-	t.Setenv("CHUVAR_API_BASE_URL", bk.srv.URL)
-	t.Setenv("CHUVAR_API_TOKEN", token)
+	t.Setenv("CHUVAR_AGENT_API_URL", bk.srv.URL)
+	t.Setenv("CHUVAR_AGENT_TOKEN_FILE", "") // hermetic: an ambient _FILE would otherwise win
+	t.Setenv("CHUVAR_AGENT_TOKEN", token)
 	bootedClient, subject, err := boot(ctx)
 	if err != nil {
 		t.Fatalf("boot() error = %v, want success with no DATABASE_URL set", err)
@@ -376,7 +397,7 @@ type proposeOutputShim struct {
 }
 
 // TestBoot_FailsFastOnBadToken proves the boot health check aborts before
-// ever registering a tool when CHUVAR_API_TOKEN doesn't authenticate against
+// ever registering a tool when CHUVAR_AGENT_TOKEN doesn't authenticate against
 // a live backend (a typo, a revoked token, a token minted for a different
 // deployment) — and that the message names this as a credential problem,
 // distinct from an unreachable backend (TestBoot_FailsFastOnUnreachableBaseURL
@@ -384,8 +405,9 @@ type proposeOutputShim struct {
 func TestBoot_FailsFastOnBadToken(t *testing.T) {
 	bk := newBackend(t)
 
-	t.Setenv("CHUVAR_API_BASE_URL", bk.srv.URL)
-	t.Setenv("CHUVAR_API_TOKEN", "this-token-was-never-minted")
+	t.Setenv("CHUVAR_AGENT_API_URL", bk.srv.URL)
+	t.Setenv("CHUVAR_AGENT_TOKEN_FILE", "") // hermetic: an ambient _FILE would otherwise win
+	t.Setenv("CHUVAR_AGENT_TOKEN", "this-token-was-never-minted")
 
 	_, _, err := boot(context.Background())
 	if err == nil {
@@ -412,8 +434,9 @@ func TestBoot_FailsFastOnRevokedToken(t *testing.T) {
 		t.Fatalf("RevokeAgentToken() error = %v", err)
 	}
 
-	t.Setenv("CHUVAR_API_BASE_URL", bk.srv.URL)
-	t.Setenv("CHUVAR_API_TOKEN", token)
+	t.Setenv("CHUVAR_AGENT_API_URL", bk.srv.URL)
+	t.Setenv("CHUVAR_AGENT_TOKEN_FILE", "") // hermetic: an ambient _FILE would otherwise win
+	t.Setenv("CHUVAR_AGENT_TOKEN", token)
 
 	_, _, err = boot(context.Background())
 	if err == nil {
@@ -425,7 +448,7 @@ func TestBoot_FailsFastOnRevokedToken(t *testing.T) {
 }
 
 // TestBoot_FailsFastOnUnreachableBaseURL proves the other half of the
-// distinct-error-message requirement: an unreachable CHUVAR_API_BASE_URL
+// distinct-error-message requirement: an unreachable CHUVAR_AGENT_API_URL
 // (wrong port, apiserver not started yet, network partition) must not be
 // reported the same way a bad token is — this is a "the backend isn't there"
 // problem, an operator would look in a different place to fix it.
@@ -439,8 +462,9 @@ func TestBoot_FailsFastOnUnreachableBaseURL(t *testing.T) {
 	unreachable := "http://" + l.Addr().String()
 	l.Close()
 
-	t.Setenv("CHUVAR_API_BASE_URL", unreachable)
-	t.Setenv("CHUVAR_API_TOKEN", "irrelevant-token")
+	t.Setenv("CHUVAR_AGENT_API_URL", unreachable)
+	t.Setenv("CHUVAR_AGENT_TOKEN_FILE", "") // hermetic: an ambient _FILE would otherwise win
+	t.Setenv("CHUVAR_AGENT_TOKEN", "irrelevant-token")
 
 	_, _, err = boot(context.Background())
 	if err == nil {
@@ -454,19 +478,80 @@ func TestBoot_FailsFastOnUnreachableBaseURL(t *testing.T) {
 	}
 }
 
-// TestBoot_FailsFastOnMissingToken proves the CHUVAR_API_TOKEN-absent case —
+// TestBoot_FailsFastOnMissingToken proves the CHUVAR_AGENT_TOKEN-absent case —
 // the config.Secret/config.ErrNotSet path, never reached in the two tests
 // above — also fails loudly rather than proceeding with an empty token.
 func TestBoot_FailsFastOnMissingToken(t *testing.T) {
-	t.Setenv("CHUVAR_API_BASE_URL", "http://127.0.0.1:1") // never dialed; token check runs first
-	os.Unsetenv("CHUVAR_API_TOKEN")
-	os.Unsetenv("CHUVAR_API_TOKEN_FILE")
+	t.Setenv("CHUVAR_AGENT_API_URL", "http://127.0.0.1:1") // never dialed; token check runs first
+	// t.Setenv can't express "unset", and a bare os.Unsetenv here would
+	// leak into every later test in this binary if CHUVAR_AGENT_TOKEN(_FILE)
+	// happened to be set in the ambient environment (found in review, #119
+	// Copilot) — unsetenvRestoring below is this file's own
+	// LookupEnv-then-restore idiom (see newBackend's DATABASE_URL handling
+	// above), factored out since this test needs it for two variables.
+	unsetenvRestoring(t, "CHUVAR_AGENT_TOKEN")
+	unsetenvRestoring(t, "CHUVAR_AGENT_TOKEN_FILE")
 
 	_, _, err := boot(context.Background())
 	if err == nil {
-		t.Fatal("boot() with no CHUVAR_API_TOKEN succeeded, want an error")
+		t.Fatal("boot() with no CHUVAR_AGENT_TOKEN succeeded, want an error")
 	}
-	if !strings.Contains(err.Error(), "CHUVAR_API_TOKEN") {
+	if !strings.Contains(err.Error(), "CHUVAR_AGENT_TOKEN") {
 		t.Errorf("boot() error = %q, want it to name the missing variable", err.Error())
+	}
+}
+
+// TestBoot_TimesOutOnStalledBackend is the regression test for #119 (Codex
+// P2 + Copilot, the round's most important finding): the http.Client boot()
+// constructed used to have no Timeout at all, so a backend that accepts the
+// TCP connection but never writes a response — a stalled proxy, a wedged
+// apiserver — would block the Whoami health check forever. That health
+// check exists specifically to fail fast (CLAUDE.md principle 5: fail
+// closed, loudly, in bounded time); a hang defeats its entire purpose.
+//
+// The handler below accepts the connection and then blocks on an unbuffered
+// channel until this test explicitly releases it in cleanup — simulating a
+// backend that never returns headers, not one that's merely slow. boot()
+// must still return within a bounded wall-clock time governed by
+// apiClientTimeout, not by whatever this handler eventually does.
+func TestBoot_TimesOutOnStalledBackend(t *testing.T) {
+	unblock := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-unblock
+	}))
+	// Registered in this order so t.Cleanup's LIFO order runs
+	// close(unblock) BEFORE srv.Close(): srv.Close() waits for every
+	// in-flight handler to return, and the handler above only returns once
+	// unblock is closed — Close() first would deadlock this test's cleanup
+	// forever.
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(unblock) })
+
+	t.Setenv("CHUVAR_AGENT_API_URL", srv.URL)
+	t.Setenv("CHUVAR_AGENT_TOKEN_FILE", "") // hermetic: an ambient _FILE would otherwise win
+	t.Setenv("CHUVAR_AGENT_TOKEN", "irrelevant-token")
+
+	start := time.Now()
+	_, _, err := boot(context.Background())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("boot() against a stalled backend succeeded, want a timeout error")
+	}
+	// Comfortably above apiClientTimeout so a loaded CI box can't flake
+	// this on scheduling jitter alone, but nowhere near "the handler
+	// eventually responded" territory (the handler here never responds at
+	// all until cleanup) — this bound only passes if the *client's* own
+	// Timeout is what stopped the call.
+	if want := apiClientTimeout + 20*time.Second; elapsed > want {
+		t.Fatalf("boot() against a stalled backend took %v, want well under %v (apiClientTimeout=%v) — did the http.Client.Timeout get dropped?", elapsed, want, apiClientTimeout)
+	}
+	// Lower bound with a small tolerance: net/http's timer can fire slightly
+	// before the nominal deadline due to timer granularity/scheduling, so a
+	// strict `elapsed < apiClientTimeout` would flake. A floor comfortably
+	// below the timeout still proves it was the *client's* Timeout that ended
+	// the call (the handler never responds), not something returning early.
+	if floor := apiClientTimeout - time.Second; elapsed < floor {
+		t.Fatalf("boot() against a stalled backend returned after %v, well before apiClientTimeout (%v) — that shouldn't be possible against a handler that never responds", elapsed, apiClientTimeout)
 	}
 }

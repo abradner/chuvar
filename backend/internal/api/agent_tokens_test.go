@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -188,5 +189,53 @@ func TestCreateAgentToken_WhitespaceOnlyFieldsRejected(t *testing.T) {
 	resp = doJSON(t, http.MethodPost, srv.URL+"/api/agent-tokens", createAgentTokenRequest{Subject: "whitespace-label", Label: "   "})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST /api/agent-tokens with whitespace-only label: status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestCreateAgentToken_SubjectAtMaxLengthAccepted and its sibling below are
+// the boundary tests the max-length branches never had (found in review,
+// Codex P2s on #116): the empty/whitespace cases above exercise the "too
+// short" end of subject/label validation, but maxAgentTokenFieldLength's own
+// rejection branch — len(field) > maxAgentTokenFieldLength — was never
+// exercised at either edge. Exactly at the limit must still succeed (this
+// isn't an off-by-one "must be strictly less than" check); one character
+// over must be rejected.
+func TestCreateAgentToken_SubjectAtMaxLengthAccepted(t *testing.T) {
+	srv, _ := testServer(t)
+
+	subject := strings.Repeat("s", maxAgentTokenFieldLength)
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/agent-tokens", createAgentTokenRequest{Subject: subject, Label: "at-max-subject"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /api/agent-tokens with subject exactly at maxAgentTokenFieldLength (%d): status = %d, want 201", maxAgentTokenFieldLength, resp.StatusCode)
+	}
+}
+
+func TestCreateAgentToken_SubjectOverMaxLengthRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	subject := strings.Repeat("s", maxAgentTokenFieldLength+1)
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/agent-tokens", createAgentTokenRequest{Subject: subject, Label: "over-max-subject"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /api/agent-tokens with subject one over maxAgentTokenFieldLength (%d): status = %d, want 400", maxAgentTokenFieldLength+1, resp.StatusCode)
+	}
+}
+
+func TestCreateAgentToken_LabelAtMaxLengthAccepted(t *testing.T) {
+	srv, _ := testServer(t)
+
+	label := strings.Repeat("l", maxAgentTokenFieldLength)
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/agent-tokens", createAgentTokenRequest{Subject: "at-max-label", Label: label})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /api/agent-tokens with label exactly at maxAgentTokenFieldLength (%d): status = %d, want 201", maxAgentTokenFieldLength, resp.StatusCode)
+	}
+}
+
+func TestCreateAgentToken_LabelOverMaxLengthRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	label := strings.Repeat("l", maxAgentTokenFieldLength+1)
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/agent-tokens", createAgentTokenRequest{Subject: "over-max-label", Label: label})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /api/agent-tokens with label one over maxAgentTokenFieldLength (%d): status = %d, want 400", maxAgentTokenFieldLength+1, resp.StatusCode)
 	}
 }

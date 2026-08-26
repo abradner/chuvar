@@ -2,7 +2,12 @@ package store
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestAgentTokens_CreateAuthenticateTouchRevoke(t *testing.T) {
@@ -180,5 +185,80 @@ func TestAuthenticateAgentToken_RealDBErrorIsReturnedNotMaskedAsUnauthenticated(
 	}
 	if ok {
 		t.Error("AuthenticateAgentToken() reported ok=true despite a query error")
+	}
+}
+
+// TestAuthenticateAgentToken_TouchFailureIsReturnedNotMaskedAsAuthenticated
+// closes a gap the test above doesn't reach: a canceled context fails at
+// LookupActiveAgentToken (the *first* query AuthenticateAgentToken runs), so
+// it never exercises the second failure branch — the one right after it,
+// where LookupActiveAgentToken succeeds but the following TouchAgentToken
+// (the last_used_at side effect) fails. That branch is the actual proof this
+// PR's brief asks for: a failed audit-adjacent write (last_used_at) must
+// surface as a real error and ok=false, never silently authenticate the
+// caller anyway just because the lookup itself worked.
+//
+// The trick: hold an EXCLUSIVE table lock on agent_tokens open in a separate,
+// uncommitted transaction. EXCLUSIVE mode still permits concurrent ACCESS
+// SHARE (plain SELECT, what LookupActiveAgentToken runs) but conflicts with
+// ROW EXCLUSIVE (what TouchAgentToken's UPDATE needs) — so the lookup half
+// succeeds exactly as normal, and only the touch half blocks. A second,
+// single-connection pool with a short lock_timeout set on every connection
+// (via AfterConnect, since MaxConns=1 guarantees Lookup and Touch reuse the
+// same physical connection and its session-level setting) turns that block
+// into a deterministic error within a few hundred milliseconds instead of a
+// hang — no reliance on the test DB role being unprivileged (it's typically
+// a superuser here, which would make a GRANT/REVOKE-based trick silently
+// pass).
+func TestAuthenticateAgentToken_TouchFailureIsReturnedNotMaskedAsAuthenticated(t *testing.T) {
+	s, pool := testStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateAgentToken(ctx, "agent-touch-failure", "device", "touch-failure-plaintext"); err != nil {
+		t.Fatalf("CreateAgentToken() error = %v", err)
+	}
+
+	// Hold the table lock for the rest of this test, released by Rollback
+	// (never committed — nothing here should persist).
+	lockTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("pool.Begin() error = %v", err)
+	}
+	t.Cleanup(func() { _ = lockTx.Rollback(ctx) })
+	if _, err := lockTx.Exec(ctx, "LOCK TABLE agent_tokens IN EXCLUSIVE MODE"); err != nil {
+		t.Fatalf("LOCK TABLE agent_tokens IN EXCLUSIVE MODE: %v", err)
+	}
+
+	url := os.Getenv("DATABASE_URL")
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatalf("pgxpool.ParseConfig() error = %v", err)
+	}
+	cfg.MaxConns = 1
+	// A short lock_timeout, set once per connection (this pool only ever
+	// opens one) rather than per-query: TouchAgentToken's UPDATE is what
+	// this test needs to fail, and lock_timeout is the mechanism that turns
+	// "blocked on the EXCLUSIVE lock above" into a real Postgres error
+	// (55P03) instead of a hang.
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SET lock_timeout = '500ms'")
+		return err
+	}
+	limitedPool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("pgxpool.NewWithConfig() error = %v", err)
+	}
+	t.Cleanup(limitedPool.Close)
+
+	limited := New(limitedPool)
+	_, ok, err := limited.AuthenticateAgentToken(ctx, "touch-failure-plaintext")
+	if err == nil {
+		t.Fatal("AuthenticateAgentToken() with TouchAgentToken blocked past lock_timeout: want a non-nil error, got nil (a failed last_used_at update must not silently authenticate)")
+	}
+	if ok {
+		t.Error("AuthenticateAgentToken() reported ok=true despite TouchAgentToken failing")
+	}
+	if !strings.Contains(err.Error(), "touch agent token") {
+		t.Errorf("AuthenticateAgentToken() error = %q, want it to name the touch step (proves LookupActiveAgentToken itself succeeded)", err.Error())
 	}
 }

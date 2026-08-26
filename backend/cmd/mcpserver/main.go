@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -35,6 +36,20 @@ import (
 // process holding only an agent token can't reach reviewer routes even at
 // the network layer (agent_routes.go's package doc comment).
 const defaultAPIBaseURL = "http://127.0.0.1:8081"
+
+// apiClientTimeout bounds every HTTP call this process makes to the agent
+// API — the boot Whoami health check and every subsequent tool call alike.
+// Found in review (#119, Codex P2 + Copilot): the http.Client this file
+// constructed had no Timeout at all, so a backend that accepts the TCP
+// connection but never returns headers (a stalled proxy, a wedged
+// apiserver) would block boot()'s Whoami call forever — the health check
+// that exists specifically to fail fast could instead hang indefinitely,
+// the opposite of CLAUDE.md principle 5 ("fail closed, loudly" — in
+// bounded time, not eventually). 10s is generous for a loopback call to a
+// healthy backend but still a firm, human-legible bound; there is no
+// per-call override today because no caller in this process needs a
+// different one.
+const apiClientTimeout = 10 * time.Second
 
 func main() {
 	if err := run(); err != nil {
@@ -64,30 +79,41 @@ func run() error {
 // the part of this file with actual decisions in it — is testable without
 // also invoking the blocking stdio transport.
 func boot(ctx context.Context) (*agentclient.Client, string, error) {
-	baseURL := os.Getenv("CHUVAR_API_BASE_URL")
+	// CHUVAR_AGENT_API_URL / CHUVAR_AGENT_TOKEN, not the CHUVAR_API_*
+	// names cmd/approver and cmd/pushbridge use: those name a *reviewer*
+	// credential and listener (:8080); this process's are an *agent*
+	// credential and listener (:8081) — same base names used to mean two
+	// incompatible things depending on which binary read them, which is
+	// exactly the ambiguity #120 asks to close. Renamed with no
+	// back-compat fallback — nothing is deployed yet, and a fallback here
+	// would just reintroduce the collision under a different door.
+	baseURL := os.Getenv("CHUVAR_AGENT_API_URL")
 	if baseURL == "" {
 		baseURL = defaultAPIBaseURL
 	}
 
-	// CHUVAR_API_TOKEN required, fail-fast — same stance as every other
+	// CHUVAR_AGENT_TOKEN required, fail-fast — same stance as every other
 	// required credential in this codebase (AGENTS.md §6, CLAUDE.md principle
 	// 5): a server that silently started with no way to authenticate would
 	// just fail every tool call one at a time instead of explaining the
 	// problem once, up front. config.Secret (not a bare os.Getenv) so
-	// CHUVAR_API_TOKEN_FILE indirection works here too, exactly as it does
-	// for cmd/approver's own CHUVAR_API_TOKEN — see config.requireSecret's
-	// doc comment on why a file beats an environment variable for a
-	// credential (AGENTS.md §3.7).
-	token, err := config.Secret("CHUVAR_API_TOKEN")
+	// CHUVAR_AGENT_TOKEN_FILE indirection works here too, exactly as
+	// CHUVAR_API_TOKEN_FILE does for cmd/approver's own reviewer token —
+	// see config.requireSecret's doc comment on why a file beats an
+	// environment variable for a credential (AGENTS.md §3.7).
+	token, err := config.Secret("CHUVAR_AGENT_TOKEN")
 	if err != nil {
 		if errors.Is(err, config.ErrNotSet) {
-			return nil, "", fmt.Errorf("mcpserver: required environment variable CHUVAR_API_TOKEN is not set (or CHUVAR_API_TOKEN_FILE); " +
+			return nil, "", fmt.Errorf("mcpserver: required environment variable CHUVAR_AGENT_TOKEN is not set (or CHUVAR_AGENT_TOKEN_FILE); " +
 				"mint one via POST /api/agent-tokens as an authenticated reviewer (see internal/api/agent_tokens.go)")
 		}
 		return nil, "", fmt.Errorf("mcpserver: %w", err)
 	}
 
-	client := &agentclient.Client{BaseURL: baseURL, Token: token, HTTP: &http.Client{}}
+	// Timeout: apiClientTimeout, not the zero value — see that constant's
+	// doc comment. Every call this Client ever makes (this boot health
+	// check included) is bounded by it.
+	client := &agentclient.Client{BaseURL: baseURL, Token: token, HTTP: &http.Client{Timeout: apiClientTimeout}}
 
 	// Boot health check replaces db.CheckSchema: mcpserver has no database
 	// connection left to check a schema version against. Calling
@@ -109,7 +135,7 @@ func boot(ctx context.Context) (*agentclient.Client, string, error) {
 	who, err := client.Whoami(ctx)
 	if err != nil {
 		if errors.Is(err, agentclient.ErrUnauthorized) {
-			return nil, "", fmt.Errorf("mcpserver: CHUVAR_API_TOKEN did not authenticate against %s (bad or revoked agent token)", baseURL)
+			return nil, "", fmt.Errorf("mcpserver: CHUVAR_AGENT_TOKEN did not authenticate against %s (bad or revoked agent token)", baseURL)
 		}
 		return nil, "", fmt.Errorf("mcpserver: could not reach the agent API at %s: %w", baseURL, err)
 	}

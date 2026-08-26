@@ -28,7 +28,7 @@ Four roles, so no service holds authority it does not use:
 | `chuvar_broker` | `brokerd` | read `grants`/`grant_scopes`/`capability_grant_identities`/`capability_grant_tokens`; append `audit_log` | anything touching `facts`/`fact_scopes`/`staged_diffs`; read `reviewer_tokens`, `data_keys`, or its own `audit_log` writes back; DDL |
 
 `mcpserver` no longer holds a database credential at all — #82/#86 replaced `DATABASE_URL` with
-a revocable agent-class API token (`CHUVAR_API_TOKEN`, see "Minting and deploying an agent
+a revocable agent-class API token (`CHUVAR_AGENT_TOKEN`, see "Minting and deploying an agent
 token" below). `chuvar_agent` is retained rather than dropped (dropping a cluster-global
 stamped role is its own migration risk; a dormant `NOLOGIN` role that nothing authenticates as
 carries none — AGENTS.md §3.6), but nothing connects as it in a deployment that has adopted the
@@ -191,22 +191,27 @@ Mint (or rotate into) a token whose `subject` matches one of those rows exactly.
 On the agent host, in place of `DATABASE_URL` and `MCP_SUBJECT` (both gone — see below):
 
 ```sh
+install -d -m 700 ~/.config/chuvar
 install -m 600 /dev/null ~/.config/chuvar/mcpserver.token
 printf '%s' '<the plaintext from minting, no trailing newline needed>' > ~/.config/chuvar/mcpserver.token
 
-CHUVAR_API_TOKEN_FILE=~/.config/chuvar/mcpserver.token \
-CHUVAR_API_BASE_URL=http://127.0.0.1:8081 \
+CHUVAR_AGENT_TOKEN_FILE=~/.config/chuvar/mcpserver.token \
+CHUVAR_AGENT_API_URL=http://127.0.0.1:8081 \
 go run ./cmd/mcpserver
 ```
 
-- **`CHUVAR_API_TOKEN_FILE`** at mode `0600` — a file beats an environment variable here for
+`install -d -m 700 ~/.config/chuvar` first: `install -m 600 /dev/null <path>` does not create
+the parent directory, so on a fresh host with no prior `~/.config/chuvar` this snippet used to
+fail on its second line (found in review, #121 Copilot).
+
+- **`CHUVAR_AGENT_TOKEN_FILE`** at mode `0600` — a file beats an environment variable here for
   the same reason as everywhere else in this codebase (AGENTS.md §3.7): an env var is readable
   via `/proc` by anything running as the same user and is inherited by every child process,
   which is precisely the ambient-reach shape this credential exists to avoid. Plain
-  `CHUVAR_API_TOKEN` still works for local development.
-- **`CHUVAR_API_BASE_URL`** (read by `mcpserver`) must name the **agent** listener's origin,
+  `CHUVAR_AGENT_TOKEN` still works for local development.
+- **`CHUVAR_AGENT_API_URL`** (read by `mcpserver`) must name the **agent** listener's origin,
   matching `apiserver`'s own `CHUVAR_AGENT_ADDR` (default `127.0.0.1:8081`, no scheme — it's an
-  `http.Server.Addr`) — so with defaults on both sides, `CHUVAR_API_BASE_URL=http://127.0.0.1:8081`.
+  `http.Server.Addr`) — so with defaults on both sides, `CHUVAR_AGENT_API_URL=http://127.0.0.1:8081`.
   Never the reviewer listener (`HTTP_ADDR`, default `127.0.0.1:8080`). The two are separate
   `http.Server`s specifically so a process holding only an agent token cannot reach reviewer
   routes even at the network layer; pointing `mcpserver` at the reviewer port doesn't escalate
@@ -222,12 +227,14 @@ go run ./cmd/mcpserver
 - **Remove `MCP_SUBJECT`** too — it no longer exists as a concept. Identity now comes from the
   token, resolved server-side on every request; there is nothing left for it to override, and a
   stale value sitting in the environment is a footgun for a future reader, not a no-op.
-- **Naming collision to watch for:** `cmd/approver` and `cmd/pushbridge` also read
-  `CHUVAR_API_TOKEN` — for them it's a *reviewer* token against the reviewer listener, a
-  structurally different credential from the *agent* token `mcpserver` reads under the same
-  variable name. They are never the same value and must never be deployed to the same process
-  environment; the shared name is a coincidence of both binaries using the same
-  fail-fast-required-config helper, not a shared credential.
+- **Naming collision: resolved.** `cmd/approver` and `cmd/pushbridge` still read
+  `CHUVAR_API_TOKEN`/`CHUVAR_API_BASE_URL` for their own *reviewer* credential and listener
+  (`:8080`) — a structurally different credential from `mcpserver`'s. `mcpserver` itself was
+  renamed off those same names to `CHUVAR_AGENT_TOKEN`/`CHUVAR_AGENT_API_URL` (closes #120): the
+  two binaries no longer share a variable name for two incompatible values, so exporting one for
+  one binary can no longer silently break the other. There is deliberately no back-compat
+  fallback to the old mcpserver-side names — nothing was deployed yet, and a fallback would just
+  reintroduce the exact ambiguity this rename removes.
 
 ### Verifying a deployment
 
@@ -235,7 +242,7 @@ On success, `mcpserver` logs `mcpserver: authenticated, serving on stdio` with t
 `subject` and `api_base_url` — confirm the subject matches what you expected before treating
 the deployment as done. A bad or revoked token fails boot immediately with a message naming the
 token as the problem (distinct from the message for an unreachable or misconfigured
-`CHUVAR_API_BASE_URL`), so a startup failure already tells you which of the two to check first.
+`CHUVAR_AGENT_API_URL`), so a startup failure already tells you which of the two to check first.
 
 ### Rotating
 
@@ -255,7 +262,7 @@ curl -X POST http://127.0.0.1:8080/api/agent-tokens \
 Grants are unaffected: `subject` persists across rotation because it lives in its own column,
 independent of `token_hash` — a fresh token minted with the old `subject` picks up exactly the
 grants the old token's holder had, with no re-approval needed. Deploy the new plaintext via
-`CHUVAR_API_TOKEN_FILE` and restart `mcpserver`; the revoked token stops authenticating
+`CHUVAR_AGENT_TOKEN_FILE` and restart `mcpserver`; the revoked token stops authenticating
 immediately.
 
 ### Naming convention (not enforced)
