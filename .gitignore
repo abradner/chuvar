@@ -3,3 +3,7 @@
 # Local credentials — never commit. .env.example documents the shape.
 .env
 *.url
+
+# Session context handoffs (park-context skill) — local working state, and they
+# can carry session detail that shouldn't land in a public repo's history
+.claude/handoffs/
