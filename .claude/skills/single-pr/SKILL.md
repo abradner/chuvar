@@ -52,7 +52,7 @@ not a stub to note and move past.
   their work, never pre-emptively rebase their branch. Irreversible collisions (competing migration
   timestamps) are operator decisions.
 - The PR body states what changed and why, and names anything the diff cannot show: a convention
-  this PR is proposing (see `AGENTS.md` §8 — unstated patterns are proposals), an assumption, a
+  this PR is proposing (see this repo's `AGENTS.md`, working rules — unstated patterns are proposals), an assumption, a
   deliberate omission. The test-plan section states what was actually run, honestly — including
   what could **not** be verified in this environment.
 
@@ -95,7 +95,7 @@ Then report readiness and **stop**. Readiness is not authorization.
 
 ## Phase 6 — Merge
 
-The gate is `AGENTS.md` §8: a live operator go-ahead, with every new session resetting to the manual
+The gate is the merge gate in this repo's `AGENTS.md`: a live operator go-ahead, with every new session resetting to the manual
 gate. A green build, a clean review, and an auto-mode session default are none of them that signal.
 
 On the go-ahead, **first re-run the merge check in `docs/pr-review-machinery.md` §6**: the head you
@@ -111,7 +111,7 @@ git fetch origin main && git checkout -B <branch> origin/main
 
 If the repo builds artifacts from tags, **a merge is not a release, and the go-ahead to merge does
 not authorize one.** Report the merged state and stop. Cutting a tag publishes an artifact, and
-`AGENTS.md` §8 requires explicit approval for each outward-facing action — approval for one is not
+this repo's `AGENTS.md` (destructive and outward-facing actions) requires explicit approval for each outward-facing action — approval for one is not
 approval for the next.
 
 ## Rules of thumb

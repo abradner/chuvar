@@ -58,7 +58,8 @@ Every token spent here is one the handoff can't use. Hard constraints, no except
 
 3. **Ratchet what's durable.** A lesson learned this session dies with the handoff file unless it
    reaches its permanent home. If it is a one-line append and the tree is otherwise clean, write
-   it straight into `AGENTS.md` §9 (or §6.1 for environment gotchas) now. Otherwise record it in
+   it straight into `AGENTS.md` now — §4.5 Known Environment Gotchas for environment gotchas,
+   otherwise the section of this repo's `AGENTS.md` that owns the topic. Otherwise record it in
    the handoff's **Ratchet** section, which the resume skill is required to discharge. Discovered
    work goes to the external tracker named in `AGENTS.md`, not into the handoff — a handoff is not
    a tracker, and it is deleted when the work lands.
@@ -104,7 +105,8 @@ What burned us this session: approaches that failed and why, commands that misle
 reported success without doing the thing. Saves the next session from re-running them.
 
 ## Ratchet
-Durable items that must land before this work merges: `AGENTS.md` §9 / §6.1 entries, a §4
+Durable items that must land before this work merges: `AGENTS.md` §4.5 Known Environment Gotchas
+entries (or a lesson for the section that owns its topic), a §3 Critical Architectural Rules
 convention this work proposed, tracker items not yet filed. Empty is fine; unrecorded is not.
 
 ## Open questions for the operator

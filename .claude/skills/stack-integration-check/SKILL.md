@@ -146,7 +146,7 @@ a clean state — **in its own worktree, never by moving the checkout you are wo
 in.** This check runs while branches are live and often mid-flow from another skill;
 switching the shared checkout to a combined scratch branch leaves the next phase
 submitting or mutating the combination instead of the candidate it meant to. The
-start point is explicit and remote (`AGENTS.md` §8, Git hygiene in shared checkouts):
+start point is explicit and remote (this repo's `AGENTS.md`, git hygiene in shared checkouts):
 
 ```bash
 git fetch origin main
@@ -155,7 +155,7 @@ cd ../integration-<date>
 git merge --no-ff <branch-1> <branch-2> ...   # resolve conflicts by union, reading both sides
 ```
 
-Then the repo's real validation — the exact commands in `AGENTS.md` §6, including
+Then the repo's real validation — the exact commands in `AGENTS.md` §4 Development Essentials, including
 any version-manager prefix a fresh shell needs, plus any drift check the repo
 defines for generated code. Fresh database/services if the suite uses them.
 
@@ -184,7 +184,7 @@ Where one rule is expressed in two languages or two layers, verify they still
 agree, and that any claimed separation actually holds. If a code-side check and a
 query-side filter are both said to enforce the same property, either prove the two
 can never see the same inputs (and write down *why*, in code) or apply the
-deletion test (`AGENTS.md` §8, Layered checks): enforcement exists once, and any
+deletion test (`AGENTS.md` §6 Coding Standards & Workflow Rules, Review discipline): enforcement exists once, and any
 second copy must change politeness only, never possibility.
 
 ## Read the artifact, not the report

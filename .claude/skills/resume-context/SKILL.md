@@ -52,7 +52,8 @@ discovers an hour later that the tree changed, the branch moved, or the claim wa
    makes sense, say so and stop rather than improvising a substitute.
 
 5. **Discharge the Ratchet.** The handoff's **Ratchet** section names durable items — `AGENTS.md`
-   §9 / §6.1 entries, a §4 convention this work proposed, tracker items — that were parked rather
+   §4.5 Known Environment Gotchas entries (or a lesson for the section that owns its topic), a
+   §3 Critical Architectural Rules convention this work proposed, tracker items — that were parked rather
    than filed. Land them, or carry them forward explicitly into the next handoff. A ratchet item
    silently dropped at resume is the failure mode the section exists to prevent: it means the
    lesson was learned, written down twice, and lost anyway.
@@ -62,8 +63,8 @@ discovers an hour later that the tree changed, the branch moved, or the claim wa
    things stand may differ from the handoff's, and this is the cheapest moment to find that out.
 
 7. **Retire the handoff** once the work it describes has landed — but **ask before deleting it.**
-   You did not create this file; a previous session did, and `AGENTS.md` §8 requires explicit
-   approval for deleting files you didn't just create, every time. The work landing is not that
+   You did not create this file; a previous session did, and this repo's `AGENTS.md` (destructive and outward-facing
+   actions) requires explicit approval for deleting files you didn't just create, every time. The work landing is not that
    approval. Say the work has landed, name the file, and propose removing it.
 
    It does need to go: handoffs are gitignored local state, so nothing else will ever clean them
