@@ -146,7 +146,7 @@ a clean state — **in its own worktree, never by moving the checkout you are wo
 in.** This check runs while branches are live and often mid-flow from another skill;
 switching the shared checkout to a combined scratch branch leaves the next phase
 submitting or mutating the combination instead of the candidate it meant to. The
-start point is explicit and remote (this repo's `AGENTS.md`, git hygiene in shared checkouts):
+start point is explicit and remote (git hygiene in shared checkouts — a rule the shared template carries; this repo's `AGENTS.md` does not state it):
 
 ```bash
 git fetch origin main

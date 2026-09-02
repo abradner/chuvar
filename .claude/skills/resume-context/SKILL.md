@@ -63,9 +63,9 @@ discovers an hour later that the tree changed, the branch moved, or the claim wa
    things stand may differ from the handoff's, and this is the cheapest moment to find that out.
 
 7. **Retire the handoff** once the work it describes has landed — but **ask before deleting it.**
-   You did not create this file; a previous session did, and this repo's `AGENTS.md` (destructive and outward-facing
-   actions) requires explicit approval for deleting files you didn't just create, every time. The work landing is not that
-   approval. Say the work has landed, name the file, and propose removing it.
+   You did not create this file; a previous session did, and deleting a file you didn't just create needs explicit approval,
+   every time (a rule the shared template carries; this repo's `AGENTS.md` does not state it). The
+   work landing is not that approval. Say the work has landed, name the file, and propose removing it.
 
    It does need to go: handoffs are gitignored local state, so nothing else will ever clean them
    up, and a stale one is a trap for the next session — it has no way to know it is describing

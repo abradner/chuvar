@@ -282,11 +282,13 @@ was authorized and the delta was deletions-only, so the outcome was fine — but
 review that had not happened, and the only reason anyone noticed was a background job that had
 already been written off as superseded.
 
-The merge gate itself lives in this repo's `AGENTS.md` — **read it there before merging anything.** That file
-is canonical for the gate, exactly as this one is canonical for the mechanics above. The one-line
+The merge gate itself is a rule the shared template carries in its `AGENTS.md`; this repo's
+`AGENTS.md` does not state it, and `batch-review`'s "Merge policy" line is the nearest text here —
+**read that before merging anything.** The template's `AGENTS.md` is canonical for the gate, exactly
+as this file is canonical for the mechanics above. The one-line
 orientation is that the baseline is a live operator go-ahead and that agents must not propose loosening it; every
 qualification on that — what a conditional grant is, what a session carve-out covers, what does not
-count — is in that file and is deliberately not duplicated here.
+count — belongs with the gate and is deliberately not duplicated here.
 
 ## 7. Mechanical gotchas
 
