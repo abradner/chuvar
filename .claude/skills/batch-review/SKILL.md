@@ -570,10 +570,25 @@ branch out from under a not-yet-retargeted child closes the child. Observed
 here on #5→#6 — `gh pr merge 5 --delete-branch` closed #6 because
 `pr/05-store` vanished before GitHub retargeted it.
 
-**If a child does get closed:** push the branch back from its last known SHA,
-reopen (`gh api -X PATCH repos/{owner}/{repo}/pulls/<n> -f state=open`),
-retarget to main, then delete. No work is lost — commits stay reachable from
-the SHA.
+**If a child does get closed:** push the deleted **base** branch back *first*
+— its last SHA is the just-merged parent's head, which the parent PR still
+records — then reopen, retarget to main, then delete:
+
+```bash
+gh api -X POST repos/{owner}/{repo}/git/refs -f ref=refs/heads/BASE_BRANCH -f sha="$(gh pr view PARENT --json headRefOid -q .headRefOid)"
+gh api -X PATCH repos/{owner}/{repo}/pulls/CHILD -f state=open
+gh api -X PATCH repos/{owner}/{repo}/pulls/CHILD -f base=main
+gh api -X DELETE repos/{owner}/{repo}/git/refs/heads/BASE_BRANCH
+```
+
+The push-back is the load-bearing step: while the base branch is gone,
+`gh pr reopen` and `gh pr edit --base` both refuse the closed PR — this repo's
+#40 (2026-08-06) hit exactly that, as did a sibling repo twice in one night,
+and all three went to fresh PRs. With the base restored the reopen works: #6 was reopened, retargeted and
+merged five minutes after the race, thread trail intact. If the base's last
+SHA is not recoverable, open a *fresh* PR from the still-live head branch
+with `Closes #<n>` in its body (that is what #41 was), and budget a new
+review round — the thread trail does not come with it.
 
 Merge rapidly and consecutively. The followup merges last, squash-and-merge.
 Recommend an order for independent PRs; the choice is the operator's.
@@ -713,7 +728,9 @@ followup degrades independently of the interstitials.
   restacks in the stacked flavour are the exception — verified, threads
   re-anchor.
 - Merge bottom-up. Retarget each child before deleting its parent's branch
-  (manual flavour; the platform sequences the stacked train).
+  (manual flavour; the platform sequences the stacked train). A child closed
+  by that race: restore the base branch *before* reopening — reopen refuses
+  while it is gone — or open a fresh PR from the live head.
 - Phase 7 needs an explicit, per-batch go-ahead. Never self-initiate.
 - Only the followup's CI gates the batch. Unexplained red is a real signal —
   and a *skipped* job is not a passing one.
@@ -789,3 +806,14 @@ The reviewer also *cleared* the batch's security claims by tracing them
 is what made the readiness report worth trusting. Same batch, overlap sweep:
 one neighbouring PR shared one file with the stack; a comment telling it to
 adapt after the train cost one API call and prevented a surprise conflict.
+
+**Hazard-patched, not re-synced (2026-09-02, against the shared template at
+`0e3a4e80`).** This file is a deliberate fork of the template's `batch-review`. The only procedural change
+in that patch is the closed-child recovery above (plus its Rules-of-thumb
+restatement and this note): the template currently says such a PR cannot be
+reopened at all, on two observations (#40 here, and a sibling repo's pair)
+where the reopen was attempted with the base branch still deleted.
+#6 in this repo was reopened and merged after the base was pushed back
+first, so the restore step is kept and named as the reason it works, and the
+fresh-PR path is the fallback. Everything else the template has changed since
+the fork point is not here; the divergence is intentional and evidence-bearing.
