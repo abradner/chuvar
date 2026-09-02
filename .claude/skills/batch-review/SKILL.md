@@ -578,13 +578,13 @@ records — then reopen, retarget to main, then delete:
 gh api -X POST repos/{owner}/{repo}/git/refs -f ref=refs/heads/BASE_BRANCH -f sha="$(gh pr view PARENT --json headRefOid -q .headRefOid)"
 gh api -X PATCH repos/{owner}/{repo}/pulls/CHILD -f state=open
 gh api -X PATCH repos/{owner}/{repo}/pulls/CHILD -f base=main
-git push origin --delete BASE_BRANCH
+gh api -X DELETE repos/{owner}/{repo}/git/refs/heads/BASE_BRANCH
 ```
 
 The push-back is the load-bearing step: while the base branch is gone,
 `gh pr reopen` and `gh pr edit --base` both refuse the closed PR — this repo's
-#40 (2026-08-06) and atmosphere's #56/#57 hit exactly that and went to fresh
-PRs. With the base restored the reopen works: #6 was reopened, retargeted and
+#40 (2026-08-06) hit exactly that, as did a sibling repo twice in one night,
+and all three went to fresh PRs. With the base restored the reopen works: #6 was reopened, retargeted and
 merged five minutes after the race, thread trail intact. If the base's last
 SHA is not recoverable, open a *fresh* PR from the still-live head branch
 with `Closes #<n>` in its body (that is what #41 was), and budget a new
@@ -807,13 +807,13 @@ is what made the readiness report worth trusting. Same batch, overlap sweep:
 one neighbouring PR shared one file with the stack; a comment telling it to
 adapt after the train cost one API call and prevented a surprise conflict.
 
-**Hazard-patched, not re-synced (2026-09-02, against keel `0e3a4e80`).** This
-file is a deliberate fork of keel's `batch-review`. The only procedural change
+**Hazard-patched, not re-synced (2026-09-02, against the shared template at
+`0e3a4e80`).** This file is a deliberate fork of the template's `batch-review`. The only procedural change
 in that patch is the closed-child recovery above (plus its Rules-of-thumb
-restatement and this note): keel currently says such a PR
-cannot be reopened at all, on two observations (#40 here, atmosphere
-#56/#57) where the reopen was attempted with the base branch still deleted.
+restatement and this note): the template currently says such a PR cannot be
+reopened at all, on two observations (#40 here, and a sibling repo's pair)
+where the reopen was attempted with the base branch still deleted.
 #6 in this repo was reopened and merged after the base was pushed back
 first, so the restore step is kept and named as the reason it works, and the
-fresh-PR path is the fallback. Everything else keel has changed since the
-fork point is not here; the divergence is intentional and evidence-bearing.
+fresh-PR path is the fallback. Everything else the template has changed since
+the fork point is not here; the divergence is intentional and evidence-bearing.
