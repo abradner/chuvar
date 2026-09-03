@@ -57,7 +57,14 @@ digger reports CLOSES / REPEATS / NEW explicitly.
 1. **Ledger first.** From `reverified`: mark each open item fixed (with
    `fixed_by`), partially fixed, invalid, or still open. Anything the
    re-verify pass flips is more valuable than any new finding — it is what
-   makes the doc a followup artefact rather than a snapshot.
+   makes the doc a followup artefact rather than a snapshot. A result of
+   `unverified` means the *reverify* agent (Phase 2, not the aggregate Verify
+   pass in Phase 4) either omitted that id from its response, or its whole
+   call for that chunk came back empty (the structured-output retry cap) —
+   either way it is not a verdict of "still open"; carry the item's prior
+   ledger status forward unchanged rather than overwriting it (the extractor
+   re-pulls items regardless of prior status, so an unverified id can
+   already be `fixed` or `invalid` there).
 2. New tranches: same shape as cold start (findings with verdicts, completeness
    rows, slice health). Add their findings and gaps to the ledger as open.
 3. Trajectory: append a row per pattern to the trajectory table (direction +

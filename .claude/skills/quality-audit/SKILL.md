@@ -49,7 +49,8 @@ Rules of thumb that held:
   list written for that tranche (new principals, new cookies, new channels,
   new JSON writes, new scripts that touch prod data).
 - One **completeness assessor** per tranche (Sonnet): reads PR bodies via
-  `gh pr view`, tries Notion, consumes the diggers' `loose_ends`, scores
+  `gh pr view`, tries the configured tracker (`args.tracker`, or this repo's
+  own `AGENTS.md` if unset), consumes the diggers' `loose_ends`, scores
   each feature % complete with ticket-ready missing pieces, and says whether
   each deferral has a real ticket or just a prose mention.
 - Three **coherence** lenses on the session model over all tranches:
@@ -73,8 +74,9 @@ Expect 30–45 agents, ~3–6M subagent tokens, 20–35 min. Known failure modes
   thinner, results). Treat run 1 as primary and splice the repaired slice in.
 - **Session limit** → every agent dies at launch with 0 tokens. Just relaunch
   with `resumeFromRunId` after the reset.
-- Interactively-authenticated MCP (Notion) may be unreachable from agents;
-  the assessor is told to say so and fall back to PR bodies.
+- If the configured tracker is behind an interactively-authenticated MCP
+  connection (Notion and similar are common examples), it may be unreachable
+  from agents; the assessor is told to say so and fall back to PR bodies.
 
 ## 4. Synthesise (main thread — this is the expensive-model work)
 
