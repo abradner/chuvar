@@ -7,7 +7,7 @@ require (
 	github.com/awnumar/memguard v0.23.0
 	github.com/go-webauthn/webauthn v0.13.4
 	github.com/golang-migrate/migrate/v4 v4.19.1
-	github.com/jackc/pgerrcode v0.0.0-20220416144525-469b46aa5efa
+	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/pgvector/pgvector-go v0.4.0
