@@ -14,11 +14,16 @@ mkdir -p "$out"
 # hash anywhere") — an earlier version of this fix used `(^|[0-9a-f]{4,40} )`, which still let
 # the hex-and-space branch match mid-subject: "abc1234 feat: mention deadbeef renovate cache"
 # has no bot-bump hash of its own, but "deadbeef " looks like one wherever it appears.
-bots='^([0-9a-f]{4,40} )?((chore|fix)\(deps(-dev)?\)|dependabot|renovate)'  # optional hash prefix from --oneline, then the true line start
+# dependabot/renovate need a delimiter after them too, not just a start anchor before: without
+# one, a real untyped commit like "Renovated the audit dashboard" matches "renovate" as a plain
+# prefix (case-insensitive) and is silently misclassified as a bot bump. Bot commits in this
+# fleet always read "dependabot: ..." / "renovate: ...", so requiring ':' or end-of-line covers
+# every real bot commit while excluding a real subject that merely starts with the same letters.
+bots='^([0-9a-f]{4,40} )?((chore|fix)\(deps(-dev)?\)|(dependabot|renovate)(:|$))'  # optional hash prefix from --oneline, then the true line start
 # `|| true` on the pipeline as a whole would mask a real git-log failure (bad range) behind
 # grep's expected "no bot-free lines" exit 1 — under pipefail either failure looks the same.
 # Check git log on its own first; only grep's no-match is tolerated.
-if ! log_out=$(git log --oneline --no-merges "$range"); then
+if ! log_out=$(git log --oneline --no-decorate --no-merges "$range"); then
   echo "fatal: git log failed for range '$range' — check base/target refs" >&2
   exit 1
 fi
@@ -32,8 +37,8 @@ printf '%s' "$log_out" | grep -viE "$bots" > "$out/commits-$label.txt" || {
   [ "$rc" -eq 1 ] || { echo "fatal: grep failed classifying commits for range '$range' (exit $rc)" >&2; exit 1; }
 }
 
-total=$(git log --oneline "$range" | wc -l | tr -d ' ')
-merges=$(git log --oneline --merges "$range" | wc -l | tr -d ' ')
+total=$(git log --oneline --no-decorate "$range" | wc -l | tr -d ' ')
+merges=$(git log --oneline --no-decorate --merges "$range" | wc -l | tr -d ' ')
 real=$(wc -l < "$out/commits-$label.txt" | tr -d ' ')
 echo "== RANGE $range ($label) =="
 echo "commits: $total  merges: $merges  bot-bumps: $((total - merges - real))  audited: $real"

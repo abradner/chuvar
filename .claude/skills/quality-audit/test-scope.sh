@@ -43,6 +43,10 @@ cases_keep=(
   # A hex-looking token appearing mid-subject is not this commit's own hash — the
   # hash-prefix branch must anchor to the true line start, not match anywhere.
   "abc1234 feat: mention deadbeef renovate cache fix"
+  # An untyped real commit that merely starts with the same letters as a bot name — this
+  # fleet's actual bot commits all read "dependabot: ..." / "renovate: ...", so a delimiter
+  # is required after the bot-name branch too, not just the start-anchor before it.
+  "abc1234 Renovated the audit dashboard"
 )
 
 for line in "${cases_exclude[@]}"; do
@@ -77,16 +81,43 @@ trap 'rm -rf "$fixture_repo" "$fixture_scope"' EXIT
 fixture_repo=$(mktemp -d "${TMPDIR:-/tmp}/quality-audit-test.XXXXXX")
 fixture_scope=$(mktemp -d "${TMPDIR:-/tmp}/quality-audit-test.XXXXXX")
 git -C "$fixture_repo" init -q -b main
+# log.decorate is unset by default, but plenty of real ~/.gitconfigs turn it on for nicer
+# interactive log output — and `git log --oneline` picks it up too. Set it here so this
+# fixture exercises the case where decoration text ("(HEAD -> main)") lands between the
+# hash and the subject on the very commit HEAD points to, the exact shape that would slip
+# past the bots regex's hash-prefix anchor if `--no-decorate` weren't forced below.
+git -C "$fixture_repo" config log.decorate short
 git -C "$fixture_repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m 'base'
 git -C "$fixture_repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m 'feat(auth): add login'
 git -C "$fixture_repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m 'chore: cleanup'
 git -C "$fixture_repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m 'random text no colon'
-# Same reasoning: an empty FEATURE THEMES section (the exact regression this exists to
-# catch) would make grep's no-match abort the script under pipefail, before the diagnostic
-# comparison below ever runs.
-themes=$(cd "$fixture_repo" && bash "$here/.claude/skills/quality-audit/scope.sh" HEAD~3 HEAD fixture "$fixture_scope" \
+git -C "$fixture_repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m 'chore(deps): bump some-dep'
+# scope.sh's own exit status must be checked on its own, same reasoning as scope.sh's two
+# internal git-log/grep checks: a `|| true` on the whole pipeline would swallow a genuine
+# scope.sh crash (bad range, missing git) as silently-empty $themes, and the FEATURE THEMES
+# comparison below would then report a misleading "classification wrong" instead of the
+# real fatal error.
+if ! scope_out=$(cd "$fixture_repo" && bash "$here/.claude/skills/quality-audit/scope.sh" HEAD~4 HEAD fixture "$fixture_scope"); then
+  echo "FAIL: scope.sh itself failed against the fixture repo (see its fatal error above)"
+  fail=1
+  scope_out=""
+fi
+# Same reasoning as scope.sh's own bots-filter step: an empty FEATURE THEMES section (the
+# exact regression this whole fixture exists to catch) would make grep's no-match abort the
+# script under pipefail, before the diagnostic comparison below ever runs — tolerate only
+# that, now that a genuine scope.sh failure is caught above instead of hiding behind it.
+themes=$(printf '%s' "$scope_out" \
   | sed -n '/FEATURE THEMES/,/REVIEW-FEEDBACK/p' | grep -E '^ *[0-9]+ ' | sed -E 's/^ *[0-9]+ //' || true)
 expected=$(printf 'auth\nchore\n(untyped)')
+# The bot-bump commit above is HEAD when scope.sh runs, so with decoration on it's the one
+# commit whose --oneline line would carry "(HEAD -> main)" if --no-decorate were missing.
+# If the exclusion breaks under decoration, this commit leaks into the audited file and
+# gets classified as "deps" — failing the FEATURE THEMES comparison below on its own, but
+# assert on the file directly too for a clearer failure message.
+if grep -q 'bump some-dep' "$fixture_scope/commits-fixture.txt"; then
+  echo "FAIL: bot-bump commit survived the filter under log.decorate=short (decoration text broke the hash-prefix anchor)"
+  fail=1
+fi
 if [ "$(echo "$themes" | sort)" != "$(echo "$expected" | sort)" ]; then
   echo "FAIL: FEATURE THEMES classification wrong; got:"
   echo "$themes" | sed 's/^/  /'

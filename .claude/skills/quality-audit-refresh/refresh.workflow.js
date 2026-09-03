@@ -37,7 +37,7 @@ const FINDINGS_SCHEMA = { type: 'object', required: ['findings', 'slice_health',
 const VERDICTS_SCHEMA = { type: 'object', required: ['verdicts'], properties: { verdicts: { type: 'array', items: { type: 'object', required: ['index', 'verdict', 'note'],
   properties: { index: { type: 'integer' }, verdict: { enum: ['confirmed', 'refuted', 'fixed_later'] }, note: { type: 'string' } } } } } }
 const REVERIFY_SCHEMA = { type: 'object', required: ['results'], properties: { results: { type: 'array', items: { type: 'object', required: ['id', 'status', 'evidence'],
-  properties: { id: { type: 'integer' }, status: { enum: ['open', 'fixed', 'partially_fixed', 'invalid', 'unverified'] }, evidence: { type: 'string' }, fixed_by: { type: 'string' } } } } } }
+  properties: { id: { type: 'integer' }, status: { enum: ['open', 'fixed', 'partially_fixed', 'invalid'] }, evidence: { type: 'string' }, fixed_by: { type: 'string' } } } } } }
 const COMPLETENESS_SCHEMA = { type: 'object', required: ['features', 'tranche_verdict'], properties: {
   features: { type: 'array', items: { type: 'object', required: ['feature', 'prs', 'promised', 'shipped', 'pct_complete', 'missing', 'confidence'],
     properties: { feature: { type: 'string' }, prs: { type: 'array', items: { type: 'integer' } }, promised: { type: 'string' }, shipped: { type: 'string' },
