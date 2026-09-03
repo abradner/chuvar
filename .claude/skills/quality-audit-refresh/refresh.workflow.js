@@ -37,7 +37,7 @@ const FINDINGS_SCHEMA = { type: 'object', required: ['findings', 'slice_health',
 const VERDICTS_SCHEMA = { type: 'object', required: ['verdicts'], properties: { verdicts: { type: 'array', items: { type: 'object', required: ['index', 'verdict', 'note'],
   properties: { index: { type: 'integer' }, verdict: { enum: ['confirmed', 'refuted', 'fixed_later'] }, note: { type: 'string' } } } } } }
 const REVERIFY_SCHEMA = { type: 'object', required: ['results'], properties: { results: { type: 'array', items: { type: 'object', required: ['id', 'status', 'evidence'],
-  properties: { id: { type: 'integer' }, status: { enum: ['open', 'fixed', 'partially_fixed', 'invalid'] }, evidence: { type: 'string' }, fixed_by: { type: 'string' } } } } } }
+  properties: { id: { type: 'integer' }, status: { enum: ['open', 'fixed', 'partially_fixed', 'invalid', 'unverified'] }, evidence: { type: 'string' }, fixed_by: { type: 'string' } } } } } }
 const COMPLETENESS_SCHEMA = { type: 'object', required: ['features', 'tranche_verdict'], properties: {
   features: { type: 'array', items: { type: 'object', required: ['feature', 'prs', 'promised', 'shipped', 'pct_complete', 'missing', 'confidence'],
     properties: { feature: { type: 'string' }, prs: { type: 'array', items: { type: 'integer' } }, promised: { type: 'string' }, shipped: { type: 'string' },
@@ -104,11 +104,22 @@ const [trancheResults, reverified] = await Promise.all([
       // than ids in [a, b], silently dropping items) or over-report (an id outside [a, b],
       // or the same id twice, which would misattribute or double-count downstream). Keep
       // only the first in-range result per id, fill every id the response never covered.
+      // An omission is 'unverified', not 'open': extract-open-items.py re-extracts items
+      // regardless of the prior ledger's status, so an id this pass never confirms could
+      // already be 'fixed'/'invalid' there — defaulting it to 'open' would let a dropped
+      // result silently reopen a closed ledger entry. Synthesis carries the prior state
+      // forward for 'unverified' instead of overwriting it (see SKILL.md).
+      // `r` itself can also be null — the structured-output retry cap gave up on this whole
+      // chunk (see SKILL.md's known failure modes) — a different failure than a well-formed
+      // response quietly omitting one id, so the fallback evidence says which one happened.
       const inRange = (r ? r.results : []).filter(x => x.id >= a && x.id <= b)
       const byId = new Map()
       for (const x of inRange) if (!byId.has(x.id)) byId.set(x.id, x)
+      const fallbackEvidence = r
+        ? 'agent omitted this id from its response — treated as unverified, not silently dropped'
+        : 'agent call for this chunk returned no response (schema-retry cap) — treated as unverified, not silently dropped'
       for (let id = a; id <= b; id++) {
-        if (!byId.has(id)) byId.set(id, { id, status: 'open', evidence: 'agent omitted this id from its response — treated as unconfirmed, not silently dropped' })
+        if (!byId.has(id)) byId.set(id, { id, status: 'unverified', evidence: fallbackEvidence })
       }
       return { results: [...byId.values()] }
     })
