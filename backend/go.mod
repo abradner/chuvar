@@ -1,6 +1,6 @@
 module github.com/abradner/chuvar/backend
 
-go 1.26
+go 1.26.0
 
 require (
 	filippo.io/age v1.2.1
@@ -14,7 +14,7 @@ require (
 	github.com/pquerna/otp v1.5.0
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/crypto v0.52.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.45.0
 )
 
