@@ -109,7 +109,7 @@ jobs:
       # sqlc) — pinning versions again here would just drift from it.
       # `mise exec --` on each step below is deliberate parity with the local
       # commands in AGENTS.md, so a step can be copy-pasted either way.
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@v5
         with:
           install: true
           cache: true
@@ -171,7 +171,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@v5
         with:
           install: true
           cache: true
