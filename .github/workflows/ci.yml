@@ -33,7 +33,7 @@ jobs:
   # doesn't pay for Postgres + the Go suite, and vice versa. Shared files
   # (this workflow, mise.toml, docker-compose.yml) run everything.
   changes:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 5
     permissions:
       contents: read
@@ -68,7 +68,7 @@ jobs:
               - '.github/workflows/ci.yml'
 
   backend:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 15
     needs: changes
     if: needs.changes.outputs.backend == 'true'
@@ -160,7 +160,7 @@ jobs:
           fi
 
   frontend:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 10
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
